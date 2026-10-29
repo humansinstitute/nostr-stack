@@ -11,6 +11,19 @@ import {
 describe('OpenAPI docs', () => {
   const app = createApp();
 
+  test('documents optional atomic person enrollment on the existing group-member POST', async () => {
+    const body = await (await app.request('/openapi.json')).json();
+    const route = body.paths['/api/v4/flightdeck-pg/workspaces/{workspaceId}/groups/{groupId}/members'].post;
+    expect(route.security).toEqual([{ nip98: [] }]);
+    const [enrollment, legacy] = route.requestBody.content['application/json'].schema.oneOf;
+    expect(enrollment.required).toEqual(['member_npub', 'ensure_workspace_member', 'kind']);
+    expect(enrollment.properties.kind.enum).toEqual(['human', 'agent']);
+    expect(enrollment.properties.ensure_workspace_member.const).toBe(true);
+    expect(legacy.properties.ensure_workspace_member.const).toBe(false);
+    expect(route.responses['409'].description).toContain('actor_kind_conflict');
+    expect(route.description).toContain('workspace_member_not_found');
+  });
+
   test('GET /openapi.json exposes the API spec', async () => {
     const res = await app.request('/openapi.json');
     expect(res.status).toBe(200);

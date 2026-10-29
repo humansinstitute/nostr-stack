@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomUUID, randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -392,6 +392,187 @@ afterAll(async () => {
 });
 
 describe('Flight Deck PG API routes', () => {
+  test('atomic person enrollment creates member/default group, preserves duplicate attribution and publishes safe invalidation', async () => {
+    const { workspaceId, ownerId, groupId } = await seedWorkspace(`enroll-${randomUUID()}`);
+    const path = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/groups/${groupId}/members`;
+    for (const kind of ['human', 'agent']) {
+      const member_npub = nip19.npubEncode(getPublicKey(randomBytes(32)));
+      const body = { member_npub, ensure_workspace_member: true, kind };
+      const created = await requestJson(path, 'POST', ownerSecret, body);
+      expect(created.res.status).toBe(201);
+      expect(created.json.members.find((a: any) => a.npub === member_npub).kind).toBe(kind);
+      const actorId = created.json.membership.actor_id;
+      const [stored] = await sql`SELECT a.kind,m.role,m.created_by_actor_id FROM flightdeck_pg_actors a JOIN flightdeck_pg_workspace_memberships m ON m.actor_id=a.id WHERE a.id=${actorId} AND m.workspace_id=${workspaceId}`;
+      expect(stored).toMatchObject({ kind, role: 'member', created_by_actor_id: ownerId });
+      const groups = await sql`SELECT g.name FROM flightdeck_pg_group_memberships gm JOIN flightdeck_pg_groups g ON g.id=gm.group_id WHERE gm.workspace_id=${workspaceId} AND gm.actor_id=${actorId}`;
+      expect(groups.map(g => g.name).sort()).toEqual(['External Viewers', 'Workspace']);
+      const duplicate = await requestJson(path, 'POST', ownerSecret, body);
+      expect(duplicate.res.status).toBe(201);
+      expect(duplicate.json.membership).toEqual(created.json.membership);
+      const events = await sql`SELECT * FROM flightdeck_pg_outbox_events WHERE workspace_id=${workspaceId} AND entity_id=${actorId}`;
+      expect(events.length).toBe(1);
+      expect(events[0]).toMatchObject({ event_type: 'workspace.membership.changed', payload: { actor_id: actorId } });
+      const audits = await sql`SELECT action FROM flightdeck_pg_audit_events WHERE workspace_id=${workspaceId} AND resource_id=${actorId}`;
+      expect(audits.map(a => a.action)).toEqual(['workspace_member.create']);
+      // Workspace readers see the safe refresh; callers without workspace-wide reads do not.
+      const eventPath = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/events`;
+      const visible = await requestJson(eventPath, 'GET', ownerSecret);
+      expect(visible.res.status).toBe(200);
+      const refresh = visible.json.events.find((e: any) => e.id === events[0].id);
+      expect(refresh).toBeDefined();
+      expect(refresh.entity_type).toBe('actor');
+      expect(refresh.refetch.route).toBe(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/members`);
+      const hidden = await requestJson(eventPath, 'GET', groupMemberSecret);
+      expect(hidden.res.status).toBe(200);
+      expect(hidden.json.events.some((e: any) => e.id === events[0].id)).toBe(false);
+    }
+  });
+
+  test('atomic person enrollment preserves all existing roles, human/agent kinds and profiles', async () => {
+    const { workspaceId, ownerId, groupId } = await seedWorkspace(`enroll-preserve-${randomUUID()}`);
+    const path = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/groups/${groupId}/members`;
+    for (const role of ['owner', 'admin', 'member', 'guest', 'agent', 'app']) {
+      for (const kind of ['human', 'agent']) {
+        const npub = nip19.npubEncode(getPublicKey(randomBytes(32)));
+        const [actor] = await sql`INSERT INTO flightdeck_pg_actors(npub,kind,display_name) VALUES(${npub},${kind},'Preserve Me') RETURNING *`;
+        await sql`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role,created_by_actor_id) VALUES(${workspaceId},${actor.id},${role},${ownerId})`;
+        const [before] = await sql`SELECT * FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspaceId} AND actor_id=${actor.id}`;
+        const added = await requestJson(path, 'POST', ownerSecret, { member_npub: npub, ensure_workspace_member: true, kind: kind === 'human' ? 'agent' : 'human' });
+        expect(added.res.status).toBe(201);
+        const [after] = await sql`SELECT * FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspaceId} AND actor_id=${actor.id}`;
+        const [afterActor] = await sql`SELECT * FROM flightdeck_pg_actors WHERE id=${actor.id}`;
+        expect(after).toEqual(before);
+        expect(afterActor).toEqual(actor);
+      }
+    }
+    const ownerAdd = await requestJson(path, 'POST', ownerSecret, { member_npub: OWNER_NPUB, ensure_workspace_member: true, kind: 'agent' });
+    expect(ownerAdd.res.status).toBe(201);
+    const [owner] = await sql`SELECT role FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspaceId} AND actor_id=${ownerId}`;
+    expect(owner.role).toBe('owner');
+  });
+
+  test('atomic person enrollment is idempotent under simultaneous requests with conflicting kinds', async () => {
+    const { workspaceId, groupId } = await seedWorkspace(`enroll-race-${randomUUID()}`);
+    const path = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/groups/${groupId}/members`;
+    const member_npub = nip19.npubEncode(getPublicKey(randomBytes(32)));
+    const results = await Promise.all(Array.from({ length: 8 }, (_, i) => requestJson(path, 'POST', ownerSecret, { member_npub, ensure_workspace_member: true, kind: i % 2 ? 'human' : 'agent' })));
+    expect(results.map(r => r.res.status)).toEqual(Array(8).fill(201));
+    expect(new Set(results.map(r => r.json.membership.actor_id)).size).toBe(1);
+    const actorId = results[0].json.membership.actor_id;
+    const [count] = await sql`SELECT COUNT(*)::integer n FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspaceId} AND actor_id=${actorId}`;
+    expect(count.n).toBe(1);
+    const events = await sql`SELECT id FROM flightdeck_pg_outbox_events WHERE workspace_id=${workspaceId} AND entity_id=${actorId}`;
+    expect(events.length).toBe(1);
+    const kinds = results.map(r => r.json.members.find((a: any) => a.npub === member_npub).kind);
+    expect(new Set(kinds).size).toBe(1);
+  });
+
+  test('atomic person enrollment waits for concurrent actor/admin creation without changing the winner', async () => {
+    const { workspaceId, ownerId, groupId } = await seedWorkspace(`enroll-admin-race-${randomUUID()}`);
+    const path = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/groups/${groupId}/members`;
+    const member_npub = nip19.npubEncode(getPublicKey(randomBytes(32)));
+    const writer = await sql.reserve();
+    try {
+      await writer`BEGIN`;
+      const [actor] = await writer`INSERT INTO flightdeck_pg_actors(npub,kind,display_name) VALUES(${member_npub},'agent','Concurrent Admin') RETURNING id`;
+      await writer`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role,created_by_actor_id) VALUES(${workspaceId},${actor.id},'admin',${ownerId})`;
+      const pending = requestJson(path, 'POST', ownerSecret, { member_npub, ensure_workspace_member: true, kind: 'human' });
+      // Observe the actual database lock wait before releasing the concurrent insert.
+      let blocked = false;
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const waits = await sql`SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%INSERT INTO flightdeck_pg_actors%'`;
+        if (waits.length) { blocked = true; break; }
+        await Bun.sleep(5);
+      }
+      await writer`COMMIT`;
+      const result = await pending;
+      expect(blocked).toBe(true);
+      expect(result.res.status).toBe(201);
+      const [stored] = await sql`SELECT a.kind,a.display_name,m.role FROM flightdeck_pg_actors a JOIN flightdeck_pg_workspace_memberships m ON m.actor_id=a.id WHERE a.id=${actor.id} AND m.workspace_id=${workspaceId}`;
+      expect(stored).toEqual({ kind: 'agent', display_name: 'Concurrent Admin', role: 'admin' });
+    } finally { await writer`ROLLBACK`; writer.release(); }
+  });
+
+  test('atomic person enrollment rejects invalid fields before writes and retains legacy missing-member behavior', async () => {
+    const { workspaceId, groupId, ownerId } = await seedWorkspace(`enroll-invalid-${randomUUID()}`);
+    const path = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/groups/${groupId}/members`;
+    const member_npub = nip19.npubEncode(getPublicKey(randomBytes(32)));
+    const valid = { member_npub, ensure_workspace_member: true, kind: 'human' };
+    const invalid = [
+      { ...valid, member_npub: 'npub1bad' }, { ...valid, member_npub: member_npub.slice(0,-1) + (member_npub.endsWith('q') ? 'p' : 'q') },
+      { ...valid, ensure_workspace_member: 'true' }, { ...valid, ensure_workspace_member: null },
+      { ...valid, kind: undefined }, { ...valid, kind: 'app' }, { ...valid, kind: 'service' },
+      { ...valid, actor_id: randomUUID() }, { ...valid, npub: member_npub }, { ...valid, role: 'admin' },
+      { ...valid, child_group_id: groupId }, { ...valid, display_name: 'Unexpected' },
+      { ensure_workspace_member: true, kind: 'human', actor_id: randomUUID() },
+    ];
+    for (const body of invalid) expect((await requestJson(path, 'POST', ownerSecret, body)).res.status).toBe(400);
+    expect((await requestJson(path, 'POST', ownerSecret, { member_npub })).json.code).toBe('workspace_member_not_found');
+    expect((await requestJson(path, 'POST', ownerSecret, { member_npub, ensure_workspace_member: false })).json.code).toBe('workspace_member_not_found');
+    const actors = await sql`SELECT id FROM flightdeck_pg_actors WHERE npub=${member_npub}`;
+    expect(actors.length).toBe(0);
+    expect((await sql`SELECT id FROM flightdeck_pg_outbox_events WHERE workspace_id=${workspaceId}`).length).toBe(0);
+    // Legacy actor-id requests still ignore unrelated kind fields and do not enroll anyone.
+    expect((await requestJson(path, 'POST', ownerSecret, { actor_id: ownerId, kind: 'service' })).res.status).toBe(201);
+  });
+
+  test('atomic person enrollment denies non-managers and wrong/missing groups without creating actors', async () => {
+    const { workspaceId, groupId } = await seedWorkspace(`enroll-denied-${randomUUID()}`);
+    const other = await seedWorkspace(`enroll-other-${randomUUID()}`);
+    const member_npub = nip19.npubEncode(getPublicKey(randomBytes(32)));
+    const body = { member_npub, ensure_workspace_member: true, kind: 'human' };
+    const base = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/groups`;
+    expect((await requestJson(`${base}/${groupId}/members`, 'POST', groupMemberSecret, body)).res.status).toBe(403);
+    for (const id of [randomUUID(), other.groupId]) {
+      const result = await requestJson(`${base}/${id}/members`, 'POST', ownerSecret, body);
+      expect(result.res.status).toBe(404);
+      expect(result.json.code).toBe('group_not_found');
+    }
+    expect((await sql`SELECT id FROM flightdeck_pg_actors WHERE npub=${member_npub}`).length).toBe(0);
+  });
+
+  test('atomic person enrollment refuses app/service actors without changing their existing state', async () => {
+    const { workspaceId, groupId } = await seedWorkspace(`enroll-kind-${randomUUID()}`);
+    for (const kind of ['app', 'service']) {
+      const member_npub = nip19.npubEncode(getPublicKey(randomBytes(32)));
+      const [actor] = await sql`INSERT INTO flightdeck_pg_actors(npub,kind,display_name) VALUES(${member_npub},${kind},'Keep Kind') RETURNING *`;
+      const result = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/groups/${groupId}/members`, 'POST', ownerSecret, { member_npub, ensure_workspace_member: true, kind: 'human' });
+      expect(result.res.status).toBe(409);
+      expect(result.json.code).toBe('actor_kind_conflict');
+      const [after] = await sql`SELECT * FROM flightdeck_pg_actors WHERE id=${actor.id}`;
+      expect(after).toEqual(actor);
+      expect((await sql`SELECT actor_id FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspaceId} AND actor_id=${actor.id}`).length).toBe(0);
+    }
+  });
+
+  test('atomic person enrollment rolls back actor, workspace/default/target memberships, audit and outbox on group failure', async () => {
+    const { workspaceId, groupId } = await seedWorkspace(`enroll-rollback-${randomUUID()}`);
+    await sql.unsafe(`CREATE FUNCTION enrollment_test_group_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.group_id = '${groupId}'::uuid THEN RAISE EXCEPTION 'enrollment test group failure'; END IF; RETURN NEW; END $$`);
+    await sql`CREATE TRIGGER enrollment_test_group_failure BEFORE INSERT ON flightdeck_pg_group_memberships FOR EACH ROW EXECUTE FUNCTION enrollment_test_group_failure()`;
+    try {
+      for (const existingActor of [false, true]) {
+        const member_npub = nip19.npubEncode(getPublicKey(randomBytes(32)));
+        if (existingActor) await sql`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${member_npub},'agent')`;
+        const path = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/groups/${groupId}/members`;
+        const body = { member_npub, ensure_workspace_member: true, kind: 'human' };
+        const result = await app.request(path, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: authHeader(path, 'POST', ownerSecret, body) }, body: JSON.stringify(body) });
+        expect(result.status).toBe(500);
+        const actors = await sql`SELECT id,kind FROM flightdeck_pg_actors WHERE npub=${member_npub}`;
+        expect(actors.length).toBe(existingActor ? 1 : 0);
+        if (existingActor) {
+          expect(actors[0].kind).toBe('agent');
+          expect((await sql`SELECT actor_id FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspaceId} AND actor_id=${actors[0].id}`).length).toBe(0);
+          expect((await sql`SELECT actor_id FROM flightdeck_pg_group_memberships WHERE workspace_id=${workspaceId} AND actor_id=${actors[0].id}`).length).toBe(0);
+        }
+      }
+      expect((await sql`SELECT id FROM flightdeck_pg_audit_events WHERE workspace_id=${workspaceId}`).length).toBe(0);
+      expect((await sql`SELECT id FROM flightdeck_pg_outbox_events WHERE workspace_id=${workspaceId}`).length).toBe(0);
+    } finally {
+      await sql`DROP TRIGGER enrollment_test_group_failure ON flightdeck_pg_group_memberships`;
+      await sql`DROP FUNCTION enrollment_test_group_failure()`;
+    }
+  });
+
   test('comment mentions preserve actor types, permissions, routing payloads and reloads', async () => {
     const { workspaceId } = await seedWorkspace('npub1workspacecommentmentions');
     const root = `/api/v4/flightdeck-pg/workspaces/${workspaceId}`;

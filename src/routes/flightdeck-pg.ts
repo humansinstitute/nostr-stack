@@ -1,3 +1,9 @@
+import {
+  FlightDeckPgEnrollmentError,
+  isEnrollmentNpub,
+  enrollFlightDeckPgGroupMember,
+  createFlightDeckPgEnrollmentOutbox,
+} from '../services/flightdeck-pg-enrollment';
 import { DOCUMENT_EDIT_PROTOCOL } from '../types';
 import { lockDocumentEditAuthority, lockDocumentLeaseAuthority } from '../services/document-edit-session';
 import { applyLegacyPreferencePatch } from '../services/notification-inbox';
@@ -3957,10 +3963,65 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/groups/:groupId/members', asyn
   const fields: { path: string; code: string; message: string }[] = [];
   if (!groupId) fields.push({ path: 'group_id', code: 'required', message: 'group_id is required' });
   if (!actorId && !actorNpub) fields.push({ path: 'actor_id', code: 'required', message: 'actor_id or member_npub is required' });
+  if (body.ensure_workspace_member !== undefined && typeof body.ensure_workspace_member !== 'boolean') {
+    fields.push({ path: 'ensure_workspace_member', code: 'invalid', message: 'ensure_workspace_member must be a boolean' });
+  }
+  const ensureMember = body.ensure_workspace_member === true;
+  if (ensureMember) {
+    if (!isEnrollmentNpub(body.member_npub)) fields.push({ path: 'member_npub', code: 'invalid', message: 'member_npub must be a full valid npub' });
+    if (body.kind !== 'human' && body.kind !== 'agent') fields.push({ path: 'kind', code: 'invalid', message: 'kind must be human or agent when ensuring workspace membership' });
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(groupId)) fields.push({ path: 'group_id', code: 'invalid', message: 'group_id must be a UUID' });
+    for (const key of Object.keys(body)) {
+      if (!['member_npub', 'ensure_workspace_member', 'kind'].includes(key)) fields.push({ path: key, code: 'invalid', message: `${key} is not supported with ensure_workspace_member` });
+    }
+  }
   if (fields.length) return validationError(c, identity, fields);
 
   const manageError = await requireFlightDeckPgWorkspaceManage(c, auth.userNpub, context, identity);
   if (manageError) return manageError;
+
+  if (ensureMember) {
+    let payload;
+    try {
+      payload = await getDb().begin(async (tx) => {
+        const txSql = asDbClient(tx);
+        const enrolled = await enrollFlightDeckPgGroupMember({
+          workspaceId: context.workspace.id, groupId, memberNpub: body.member_npub as string,
+          kind: body.kind as 'human' | 'agent', createdByActorId: context.actor.id,
+        }, txSql);
+        if (enrolled.workspaceMemberCreated) {
+          await writeFlightDeckPgAudit({
+            workspaceId: context.workspace.id, actorId: context.actor.id,
+            action: 'workspace_member.create', resourceType: 'actor', resourceId: enrolled.actor.id,
+            metadata: { role: 'member', source: 'group_member_enrollment' },
+          }, txSql);
+        }
+        const auditId = await writeFlightDeckPgAudit({
+          workspaceId: context.workspace.id, actorId: context.actor.id,
+          action: 'workspace_group_member.add', resourceType: 'group', resourceId: groupId,
+          metadata: { actor_id: enrolled.actor.id },
+        }, txSql);
+        if (enrolled.workspaceMemberCreated || enrolled.groupMemberCreated) {
+          await createFlightDeckPgEnrollmentOutbox({
+            workspaceId: context.workspace.id, actorId: context.actor.id, changedActorId: enrolled.actor.id,
+          }, txSql);
+        }
+        return { membership: enrolled.membership, auditId };
+      });
+    } catch (error) {
+      if (error instanceof FlightDeckPgEnrollmentError) {
+        return jsonError(c, error.code === 'group_not_found' ? 404 : 409, error.code, error.message, identity);
+      }
+      throw error;
+    }
+    const members = await listFlightDeckPgGroupMembers(context.workspace.id, groupId);
+    const effectiveMembers = await listEffectiveFlightDeckPgGroupMembers(context.workspace.id, groupId);
+    return c.json({
+      identity, membership: payload.membership,
+      members: members.map(serializeFlightDeckPgActor), effective_members: effectiveMembers.map(serializeFlightDeckPgActor),
+      audit: { event_id: payload.auditId, operation: 'workspace_group_member.add', actor_npub: auth.userNpub },
+    }, 201);
+  }
 
   const sql = getDb();
   if (!(await flightDeckPgGroupExists(context.workspace.id, groupId, sql))) {

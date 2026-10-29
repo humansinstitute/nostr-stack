@@ -584,6 +584,14 @@ export interface FlightDeckPgContractFixture {
 }
 
 export type FlightDeckPgActorKind = 'human' | 'agent' | 'app' | 'service';
+export type FlightDeckPgPersonKind = 'human' | 'agent';
+
+/** Additive person enrollment on POST workspace groups/:groupId/members. */
+export type FlightDeckPgGroupMemberEnrollmentRequest = {
+  member_npub: string;
+  ensure_workspace_member: true;
+  kind: FlightDeckPgPersonKind;
+};
 /** Members join Workspace; content visibility still requires explicit scope/channel grants to an actor or sharing group. */
 export type FlightDeckPgWorkspaceRole = 'owner' | 'admin' | 'member' | 'guest' | 'agent' | 'app';
 

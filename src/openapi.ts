@@ -4819,6 +4819,37 @@ export function buildOpenApiDocument(origin: string) {
           },
         },
       },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/groups/{groupId}/members': {
+        post: {
+          tags: ['Flight Deck PG'], security: [{ nip98: [] }],
+          summary: 'Add a workspace actor to a group, optionally enrolling a person atomically',
+          description: 'Requires existing workspace.manage authorization. Without ensure_workspace_member, the actor must already belong to the workspace (legacy actor_id, actor_npub and npub aliases remain supported). With ensure_workspace_member:true, member_npub must be a valid full npub and kind is required as human or agent. Actor aliases, role and nested-group fields are rejected in enrollment mode. Absent workspace membership is created as member; existing roles, human/agent kinds and profiles are preserved even under races. Existing app/service actors are rejected. Enrollment, default Workspace group membership, target group membership, audit and a directory-safe workspace.membership.changed outbox invalidation commit together or roll back. Duplicates preserve membership attribution and emit no extra invalidation. Response shape is unchanged. Older servers may ignore the flag and return workspace_member_not_found: clients must not fall back to POST workspace members.',
+          parameters: [
+            { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+            { name: 'groupId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+          ],
+          requestBody: { required: true, content: { 'application/json': { schema: {
+            oneOf: [
+              { type: 'object', required: ['member_npub', 'ensure_workspace_member', 'kind'], additionalProperties: false, properties: {
+                member_npub: { type: 'string', pattern: '^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}$' },
+                ensure_workspace_member: { const: true }, kind: { type: 'string', enum: ['human', 'agent'] },
+              } },
+              { type: 'object', anyOf: [{ required: ['actor_id'] }, { required: ['member_npub'] }, { required: ['actor_npub'] }, { required: ['npub'] }], properties: {
+                actor_id: { type: 'string', format: 'uuid' }, member_npub: { type: 'string' }, actor_npub: { type: 'string' }, npub: { type: 'string' },
+                ensure_workspace_member: { const: false },
+              } },
+            ],
+          } } } },
+          responses: {
+            '201': { description: 'Membership added or already present; identity, membership, members, effective_members and audit retain existing shapes' },
+            '400': { description: 'Invalid enrollment fields; no writes' },
+            '401': { description: 'Invalid NIP-98 authentication' },
+            '403': { description: 'workspace.manage required; no enrollment' },
+            '404': { description: 'Group not found, or workspace_member_not_found in legacy mode' },
+            '409': { description: 'actor_kind_conflict: existing actor is an app or service; no writes' },
+          },
+        },
+      },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/members/{actorId}/profile': {
         patch: {
           tags: ['Flight Deck PG'],
