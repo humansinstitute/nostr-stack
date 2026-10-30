@@ -398,7 +398,7 @@ describe('Flight Deck PG schema foundation', () => {
          (table_name='v4_storage_objects' AND column_name='pg_workspace_id'))
       ORDER BY table_name,column_name
     `;
-    expect(columns).toEqual([
+    expect(Array.from(columns)).toEqual([
       { table_name: 'flightdeck_pg_permission_grants', column_name: 'workspace_role', data_type: 'text', is_nullable: 'YES' },
       { table_name: 'v4_storage_objects', column_name: 'pg_workspace_id', data_type: 'uuid', is_nullable: 'YES' },
     ]);
