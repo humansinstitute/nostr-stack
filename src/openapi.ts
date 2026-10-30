@@ -5268,6 +5268,29 @@ export function buildOpenApiDocument(origin: string) {
           responses: { '200': { description: 'Message deleted' } },
         },
       },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/channels/{channelId}/permission-diagnostics': {
+        get: {
+          tags: ['Flight Deck PG'],
+          summary: 'Read bounded exact-channel ACL evidence and actual permission decisions',
+          description: 'Exact NIP-98 GET. Requires channel.grants.read, or a default-disabled operator-configured expiring exact-case delegation. Parent scope ACLs require scope.manage or exact support delegation; target group provenance requires support. Never returns content or changes write authority. Fixed operator file config/permission-diagnostics.json; see docs/permission-diagnostics.md. Every successful read records an audit receipt before responding. Responses use private, no-store. Each evidence collection has independent limit/offset, deterministic ordering, truncated and next_offset; no snapshot is retained across requests.',
+          parameters: [
+            { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+            { name: 'channelId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+            { name: 'target_npub', in: 'query', required: true, schema: { type: 'string' } },
+            { name: 'case_id', in: 'query', required: true, schema: { type: 'string', maxLength: 80 } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 100 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0, maximum: 10000, default: 0 } },
+          ],
+          responses: {
+            '200': { description: 'Canonical active/revoked grants, sanitized grant-save audit changes, target membership provenance, authorization decisions and matching grant sources; independently redacted by authority', content: { 'application/json': { schema: { type: 'object', required: ['version','case_id','access','workspace_id','channel','target','grants','audit','group_provenance','group_reachability','decisions','matching_sources','audit_receipt_id'], properties: { version: {const:1}, case_id:{type:'string'}, access:{type:'object'}, build:{type:'object'}, workspace_id:{type:'string',format:'uuid'}, channel:{type:'object'}, target:{type:'object'}, grants:{type:'object'}, audit:{type:'object'}, group_provenance:{type:'object'}, group_reachability:{type:'object'}, decisions:{type:'array',items:{type:'object'}}, matching_sources:{type:'array',items:{type:'object'}}, audit_receipt_id:{type:'string',format:'uuid'} } } } } },
+            '400': { description: 'Invalid or unsupported request fields' },
+            '401': { description: 'Invalid NIP-98 signature, method or exact URL' },
+            '403': { description: 'No existing ACL or valid exact operator delegation, or app/membership mismatch' },
+            '404': { description: 'Authorized request but active channel or target workspace membership missing' },
+            '500': { description: 'Evidence or audit receipt failed; no diagnostic report emitted' },
+          },
+        },
+      },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/channels/{channelId}/grants': {
         get: {
           tags: ['Flight Deck PG'],

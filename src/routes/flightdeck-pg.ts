@@ -1,3 +1,4 @@
+import { registerPermissionDiagnosticRoutes } from './permission-diagnostics';
 import {
   FlightDeckPgEnrollmentError,
   isEnrollmentNpub,
@@ -428,6 +429,7 @@ registerFeedReaderRoutes(flightDeckPgRouter);
 registerNotificationRoutes(flightDeckPgRouter);
 registerContextTreeRoutes(flightDeckPgRouter);
 registerScopeAccessRoutes(flightDeckPgRouter);
+registerPermissionDiagnosticRoutes(flightDeckPgRouter);
 
 const scopeKinds = new Set<FlightDeckPgScopeKind>([
   'business_unit',

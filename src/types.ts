@@ -3476,3 +3476,60 @@ export interface DocumentEditSessionRequest {
   takeover?: boolean;
   expected_lease_id?: string;
 }
+
+/** Operator configured, exact-resource ACL-metadata delegation; never a write grant. */
+export interface PermissionDiagnosticAuthorization {
+  case_id: string;
+  signer_npub: string;
+  workspace_id: string;
+  channel_id: string;
+  target_actor_npub: string;
+  tower_service_npub: string;
+  app_npub: string;
+  scope_id: string;
+  issued_at: string;
+  expires_at: string;
+}
+export interface PermissionDiagnosticRequest {
+  workspaceId: string;
+  channelId: string;
+  signerNpub: string;
+  userNpub: string;
+  appNpub: string;
+  targetNpub: string;
+  caseId: string;
+  limit: number;
+  offset: number;
+}
+export interface PermissionDiagnosticPage<T> {
+  items: T[];
+  limit: number;
+  offset: number;
+  truncated: boolean;
+  next_offset: number | null;
+}
+/** Serialized HTTP response: timestamps are ISO strings, collections are independently bounded. */
+export interface PermissionDiagnosticResponse {
+  version: 1;
+  case_id: string;
+  generated_at: string;
+  build: { name: string; version: string | null; git_commit: string | null; git_branch: string | null; build_time: string | null; runtime: string };
+  access: { mode: 'operator_support' | 'existing_acl'; expires_at: string | null; scope_metadata: boolean; group_provenance: boolean; signer_npub: string; resolved_user_npub: string };
+  workspace_id: string;
+  channel: { id: string; scope_id: string };
+  target: { id: string; npub: string; kind: FlightDeckPgActorKind; membership_role: FlightDeckPgWorkspaceRole };
+  grants: PermissionDiagnosticPage<{
+    id: string; resource_type: 'channel' | 'scope'; resource_scope_id: string | null; resource_channel_id: string | null;
+    principal_type: 'actor' | 'group'; principal_actor_id: string | null; principal_group_id: string | null; principal_actor_npub: string | null;
+    permission: FlightDeckPgPermission; created_at: string; revoked_at: string | null; created_by_actor_id: string | null;
+  }>;
+  audit: PermissionDiagnosticPage<{
+    id: string; actor_id: string | null; action: string; resource_type: 'channel' | 'scope'; resource_id: string; created_at: string;
+    changes: { principal_type?: 'actor' | 'group'; principal_id?: string; access_level?: 'view' | 'contribute' | 'manage' | 'custom'; role?: 'context_editor' | 'scope_manager'; permissions?: FlightDeckPgPermission[]; permissions_truncated?: boolean };
+  }>;
+  group_provenance: PermissionDiagnosticPage<{ source: 'direct' | 'parent'; group_id: string; child_group_id: string | null; created_at: string }>;
+  group_reachability: PermissionDiagnosticPage<{ group_id: string; target_reaches_group: boolean }>;
+  decisions: { permission: FlightDeckPgPermission; resource_type: 'channel' | 'scope'; resource_id: string; allowed: boolean; reason: string; grant_id: string | null }[];
+  matching_sources: { id: string; principal_type: 'actor' | 'group'; principal_actor_id: string | null; principal_group_id: string | null; resource_type: 'channel' | 'scope'; resource_scope_id: string | null; resource_channel_id: string | null; permission: FlightDeckPgPermission }[];
+  audit_receipt_id: string;
+}

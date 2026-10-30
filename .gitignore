@@ -71,3 +71,6 @@ coverage/
 /poc/grasp/membership.json
 /poc/grasp/privacy-gate-result.json
 /poc/grasp/source-refs.json
+
+# Operator-only expiring ACL diagnostic delegation (never source/history)
+/config/permission-diagnostics.json
