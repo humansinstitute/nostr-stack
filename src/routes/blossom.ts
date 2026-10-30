@@ -5,6 +5,7 @@ import { getEffectiveRequestUrl, verifyNip98Auth } from '../auth';
 import { resolveWsKeyNpub } from '../services/user-workspace-keys';
 import { verifyStorageIdentity, openVerifiedStorageStream, hasActiveStorageReference, canAccessStorageObject, storageObjectsByHash } from '../services/storage';
 import { resolveReadableFlightDeckPgBlossomObject, hasFlightDeckPgStorageAuthority } from '../services/flightdeck-pg-storage-access';
+import { revocableStream } from '../services/revocable-stream';
 
 export const blossomRouter = new Hono();
 blossomRouter.use('/:blob', async (c, next) => {
@@ -67,6 +68,11 @@ blossomRouter.on(['GET', 'HEAD'], '/:blob', async (c, next) => {
     if (!accessible || !await hasActiveStorageReference(row.id)) continue;
     const verified = await verifyStorageIdentity(row);
     if (!verified || verified.sha256_hex !== hash) continue;
+    const protectStream = (stream: ReadableStream<Uint8Array>) => actor && !row.is_public
+      ? revocableStream(stream, async () => Boolean(await hasFlightDeckPgStorageAuthority(row.id)
+        ? await resolveReadableFlightDeckPgBlossomObject({ actorNpub: actor!, storageObjectId: row.id })
+        : await canAccessStorageObject(row.id, actor)))
+      : stream;
     const size = Number(verified.size_bytes);
     const headers = new Headers({
       'Content-Type': row.content_type || 'application/octet-stream',
@@ -92,12 +98,12 @@ blossomRouter.on(['GET', 'HEAD'], '/:blob', async (c, next) => {
       headers.set('Content-Length', String(range.end - range.start + 1));
       const stream = await openVerifiedStorageStream(verified, range);
       if (!stream) continue;
-      return new Response(stream, { status: 206, headers });
+      return new Response(protectStream(stream), { status: 206, headers });
     }
     if (c.req.method === 'HEAD') return new Response(null, { headers });
     const stream = await openVerifiedStorageStream(verified, null);
     if (!stream) continue;
-    return new Response(stream, { headers });
+    return new Response(protectStream(stream), { headers });
   }
   // Anonymous negatives deliberately reveal neither existence nor private metadata.
   return c.json({ error: actor ? 'blob not found' : 'authorization required or blob unavailable' }, actor ? 404 : 401);

@@ -268,6 +268,11 @@ async function ensureWorkspaceMember(
     createdByActorId: string | null;
   },
 ): Promise<{ workspace_id: string; actor_id: string; role: FlightDeckPgWorkspaceRole }> {
+  const [removed] = await sql`
+    SELECT 1 FROM flightdeck_pg_workspace_member_removals
+    WHERE workspace_id = ${input.workspaceId} AND actor_id = ${input.actor.id}
+  `;
+  if (removed) throw new Error('workspace_member_removed: explicitly re-add through workspace administration; setup cannot restore retired access');
   const [membership] = await sql<{ workspace_id: string; actor_id: string; role: FlightDeckPgWorkspaceRole }[]>`
     INSERT INTO flightdeck_pg_workspace_memberships (workspace_id, actor_id, role, created_by_actor_id)
     VALUES (${input.workspaceId}, ${input.actor.id}, ${input.role}, ${input.createdByActorId})

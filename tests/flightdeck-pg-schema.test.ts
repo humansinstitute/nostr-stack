@@ -280,14 +280,18 @@ describe('Flight Deck PG schema foundation', () => {
       'flightdeck_pg_groups',
       'flightdeck_pg_hosted_signups',
       'flightdeck_pg_invocations',
+      'flightdeck_pg_member_removal_previews',
       'flightdeck_pg_messages',
       'flightdeck_pg_napplet_bundles',
       'flightdeck_pg_napplet_installations',
+      'flightdeck_pg_notification_alert_attempts',
+      'flightdeck_pg_notification_alerts',
       'flightdeck_pg_notification_audit',
       'flightdeck_pg_notification_categories',
       'flightdeck_pg_notification_cursors',
       'flightdeck_pg_notification_deliveries',
       'flightdeck_pg_notification_events',
+      'flightdeck_pg_notification_installations',
       'flightdeck_pg_notification_intake',
       'flightdeck_pg_notification_item_events',
       'flightdeck_pg_notification_items',
@@ -296,6 +300,7 @@ describe('Flight Deck PG schema foundation', () => {
       'flightdeck_pg_notification_rules',
       'flightdeck_pg_notification_sources',
       'flightdeck_pg_notification_system',
+      'flightdeck_pg_notification_transports',
       'flightdeck_pg_org_data_audit',
       'flightdeck_pg_org_data_records',
       'flightdeck_pg_org_data_types',
@@ -347,7 +352,9 @@ describe('Flight Deck PG schema foundation', () => {
       'flightdeck_pg_workroom_links',
       'flightdeck_pg_workroom_participants',
       'flightdeck_pg_workrooms',
+      'flightdeck_pg_workspace_agent_managers',
       'flightdeck_pg_workspace_agents',
+      'flightdeck_pg_workspace_member_removals',
       'flightdeck_pg_workspace_memberships',
       'flightdeck_pg_workspaces',
     ]);
@@ -380,6 +387,20 @@ describe('Flight Deck PG schema foundation', () => {
       'v4_workspace_id',
       'workspace_owner_npub',
       'workspace_service_npub',
+    ]);
+  });
+
+  test('keeps explicit role provenance and private storage workspace authority columns', async () => {
+    const columns = await sql<{ table_name: string; column_name: string; data_type: string; is_nullable: string }[]>`
+      SELECT table_name,column_name,data_type,is_nullable FROM information_schema.columns
+      WHERE table_schema='public' AND
+        ((table_name='flightdeck_pg_permission_grants' AND column_name='workspace_role') OR
+         (table_name='v4_storage_objects' AND column_name='pg_workspace_id'))
+      ORDER BY table_name,column_name
+    `;
+    expect(columns).toEqual([
+      { table_name: 'flightdeck_pg_permission_grants', column_name: 'workspace_role', data_type: 'text', is_nullable: 'YES' },
+      { table_name: 'v4_storage_objects', column_name: 'pg_workspace_id', data_type: 'uuid', is_nullable: 'YES' },
     ]);
   });
 
@@ -1879,21 +1900,16 @@ describe('Flight Deck PG schema foundation', () => {
       '23503',
     );
 
-    await expectSqlFailure(
-      () => sql`
-        INSERT INTO flightdeck_pg_task_watchers (
-          workspace_id,
-          scope_id,
-          channel_id,
-          task_id,
-          actor_id,
-          created_by_actor_id,
-          updated_by_actor_id
-        )
-        VALUES (${workspace.id}, ${scope.id}, ${channel.id}, ${taskId}, ${nonMember.id}, ${creator.id}, ${creator.id})
-      `,
-      '23503',
-    );
+    // Active role authority still requires current workspace membership.
+    await expectSqlFailure(() => sql`INSERT INTO flightdeck_pg_workspace_agent_managers(workspace_id,actor_id) VALUES(${workspace.id},${nonMember.id})`, '23503');
+    // Watcher/assignee rows preserve history and do not confer authorization.
+    await sql`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspace.id},${nonMember.id},'member')`;
+    await sql`INSERT INTO flightdeck_pg_task_watchers(workspace_id,scope_id,channel_id,task_id,actor_id,created_by_actor_id,updated_by_actor_id)
+      VALUES(${workspace.id},${scope.id},${channel.id},${taskId},${nonMember.id},${creator.id},${creator.id})`;
+    await sql`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspace.id} AND actor_id=${nonMember.id}`;
+    const [historicalWatcher] = await sql`SELECT actor_id FROM flightdeck_pg_task_watchers WHERE task_id=${taskId} AND actor_id=${nonMember.id}`;
+    expect(historicalWatcher.actor_id).toBe(nonMember.id);
+    await expectSqlFailure(() => sql`UPDATE flightdeck_pg_task_watchers SET actor_id='00000000-0000-0000-0000-000000000001' WHERE task_id=${taskId} AND actor_id=${nonMember.id}`, '23503');
 
     const outboxRows = await sql.begin(async (tx) => tx<{ id: string }[]>`
       INSERT INTO flightdeck_pg_outbox_events (
@@ -1933,6 +1949,10 @@ describe('Flight Deck PG schema foundation', () => {
         AND column_name = 'entity_row_version'
     `;
     expect(outboxEntityVersionColumn?.data_type).toBe('bigint');
+
+    await sql`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspace.id} AND actor_id=${assignee.id}`;
+    const [historicalAssignment] = await sql`SELECT actor_id FROM flightdeck_pg_task_assignments WHERE task_id=${taskId} AND actor_id=${assignee.id}`;
+    expect(historicalAssignment.actor_id).toBe(assignee.id);
   });
 
   test('enforces PH4-1A typed channel message and thread schema invariants', async () => {
@@ -2099,8 +2119,9 @@ describe('Flight Deck PG schema foundation', () => {
       '23514',
     );
 
-    await expectSqlFailure(
-      () => sql`
+    // Durable authorship points to the actor even after active membership ends.
+    await sql`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspace.id},${nonMember.id},'member')`;
+    const [historicalThread] = await sql<{ id: string; created_by_actor_id: string }[]>`
         INSERT INTO flightdeck_pg_threads (
           workspace_id,
           scope_id,
@@ -2109,10 +2130,17 @@ describe('Flight Deck PG schema foundation', () => {
           created_by_actor_id,
           updated_by_actor_id
         )
-        VALUES (${workspace.id}, ${scope.id}, ${channel.id}, 'Non-member thread', ${nonMember.id}, ${creator.id})
-      `,
-      '23503',
-    );
+        VALUES (${workspace.id}, ${scope.id}, ${channel.id}, 'Historical thread', ${nonMember.id}, ${creator.id})
+      RETURNING id,created_by_actor_id
+    `;
+    const [historicalMessage] = await sql<{ id: string }[]>`INSERT INTO flightdeck_pg_messages(workspace_id,scope_id,channel_id,thread_id,body,created_by_actor_id,updated_by_actor_id)
+      VALUES(${workspace.id},${scope.id},${channel.id},${historicalThread.id},'Historical message',${nonMember.id},${creator.id}) RETURNING id`;
+    await sql`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspace.id} AND actor_id=${nonMember.id}`;
+    const [retainedMessage] = await sql`SELECT created_by_actor_id,body FROM flightdeck_pg_messages WHERE id=${historicalMessage.id}`;
+    expect(retainedMessage).toEqual({ created_by_actor_id: nonMember.id, body: 'Historical message' });
+    const [retainedThread] = await sql`SELECT created_by_actor_id FROM flightdeck_pg_threads WHERE id=${historicalThread.id}`;
+    expect(retainedThread.created_by_actor_id).toBe(nonMember.id);
+    await expectSqlFailure(() => sql`UPDATE flightdeck_pg_threads SET created_by_actor_id='00000000-0000-0000-0000-000000000001' WHERE id=${historicalThread.id}`, '23503');
   });
 
   test('enforces one active PG storage link per storage object with non-null entity links', async () => {
@@ -2369,8 +2397,8 @@ describe('Flight Deck PG schema foundation', () => {
       )
       RETURNING id
     `;
-    await expectSqlFailure(
-      () => sql`
+    await sql`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspace.id},${nonMember.id},'member')`;
+    const [historicalDoc] = await sql<{ id: string; created_by_actor_id: string }[]>`
         INSERT INTO flightdeck_pg_docs (
           workspace_id,
           scope_id,
@@ -2380,10 +2408,13 @@ describe('Flight Deck PG schema foundation', () => {
           created_by_actor_id,
           updated_by_actor_id
         )
-        VALUES (${workspace.id}, ${scope.id}, ${channel.id}, ${nonMemberStorageObject.id}, 'Non-member doc', ${nonMember.id}, ${creator.id})
-      `,
-      '23503',
-    );
+        VALUES (${workspace.id}, ${scope.id}, ${channel.id}, ${nonMemberStorageObject.id}, 'Historical doc', ${nonMember.id}, ${creator.id})
+      RETURNING id,created_by_actor_id
+    `;
+    await sql`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspace.id} AND actor_id=${nonMember.id}`;
+    const [retainedDoc] = await sql`SELECT created_by_actor_id FROM flightdeck_pg_docs WHERE id=${historicalDoc.id}`;
+    expect(retainedDoc.created_by_actor_id).toBe(nonMember.id);
+    await expectSqlFailure(() => sql`UPDATE flightdeck_pg_docs SET created_by_actor_id='00000000-0000-0000-0000-000000000001' WHERE id=${historicalDoc.id}`, '23503');
 
     await expectSqlFailure(
       () => sql`
@@ -2573,8 +2604,8 @@ describe('Flight Deck PG schema foundation', () => {
       )
       RETURNING id
     `;
-    await expectSqlFailure(
-      () => sql`
+    await sql`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspace.id},${nonMember.id},'member')`;
+    const [historicalFile] = await sql<{ id: string; created_by_actor_id: string }[]>`
         INSERT INTO flightdeck_pg_files (
           workspace_id,
           scope_id,
@@ -2584,10 +2615,13 @@ describe('Flight Deck PG schema foundation', () => {
           created_by_actor_id,
           updated_by_actor_id
         )
-        VALUES (${workspace.id}, ${scope.id}, ${channel.id}, ${nonMemberStorageObject.id}, 'Non-member file', ${nonMember.id}, ${creator.id})
-      `,
-      '23503',
-    );
+        VALUES (${workspace.id}, ${scope.id}, ${channel.id}, ${nonMemberStorageObject.id}, 'Historical file', ${nonMember.id}, ${creator.id})
+      RETURNING id,created_by_actor_id
+    `;
+    await sql`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspace.id} AND actor_id=${nonMember.id}`;
+    const [retainedFile] = await sql`SELECT created_by_actor_id FROM flightdeck_pg_files WHERE id=${historicalFile.id}`;
+    expect(retainedFile.created_by_actor_id).toBe(nonMember.id);
+    await expectSqlFailure(() => sql`UPDATE flightdeck_pg_files SET created_by_actor_id='00000000-0000-0000-0000-000000000001' WHERE id=${historicalFile.id}`, '23503');
 
     await expectSqlFailure(
       () => sql`

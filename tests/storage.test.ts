@@ -150,6 +150,25 @@ afterAll(async () => {
 });
 
 describe('Storage API', () => {
+  test('private download handles stay on the authenticated Tower route', async () => {
+    const [object] = await sql`
+      INSERT INTO v4_storage_objects (owner_npub, created_by_npub, storage_path, content_type, is_public, completed_at)
+      VALUES (${WORKSPACE_NPUB}, ${MEMBER}, 'private-revocable-download', 'text/plain', false, NOW())
+      RETURNING id
+    `;
+    const { getStorageDownloadUrl } = await import('../src/services/storage');
+    expect(await getStorageDownloadUrl(object.id)).toBeNull();
+    const path = `/api/v4/storage/${object.id}/download-url`;
+    const unsigned = await app.request(path);
+    expect(unsigned.status).toBe(401);
+    const signed = await app.request(path, { headers: { Authorization: authHeader(path, 'GET', memberSecret) } });
+    expect(signed.status).toBe(200);
+    const payload = await signed.json();
+    expect(payload.download_url).toBe(`http://localhost/api/v4/storage/${object.id}/content`);
+    const content = await app.request(new URL(payload.download_url).pathname);
+    expect(content.status).toBe(401);
+  });
+
   async function requireS3ForTest() {
     if (!await checkS3Availability()) return false;
     return true;

@@ -1,3 +1,4 @@
+import { MembershipAdminError } from './flightdeck-pg-membership-admin';
 import { acquireDocumentEditSession } from './document-edit-session';
 import { DOCUMENT_EDIT_PROTOCOL, type DocumentEditSessionRequest } from '../types';
 import { inboxApiEnabled } from './notification-core';
@@ -2358,11 +2359,22 @@ export async function createFlightDeckPgWorkspaceMember(
   },
   sql: DbClient = getDb(),
 ) {
+  // Keep request authority and target role stable until the enclosing transaction commits.
+  const workspace = await resolveFlightDeckPgWorkspace(input.workspaceId,sql);
+  const [requester] = await sql`SELECT a.npub FROM flightdeck_pg_workspace_memberships m JOIN flightdeck_pg_actors a ON a.id=m.actor_id WHERE m.workspace_id=${input.workspaceId} AND m.actor_id=${input.createdByActorId} FOR KEY SHARE OF m`;
+  if (!workspace || !requester) throw new MembershipAdminError(403,'workspace_membership_required');
+  const invite = await authorizeFlightDeckPgOperation({actorNpub:requester.npub,appNpub:workspace.app_npub,workspaceId:input.workspaceId,permission:'workspace.invite',resource:{type:'workspace'}},sql);
+  if (!invite.allowed) throw new MembershipAdminError(403,'workspace_invite_required');
   const actor = await resolveOrCreateFlightDeckPgActor(input.actorNpub, input.kind ?? 'human', {
     displayName: input.displayName ?? null,
     sql,
   });
   const role = input.role ?? 'member';
+  const [existing] = await sql`SELECT role FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${input.workspaceId} AND actor_id=${actor.id} FOR UPDATE`;
+  if ((['owner','admin'].includes(role) || ['owner','admin'].includes(existing?.role)) && requester.npub !== workspace.workspace_owner_npub) throw new MembershipAdminError(403,'workspace_owner_required');
+  if ((existing?.role === 'owner' || actor.npub === workspace.workspace_owner_npub) && role !== 'owner') throw new MembershipAdminError(403,'cannot_demote_owner');
+
+  await sql`SELECT set_config('tower.explicit_member_enrollment',${`${input.workspaceId}:${actor.id}`},true)`;
   const [membership] = await sql<FlightDeckPgWorkspaceMembershipView[]>`
     INSERT INTO flightdeck_pg_workspace_memberships (
       workspace_id,

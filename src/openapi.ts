@@ -1,3 +1,4 @@
+import { workspaceMembershipAdminPaths } from './workspace-membership-admin-openapi';
 import { documentEditPaths } from './document-edit-openapi';
 import { buildNstackConsoleHtml } from './nstack-console';
 import { hostingPaths, hostingSchemas } from './hosting-openapi';
@@ -4360,6 +4361,7 @@ export function buildOpenApiDocument(origin: string) {
     },
     security: [{ nip98: [] }],
     paths: {
+      ...workspaceMembershipAdminPaths,
       ...documentEditPaths,
       ...hostingPaths,
       '/{sha256}': {
@@ -4803,7 +4805,7 @@ export function buildOpenApiDocument(origin: string) {
         post: {
           tags: ['Flight Deck PG'],
           summary: 'Add a typed Flight Deck PG workspace member',
-          description: 'Implemented PH1-5 runtime workspace membership creation. Authorizes workspace.invite and creates membership in the system Workspace group. Workspace group login and explicit content grants are independent: no scope/channel content grant is created by membership. Owner/admin membership also joins Admins.',
+          description: 'Implemented PH1-5 runtime workspace membership creation. Authorizes workspace.invite and creates membership in the system Workspace group. Workspace group login and explicit content grants are independent: no scope/channel content grant is created by membership. Owner/admin membership also joins Admins and requires the canonical workspace owner. Owner roles cannot be demoted through this endpoint.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
           ],
@@ -9626,7 +9628,7 @@ export function buildOpenApiDocument(origin: string) {
       '/api/v4/storage/{objectId}/download-url': {
         get: {
           tags: ['Storage'],
-          summary: 'Get a time-limited download URL for a storage object',
+          summary: 'Get an authorized download URL (private objects require signed Tower content requests) for a storage object',
           description: 'Uses the same owner/group/public or active message-link authorization as metadata and content reads.',
           security: [{ nip98: [] }],
           parameters: [

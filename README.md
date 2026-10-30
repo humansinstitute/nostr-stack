@@ -120,3 +120,7 @@ its error and branch semantics, and the separate runtime activation check.
 ## USD hosting billing
 
 [USD prepaid hosting v1](docs/contract/hosting-billing-usd-v1.md) describes customer/workspace linking, exact byte-hour charges, the durable Tower runtime runner, Stripe test-mode top-ups, and the explicit live rollout gate. Existing workspaces remain safely unlinked.
+
+## Workspace membership administration
+
+[Workspace membership administration v1](docs/contract/workspace-membership-administration-v1.md) defines explicit owner-controlled agent-manager coverage, exact-identity removal previews, durable authorship, revocable private downloads, enrollment tombstones and Tower-first activation. Installing the feature does not remove or grant access to any real identity.

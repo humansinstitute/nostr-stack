@@ -2276,6 +2276,7 @@ export interface NstackServiceDiscoveryV1 {
 }
 
 export interface V4StorageObject {
+  pg_workspace_id?: string | null;
   id: string;
   owner_npub: string;
   owner_group_id: string | null;
@@ -3532,4 +3533,20 @@ export interface PermissionDiagnosticResponse {
   decisions: { permission: FlightDeckPgPermission; resource_type: 'channel' | 'scope'; resource_id: string; allowed: boolean; reason: string; grant_id: string | null }[];
   matching_sources: { id: string; principal_type: 'actor' | 'group'; principal_actor_id: string | null; principal_group_id: string | null; resource_type: 'channel' | 'scope'; resource_scope_id: string | null; resource_channel_id: string | null; permission: FlightDeckPgPermission }[];
   audit_receipt_id: string;
+}
+
+/** Workspace membership administration is opt-in; role assignment is canonical-owner only. */
+export interface WorkspaceAgentManagerRequest { enabled: boolean; confirm_npub: string }
+export interface WorkspaceMemberRemovalRequest { confirmation_token: string; confirm_npub: string }
+export interface WorkspaceMemberPermission { permission: FlightDeckPgPermission; allowed: boolean }
+export interface WorkspaceMemberAccessInspection {
+  actor: { id: string; npub: string; kind: FlightDeckPgActorKind; display_name: string | null };
+  membership: { workspace_id: string; actor_id: string; role: FlightDeckPgWorkspaceRole };
+  agent_manager: boolean;
+  can_administer: boolean;
+  coverage: {
+    workspace: WorkspaceMemberPermission[];
+    scopes: { id: string; name: string; permissions: WorkspaceMemberPermission[] }[];
+    channels: { id: string; name: string; scope_id: string; permissions: WorkspaceMemberPermission[] }[];
+  };
 }

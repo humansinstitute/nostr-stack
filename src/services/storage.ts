@@ -140,7 +140,7 @@ export async function prepareStorageObject(input: PrepareStorageInput, authNpub:
   return updated;
 }
 
-export async function prepareStorageObjectForAuthorizedOwner(input: PrepareStorageInput, authNpub: string): Promise<V4StorageObject> {
+export async function prepareStorageObjectForAuthorizedOwner(input: PrepareStorageInput, authNpub: string, options: { workspaceId?: string } = {}): Promise<V4StorageObject> {
   const sql = getDb();
   const ownerNpub = String(input.owner_npub || '').trim();
   const fileName = String(input.file_name || '').trim() || null;
@@ -151,10 +151,19 @@ export async function prepareStorageObjectForAuthorizedOwner(input: PrepareStora
   const isPublic = input.is_public === true;
 
   if (!ownerNpub) throw new Error('owner_npub required');
+  if (options.workspaceId) {
+    const [member] = await sql`
+      SELECT 1 FROM flightdeck_pg_workspaces w
+      JOIN flightdeck_pg_workspace_memberships m ON m.workspace_id=w.id
+      JOIN flightdeck_pg_actors a ON a.id=m.actor_id
+      WHERE w.id=${options.workspaceId} AND w.workspace_owner_npub=${ownerNpub} AND a.npub=${authNpub}
+    `;
+    if (!member) throw new Error('workspace membership required for storage prepare');
+  }
 
   const [row] = await sql<V4StorageObject[]>`
-    INSERT INTO v4_storage_objects (owner_npub, owner_group_id, created_by_npub, access_group_ids, is_public, file_name, content_type, size_bytes, storage_path)
-    VALUES (${ownerNpub}, ${ownerGroupId}, ${authNpub}, ${accessGroupIds}, ${isPublic}, ${fileName}, ${contentType}, ${sizeBytes}, '')
+    INSERT INTO v4_storage_objects (owner_npub, owner_group_id, created_by_npub, access_group_ids, is_public, file_name, content_type, size_bytes, storage_path, pg_workspace_id)
+    VALUES (${ownerNpub}, ${ownerGroupId}, ${authNpub}, ${accessGroupIds}, ${isPublic}, ${fileName}, ${contentType}, ${sizeBytes}, '', ${options.workspaceId ?? null})
     RETURNING *
   `;
 
@@ -196,6 +205,16 @@ export async function getStorageObject(objectId: string): Promise<V4StorageObjec
   return row || null;
 }
 
+async function hasBoundWorkspaceMembership(row: V4StorageObject, actorNpub: string): Promise<boolean> {
+  if (!row.pg_workspace_id) return true;
+  const [member] = await getDb()`
+    SELECT 1 FROM flightdeck_pg_workspace_memberships m
+    JOIN flightdeck_pg_actors a ON a.id=m.actor_id
+    WHERE m.workspace_id=${row.pg_workspace_id} AND a.npub=${actorNpub}
+  `;
+  return Boolean(member);
+}
+
 /**
  * Check if authNpub can access a storage object. Returns the object if accessible, null otherwise.
  * Also handles is_public — pass authNpub as null for unauthenticated public access.
@@ -210,6 +229,7 @@ export async function canAccessStorageObject(objectId: string, authNpub: string 
 
   // All remaining checks require authentication
   if (!authNpub) return null;
+  if (!await hasBoundWorkspaceMembership(row, authNpub)) return null;
 
   // Resolve created_by_npub in case the object was created with a ws_key
   const creatorRealNpub = await resolveWsKeyNpub(row.created_by_npub) ?? row.created_by_npub;
@@ -247,6 +267,7 @@ export async function completeStorageObject(objectId: string, input: CompleteSto
   const sql = getDb();
   const existing = await getStorageObject(objectId);
   if (!existing) return null;
+  if (!await hasBoundWorkspaceMembership(existing, authNpub)) return null;
 
   // Resolve created_by_npub in case the object was created with a ws_key
   const creatorRealNpub = await resolveWsKeyNpub(existing.created_by_npub) ?? existing.created_by_npub;
@@ -278,6 +299,7 @@ export async function completeStorageObject(objectId: string, input: CompleteSto
 export async function writeStorageObject(objectId: string, bytes: Uint8Array, authNpub: string): Promise<V4StorageObject | null> {
   const row = await getStorageObject(objectId);
   if (!row || row.completed_at) return null;
+  if (!await hasBoundWorkspaceMembership(row, authNpub)) return null;
 
   // Resolve created_by_npub in case the object was created with a ws_key
   const creatorRealNpub = await resolveWsKeyNpub(row.created_by_npub) ?? row.created_by_npub;
@@ -315,6 +337,9 @@ export async function getStorageObjectContent(objectId: string): Promise<{ row: 
 export async function getStorageDownloadUrl(objectId: string): Promise<string | null> {
   const row = await getStorageObject(objectId);
   if (!row || !row.completed_at) return null;
+  // Private reads must go through Tower's signed content route, which checks
+  // current membership and resource ACLs. An S3 bearer URL outlives revocation.
+  if (!row.is_public) return null;
 
   const publicEndpoint = config.storage.s3PublicEndpoint;
   if (!publicEndpoint) return null;

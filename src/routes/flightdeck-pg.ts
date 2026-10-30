@@ -1,3 +1,4 @@
+import { MembershipAdminError, previewWorkspaceMemberRemoval, removeWorkspaceMember, setWorkspaceAgentManager, inspectWorkspaceMemberAccess } from '../services/flightdeck-pg-membership-admin';
 import { registerPermissionDiagnosticRoutes } from './permission-diagnostics';
 import {
   FlightDeckPgEnrollmentError,
@@ -2296,7 +2297,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/storage/prepare', async (c) =>
       owner_group_id: null,
       access_group_ids: [],
       is_public: body.is_public === true && isWorkspaceProfileAvatar,
-    }, auth.userNpub);
+    }, auth.userNpub, { workspaceId: context.workspace.id });
     const origin = new URL(c.req.url).origin;
     const uploadUrl = await getStorageUploadUrl(row.id);
     const downloadUrl = await getStorageDownloadUrl(row.id);
@@ -3689,6 +3690,17 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/events/stream', async (c) => {
             ? unionPage.events
             : (await listVisibleFlightDeckPgEvents({ workspaceId: context.workspace.id, actorId: context.actor.id, groupIds: currentContext.groupIds, afterRowVersion, limit, includeWorkspaceEvents: currentRead.allowed }))
               .map((event) => ({ event, visibleToAgentNpubs: [] }));
+          // A removal may commit while event bodies are being loaded. Do not
+          // emit a batch using the membership/group snapshot from before it.
+          const afterLoadContext = await resolveFlightDeckPgRequestContext({
+            workspaceId: context.workspace.id, actorNpub: auth.userNpub,
+          });
+          if (!afterLoadContext.membership) {
+            controller.enqueue(encodeSseFrame({ event: 'flightdeck_pg.error', data: { error: 'workspace_access_revoked' } }));
+            close();
+            controller.close();
+            return;
+          }
           for (const { event: row, visibleToAgentNpubs } of events) {
             if (closed) return;
             const event = {
@@ -3785,7 +3797,15 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/members', async (c) => {
   });
   if (!decision.allowed) return authorizationError(c, decision, identity, 'workspace.invite');
 
-  const payload = await getDb().begin(async (tx) => {
+  const existingMember = await resolveFlightDeckPgActorByNpub(memberNpub);
+  const existingRole = existingMember ? await getFlightDeckPgWorkspaceMembership(context.workspace.id,existingMember.id) : null;
+  if ((role === 'owner' || role === 'admin' || existingRole?.role === 'owner' || existingRole?.role === 'admin') && auth.userNpub !== context.workspace.workspace_owner_npub) {
+    return jsonError(c,403,'workspace_owner_required','Only the canonical workspace owner may assign or change owner/admin roles',identity);
+  }
+  if (existingRole?.role === 'owner' && role !== 'owner') return jsonError(c,403,'cannot_demote_owner','Owner role changes require a separate ownership transfer flow',identity);
+
+  let payload;
+  try { payload = await getDb().begin(async (tx) => {
     const sql = asDbClient(tx);
     const member = await createFlightDeckPgWorkspaceMember({
       workspaceId: context.workspace.id,
@@ -3805,6 +3825,10 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/members', async (c) => {
     }, sql);
     return { ...member, auditId };
   });
+  } catch (error) {
+    if (error instanceof MembershipAdminError) return jsonError(c,error.status,error.code,error.message,identity);
+    throw error;
+  }
 
   return c.json({
     identity,
@@ -3827,6 +3851,30 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/members', async (c) => {
     },
   }, 201);
 });
+
+// Exact actor UUIDs and canonical owner identity are the administration boundary.
+for (const [method, suffix] of [['get','access'],['post','removal-preview'],['post','remove'],['put','agent-manager']] as const) {
+  flightDeckPgRouter[method](`/workspaces/:workspaceId/members/:actorId/${suffix}`, async (c) => {
+    const auth = await requireNip98AuthResolved(c);
+    if (auth instanceof Response) return auth;
+    const result = await requireFlightDeckPgContext(c,auth.userNpub);
+    if ('response' in result) return result.response;
+    const {context,identity} = result;
+    const actorId = c.req.param('actorId');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(actorId)) return jsonError(c,400,'invalid_actor_id','actorId must be a UUID',identity);
+    try {
+      const body = method === 'get' ? {} : await readJsonBody(c);
+      if (!body) return jsonError(c,400,'invalid_json','body must be valid JSON',identity);
+      if (suffix === 'access') return c.json({identity,...await inspectWorkspaceMemberAccess(context.workspace.id,actorId,auth.userNpub)});
+      if (suffix === 'removal-preview') return c.json({identity,preview:await previewWorkspaceMemberRemoval(context.workspace.id,actorId,auth.userNpub)});
+      if (suffix === 'remove') return c.json({identity,...await removeWorkspaceMember(context.workspace.id,actorId,auth.userNpub,body)});
+      return c.json({identity,...await setWorkspaceAgentManager(context.workspace.id,actorId,auth.userNpub,body)});
+    } catch (error) {
+      if (error instanceof MembershipAdminError) return jsonError(c,error.status,error.code,error.message,identity);
+      throw error;
+    }
+  });
+}
 
 flightDeckPgRouter.get('/workspaces/:workspaceId/members', async (c) => {
   const auth = await requireNip98AuthResolved(c);
@@ -4236,7 +4284,15 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/invites', async (c) => {
   });
   if (!decision.allowed) return authorizationError(c, decision, identity, 'workspace.invite');
 
-  const payload = await getDb().begin(async (tx) => {
+  const existingMember = await resolveFlightDeckPgActorByNpub(memberNpub);
+  const existingRole = existingMember ? await getFlightDeckPgWorkspaceMembership(context.workspace.id, existingMember.id) : null;
+  if ((role === 'owner' || role === 'admin' || existingRole?.role === 'owner' || existingRole?.role === 'admin') && auth.userNpub !== context.workspace.workspace_owner_npub) {
+    return jsonError(c, 403, 'workspace_owner_required', 'Only the canonical workspace owner may assign or change owner/admin roles', identity);
+  }
+  if (existingRole?.role === 'owner' && role !== 'owner') return jsonError(c, 403, 'cannot_demote_owner', 'Owner role changes require a separate ownership transfer flow', identity);
+
+  let payload;
+  try { payload = await getDb().begin(async (tx) => {
     const sql = asDbClient(tx);
     const member = await createFlightDeckPgWorkspaceMember({
       workspaceId: context.workspace.id,
@@ -4260,6 +4316,10 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/invites', async (c) => {
     }, sql);
     return { ...member, auditId };
   });
+  } catch (error) {
+    if (error instanceof MembershipAdminError) return jsonError(c,error.status,error.code,error.message,identity);
+    throw error;
+  }
 
   return c.json({
     identity,
@@ -4374,6 +4434,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/scopes', async (c) => {
           (${context.workspace.id}, 'actor', ${context.actor.id}, 'scope', ${scope.id}, 'scope.read', ${context.actor.id}),
           (${context.workspace.id}, 'actor', ${context.actor.id}, 'scope', ${scope.id}, 'scope.manage', ${context.actor.id}),
           (${context.workspace.id}, 'actor', ${context.actor.id}, 'scope', ${scope.id}, 'channel.create', ${context.actor.id})
+        ON CONFLICT DO NOTHING
       `;
       await sql`
         INSERT INTO flightdeck_pg_permission_grants (

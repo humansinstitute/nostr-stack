@@ -116,7 +116,7 @@ storageRouter.get('/:objectId', async (c) => {
     size_bytes: row.size_bytes,
     sha256_hex: row.sha256_hex,
     content_url: `${origin}/api/v4/storage/${row.id}/content`,
-    download_url: downloadUrl,
+    download_url: downloadUrl || `${origin}/api/v4/storage/${row.id}/content`,
     created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     completed_at: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
   });
@@ -248,7 +248,7 @@ storageRouter.get('/:objectId/content', async (c) => {
       'Content-Type': row.content_type || 'application/octet-stream',
       'Content-Length': String(row.size_bytes || size || 0),
       'Content-Disposition': `inline; filename=\"${row.file_name || `${row.id}.bin`}\"`,
-      'Cache-Control': 'private, max-age=300',
+      'Cache-Control': 'private, no-store',
     },
   });
 });

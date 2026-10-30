@@ -170,6 +170,38 @@ afterAll(async () => {
 });
 
 describe('Flight Deck PG setup workspace bootstrap', () => {
+  test('bootstrap cannot resurrect a retired member or restore their old access', async () => {
+    const input = {
+      towerServiceNpub: testNpub('retired-setup-tower'),
+      workspaceServiceNpub: testNpub('retired-setup-workspace'),
+      workspaceOwnerNpub: testNpub('retired-setup-owner'),
+      appNpub: testNpub('retired-setup-app'),
+      creatorNpub: testNpub('retired-setup-creator'),
+      workspaceName: 'Retired setup member',
+      secondActorNpub: testNpub('retired-setup-second'),
+      secondActorDisplayName: 'Retired member',
+    };
+    const result = await setupFlightDeckPgDevWorkspace(input, sql);
+    const [actor] = await sql`SELECT id FROM flightdeck_pg_actors WHERE npub=${input.secondActorNpub}`;
+    const [creator] = await sql`SELECT id FROM flightdeck_pg_actors WHERE npub=${input.creatorNpub}`;
+    const { prepareStorageObjectForAuthorizedOwner, canAccessStorageObject, writeStorageObject, completeStorageObject } = await import('../src/services/storage');
+    const storage = await prepareStorageObjectForAuthorizedOwner({
+      owner_npub: input.workspaceOwnerNpub, content_type: 'text/plain',
+    }, input.secondActorNpub, { workspaceId: result.workspace_id });
+    expect((await canAccessStorageObject(storage.id, input.secondActorNpub))?.id).toBe(storage.id);
+    await sql`INSERT INTO flightdeck_pg_workspace_member_removals (workspace_id,actor_id,removed_by_actor_id)
+      VALUES (${result.workspace_id},${actor.id},${creator.id})`;
+    await sql`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${result.workspace_id} AND actor_id=${actor.id}`;
+    expect(await canAccessStorageObject(storage.id, input.secondActorNpub)).toBeNull();
+    expect(await writeStorageObject(storage.id, new Uint8Array([1]), input.secondActorNpub)).toBeNull();
+    expect(await completeStorageObject(storage.id, {}, input.secondActorNpub)).toBeNull();
+    await expect(setupFlightDeckPgDevWorkspace(input, sql)).rejects.toThrow('workspace_member_removed');
+    const membership = await sql`SELECT 1 FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${result.workspace_id} AND actor_id=${actor.id}`;
+    expect(membership).toHaveLength(0);
+    const groups = await sql`SELECT 1 FROM flightdeck_pg_group_memberships WHERE workspace_id=${result.workspace_id} AND actor_id=${actor.id}`;
+    expect(groups).toHaveLength(0);
+  });
+
   test('is idempotent for default group bootstrap and prints descriptor-compatible fields', async () => {
     const input = {
       towerServiceNpub: testNpub('fdpg-setup-tower'),

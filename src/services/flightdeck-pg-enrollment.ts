@@ -49,6 +49,9 @@ export async function enrollFlightDeckPgGroupMember(input: {
 
   // Never call the role-changing workspace member helper on this path.
   // The existing AFTER INSERT trigger adds new members to the default Workspace group atomically.
+  // A retired identity can return only through this explicit, authorized action;
+  // bootstrap and subscription paths cannot satisfy the exact actor marker.
+  await sql`SELECT set_config('tower.explicit_member_enrollment', ${`${input.workspaceId}:${actor.id}`}, true)`;
   const inserted = await sql`
     INSERT INTO flightdeck_pg_workspace_memberships (workspace_id, actor_id, role, created_by_actor_id)
     VALUES (${input.workspaceId}, ${actor.id}, 'member', ${input.createdByActorId})
