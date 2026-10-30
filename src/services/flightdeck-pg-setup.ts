@@ -1,3 +1,4 @@
+import { reconcileFlightDeckPgDmDefaults } from './flightdeck-pg-dm-defaults';
 import { linkHostedAccount } from './hosting-billing';
 import { createHash } from 'crypto';
 import { nip19 } from 'nostr-tools';
@@ -351,41 +352,6 @@ async function ensureScope(
   return scope;
 }
 
-async function ensureDmScope(
-  sql: DbClient,
-  input: { workspaceId: string; workspaceGroupId: string; createdByActorId: string },
-): Promise<FlightDeckPgScopeRow> {
-  const [scope] = await sql<FlightDeckPgScopeRow[]>`
-    INSERT INTO flightdeck_pg_scopes (
-      workspace_id,
-      name,
-      description,
-      kind,
-      created_by_actor_id
-    )
-    VALUES (
-      ${input.workspaceId},
-      'DMs',
-      'Direct message conversations',
-      'dm',
-      ${input.createdByActorId}
-    )
-    ON CONFLICT (workspace_id, name)
-    DO UPDATE SET updated_at = NOW()
-    RETURNING *
-  `;
-  await ensureGrant(sql, {
-    workspaceId: input.workspaceId,
-    principalType: 'group',
-    principalId: input.workspaceGroupId,
-    resourceType: 'scope',
-    scopeId: scope.id,
-    permission: 'scope.read',
-    createdByActorId: input.createdByActorId,
-  });
-  return scope;
-}
-
 async function ensureChannel(
   sql: DbClient,
   input: { workspaceId: string; scopeId: string; name: string; createdByActorId: string },
@@ -626,11 +592,7 @@ export async function setupFlightDeckPgDevWorkspace(
     createdByActorId: creator.id,
   });
 
-  await ensureDmScope(sql, {
-    workspaceId: workspace.id,
-    workspaceGroupId: groups.Workspace.id,
-    createdByActorId: creator.id,
-  });
+  await reconcileFlightDeckPgDmDefaults(sql, workspace.id);
   const channelNames = normalizeChannelNames(input);
   const smokeScopeName = optional(input.smokeScopeName) || (channelNames.length > 0 ? 'Flight Deck PG Smoke' : null);
   const scope = smokeScopeName

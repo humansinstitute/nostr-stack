@@ -1,3 +1,4 @@
+import { reconcileFlightDeckPgDmDefaults } from './flightdeck-pg-dm-defaults';
 import { nip19 } from 'nostr-tools';
 import { getDb } from '../db';
 import type { FlightDeckPgPersonKind } from '../types';
@@ -73,6 +74,7 @@ export async function enrollFlightDeckPgGroupMember(input: {
     SELECT * FROM flightdeck_pg_group_memberships
     WHERE workspace_id = ${input.workspaceId} AND group_id = ${input.groupId} AND actor_id = ${actor.id}
   `;
+  await reconcileFlightDeckPgDmDefaults(sql, input.workspaceId);
   return { actor, membership, workspaceMemberCreated: inserted.length > 0, groupMemberCreated: added.length > 0 };
 }
 

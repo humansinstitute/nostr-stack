@@ -1,3 +1,4 @@
+import { reconcileFlightDeckPgDmDefaults } from '../services/flightdeck-pg-dm-defaults';
 import { hostingBillingV1Sql } from './hosting-billing-v1';
 import { driveV1Sql } from './drive-v1';
 import { learningV1Sql } from './learning-v1';
@@ -1383,52 +1384,6 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
         ('Workspace', 'workspace.read')
     ) AS perms(group_name, permission)
     WHERE g.name = perms.group_name
-    ON CONFLICT (
-      workspace_id,
-      principal_type,
-      COALESCE(principal_actor_id, '00000000-0000-0000-0000-000000000000'::uuid),
-      COALESCE(principal_group_id, '00000000-0000-0000-0000-000000000000'::uuid),
-      resource_type,
-      COALESCE(resource_scope_id, '00000000-0000-0000-0000-000000000000'::uuid),
-      COALESCE(resource_channel_id, '00000000-0000-0000-0000-000000000000'::uuid),
-      permission
-    )
-    WHERE revoked_at IS NULL
-    DO NOTHING
-  `);
-
-  await sql.unsafe(`
-    INSERT INTO flightdeck_pg_permission_grants (
-      workspace_id,
-      principal_type,
-      principal_group_id,
-      resource_type,
-      resource_scope_id,
-      permission,
-      created_by_actor_id
-    )
-    SELECT
-      s.workspace_id,
-      'group',
-      g.id,
-      'scope',
-      s.id,
-      'scope.read',
-      COALESCE(w.created_by_actor_id, s.created_by_actor_id)
-    FROM flightdeck_pg_scopes s
-    JOIN flightdeck_pg_workspaces w ON w.id = s.workspace_id
-    JOIN flightdeck_pg_groups g
-      ON g.workspace_id = s.workspace_id
-      AND g.name = 'Workspace'
-    WHERE s.kind = 'dm'
-      AND s.name = 'DMs'
-      -- An explicit revocation is authoritative; startup must not regrant it.
-      AND NOT EXISTS (
-        SELECT 1 FROM flightdeck_pg_permission_grants prior
-        WHERE prior.workspace_id=s.workspace_id AND prior.principal_group_id=g.id
-          AND prior.resource_type='scope' AND prior.resource_scope_id=s.id
-          AND prior.permission='scope.read'
-      )
     ON CONFLICT (
       workspace_id,
       principal_type,
@@ -4376,5 +4331,7 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
   await sql.unsafe(readFileSync(new URL('./notification-push-v1.sql', import.meta.url), 'utf8'));
 
   await sql.unsafe(readFileSync(new URL('./workspace-membership-admin-v1.sql', import.meta.url), 'utf8'));
+
+  await reconcileFlightDeckPgDmDefaults(sql);
 
 }

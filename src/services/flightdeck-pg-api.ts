@@ -1,3 +1,4 @@
+import { reconcileFlightDeckPgDmDefaults } from './flightdeck-pg-dm-defaults';
 import { MembershipAdminError } from './flightdeck-pg-membership-admin';
 import { acquireDocumentEditSession } from './document-edit-session';
 import { DOCUMENT_EDIT_PROTOCOL, type DocumentEditSessionRequest } from '../types';
@@ -2405,6 +2406,7 @@ export async function createFlightDeckPgWorkspaceMember(
       ON CONFLICT (workspace_id, group_id, actor_id) DO NOTHING
     `;
   }
+  await reconcileFlightDeckPgDmDefaults(sql, input.workspaceId);
   return { actor, membership };
 }
 
@@ -2994,6 +2996,7 @@ export async function updateFlightDeckPgScope(
         updated_at = NOW()
     WHERE workspace_id = ${input.workspaceId}
       AND id = ${input.scopeId}
+      AND (kind <> 'dm' OR ${input.patch.name === undefined} OR name = ${input.patch.name ?? ''})
       AND archived_at IS NULL
     RETURNING *
   `;

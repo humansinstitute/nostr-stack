@@ -256,14 +256,20 @@ describe('Flight Deck PG setup workspace bootstrap', () => {
     expect(payload).not.toContain('private_key');
   });
 
-  test('bootstrap and runtime repair preserve explicit Workspace scope revocations', async () => {
+  test('bootstrap and runtime repair restore only DMs navigation, preserving other explicit revocations', async () => {
     const input={towerServiceNpub:testNpub('revoked-tower'),workspaceServiceNpub:testNpub('revoked-workspace'),workspaceOwnerNpub:testNpub('revoked-owner'),appNpub:testNpub('revoked-app'),creatorNpub:testNpub('revoked-owner'),workspaceName:'Explicit revocation'};
     const setup=await setupFlightDeckPgDevWorkspace(input,sql);
     await sql`UPDATE flightdeck_pg_permission_grants SET revoked_at=now() WHERE workspace_id=${setup.workspace_id} AND principal_group_id=${setup.groups.Workspace} AND resource_type='scope'`;
+    const [privateScope] = await sql`INSERT INTO flightdeck_pg_scopes(workspace_id,name,kind) VALUES(${setup.workspace_id},'Restricted','project') RETURNING id`;
+    await sql`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_group_id,resource_type,resource_scope_id,permission,revoked_at)
+      VALUES(${setup.workspace_id},'group',${setup.groups.Workspace},'scope',${privateScope.id},'scope.read',now())`;
     await setupFlightDeckPgDevWorkspace(input,sql);
     const {ensureRuntimeSchema}=await import('../src/schema/ensure-runtime-schema');
     await ensureRuntimeSchema(sql);
-    expect((await sql`SELECT 1 FROM flightdeck_pg_permission_grants WHERE workspace_id=${setup.workspace_id} AND principal_group_id=${setup.groups.Workspace} AND resource_type='scope' AND revoked_at IS NULL`).length).toBe(0);
+    const active=await sql`SELECT s.kind,s.name FROM flightdeck_pg_permission_grants g JOIN flightdeck_pg_scopes s ON s.id=g.resource_scope_id
+      WHERE g.workspace_id=${setup.workspace_id} AND g.principal_group_id=${setup.groups.Workspace} AND g.resource_type='scope' AND g.revoked_at IS NULL`;
+    expect(active.map(row=>[row.kind,row.name])).toEqual([['dm','DMs']]);
+
   });
 
   test('Workspace members retain login while unshared scopes remain inaccessible', async () => {
@@ -568,5 +574,96 @@ describe('Flight Deck PG setup workspace bootstrap', () => {
       resource: { type: 'channel', channelId: second.json.smoke.channel_id },
     }, sql);
     expect(decision.allowed).toBe(true);
+  });
+});
+
+describe('DM navigation default reconciliation', () => {
+  test('repairs existing members and provisions concurrent joins without widening conversation access', async () => {
+    const { reconcileFlightDeckPgDmDefaults } = await import('../src/services/flightdeck-pg-dm-defaults');
+    const { ensureRuntimeSchema } = await import('../src/schema/ensure-runtime-schema');
+    const { readFlightDeckRecordPage } = await import('../src/services/flightdeck-record-delta');
+    const secrets = [81, 82, 83, 84].map(n => new Uint8Array(32).fill(n));
+    const npubs = secrets.map(key => nip19.npubEncode(getPublicKey(key)));
+    const input = { towerServiceNpub: testNpub('dm-default-tower'), workspaceServiceNpub: testNpub('dm-default-workspace'),
+      workspaceOwnerNpub: npubs[0], appNpub: testNpub('dm-default-app'), creatorNpub: npubs[0], workspaceName: 'DM default regression' };
+    const setup = await setupFlightDeckPgDevWorkspace(input, sql);
+    const workspaceId = setup.workspace_id;
+    const [scope] = await sql`SELECT id FROM flightdeck_pg_scopes WHERE workspace_id=${workspaceId} AND kind='dm' AND name='DMs'`;
+    const members = [];
+    for (const actorNpub of npubs.slice(1, 3)) members.push((await createFlightDeckPgWorkspaceMember({workspaceId, actorNpub, createdByActorId:setup.actors.creator.actor_id}, sql)).actor);
+    // Reproduce the production shape: all current members are in Workspace,
+    // but a historical revoked navigation default suppresses startup/setup repair.
+    await sql`UPDATE flightdeck_pg_permission_grants SET revoked_at=now() WHERE workspace_id=${workspaceId}
+      AND principal_group_id=${setup.groups.Workspace} AND resource_scope_id=${scope.id} AND permission='scope.read'`;
+    const authority = (actorNpub: string, permission: string, resource: any, w = workspaceId) => authorizeFlightDeckPgOperation({workspaceId:w,actorNpub,appNpub:setup.app_npub,permission,resource},sql);
+    expect((await authority(npubs[1]!, 'scope.read', {type:'scope',scopeId:scope.id})).allowed).toBe(false);
+    let before = await readFlightDeckRecordPage({workspaceId, actorId:members[0]!.id},sql);
+    while (before.has_more) before = await readFlightDeckRecordPage({workspaceId,actorId:members[0]!.id,cursor:before.next_cursor},sql);
+    await ensureRuntimeSchema(sql);
+    for (const member of members) expect((await authority(member.npub,'scope.read',{type:'scope',scopeId:scope.id})).allowed).toBe(true);
+    const delta = await readFlightDeckRecordPage({workspaceId,actorId:members[0]!.id,cursor:before.next_cursor},sql);
+    expect(delta.access_changes?.some(change => change.resource_type==='scope' && change.resource_id===scope.id && change.status==='granted')).toBe(true);
+    const count = async () => Number((await sql`SELECT count(*) AS n FROM flightdeck_pg_outbox_events WHERE workspace_id=${workspaceId} AND event_type='scope.access_updated'`)[0]!.n);
+    const afterRepair = await count();
+    await Promise.all([1,2,3].map(()=>reconcileFlightDeckPgDmDefaults(sql,workspaceId)));
+    expect(await count()).toBe(afterRepair);
+    expect((await sql`SELECT 1 FROM flightdeck_pg_permission_grants WHERE workspace_id=${workspaceId} AND principal_group_id=${setup.groups.Workspace}
+      AND resource_scope_id=${scope.id} AND permission='scope.read' AND revoked_at IS NULL`)).toHaveLength(1);
+    // A join also repairs a missing default without waiting for another restart.
+    await sql`UPDATE flightdeck_pg_permission_grants SET revoked_at=now() WHERE workspace_id=${workspaceId}
+      AND principal_group_id=${setup.groups.Workspace} AND resource_scope_id=${scope.id} AND permission='scope.read' AND revoked_at IS NULL`;
+    const joined = await Promise.all([npubs[3]!,testNpub('dm-concurrent-join')].map(actorNpub => createFlightDeckPgWorkspaceMember({workspaceId,actorNpub,createdByActorId:setup.actors.creator.actor_id},sql)));
+    for (const {actor} of joined) expect((await authority(actor.npub,'scope.read',{type:'scope',scopeId:scope.id})).allowed).toBe(true);
+    expect(await count()).toBe(afterRepair+1);
+    const request = async (suffix: string, actor: number, method='GET', body?: any) => {
+      const path=`/api/v4/flightdeck-pg/workspaces/${workspaceId}${suffix}`;
+      const response = await app.request(path,{method,headers:{Authorization:authHeader(path,method,secrets[actor]!,body),'Content-Type':'application/json','x-flightdeck-pg-app-npub':setup.app_npub},...(body?{body:JSON.stringify(body)}:{})});
+      return {status:response.status,body:await response.json() as any};
+    };
+    const navigation = await request('/scopes',1);
+    expect(navigation.status).toBe(200);
+    expect(navigation.body.scopes.some((row:any)=>row.id===scope.id && row.kind==='dm')).toBe(true);
+    const dm = await request(`/scopes/${scope.id}/channels`,1,'POST',{name:'Private pair',kind:'dm',participant_npubs:[npubs[1],npubs[2]]});
+    expect(dm.status).toBe(201);
+    const channelId=dm.body.channel.id;
+    expect((await request(`/channels/${channelId}`,2)).status).toBe(200);
+    expect((await request(`/channels/${channelId}`,3)).status).toBe(403);
+    expect((await request(`/channels/${channelId}/messages`,3)).status).toBe(403);
+    expect((await authority(npubs[3]!,'channel.write',{type:'channel',channelId})).allowed).toBe(false);
+    expect((await authority(npubs[3]!,'channel.manage',{type:'channel',channelId})).allowed).toBe(false);
+    expect((await authority(npubs[3]!,'channel.create',{type:'scope',scopeId:scope.id})).allowed).toBe(false);
+    const hidden = await request(`/scopes/${scope.id}/channels`,3);
+    expect(hidden.status).toBe(200); expect(hidden.body.channels).toEqual([]);
+    const text='Participant-only regression content', bodyHash=sha256Hex(text);
+    const signature={version:1,signer_npub:npubs[1],body_sha256:bodyHash,nostr_event:finalizeEvent({kind:33358,created_at:Math.floor(Date.now()/1000),
+      tags:[['protocol','flightdeck_pg_message_instruction'],['body_sha256',bodyHash],['workspace_id',workspaceId],['channel_id',channelId]],content:text},secrets[1]!)};
+    const sent = await request(`/channels/${channelId}/messages`,1,'POST',{body:text,message_signature:signature});
+    expect(sent.status).toBe(201);
+    expect((await request(`/channels/${channelId}/messages`,2)).status).toBe(200);
+    const outsiderRows=[];
+    let outsiderPage=await readFlightDeckRecordPage({workspaceId,actorId:joined[0]!.actor.id},sql);
+    outsiderRows.push(...outsiderPage.changes);
+    while(outsiderPage.has_more){outsiderPage=await readFlightDeckRecordPage({workspaceId,actorId:joined[0]!.actor.id,cursor:outsiderPage.next_cursor},sql);outsiderRows.push(...outsiderPage.changes);}
+    expect(outsiderRows.some(row=>row.id===channelId || row.row?.channel_id===channelId)).toBe(false);
+    // Scope deletion already excludes dm; protect its canonical navigation name too.
+    const {archiveFlightDeckPgScope,updateFlightDeckPgScope}=await import('../src/services/flightdeck-pg-api');
+    expect(await archiveFlightDeckPgScope({workspaceId,scopeId:scope.id},sql)).toBeNull();
+    expect(await updateFlightDeckPgScope({workspaceId,scopeId:scope.id,patch:{name:'Hidden DMs'}},sql)).toBeNull();
+    // The atomic Groups & Members enrollment path does not call the ordinary
+    // member helper; verify that it repairs the same navigation invariant.
+    await sql`UPDATE flightdeck_pg_permission_grants SET revoked_at=now() WHERE workspace_id=${workspaceId} AND principal_group_id=${setup.groups.Workspace}
+      AND resource_scope_id=${scope.id} AND permission='scope.read' AND revoked_at IS NULL`;
+    const {enrollFlightDeckPgGroupMember}=await import('../src/services/flightdeck-pg-enrollment');
+    const enrolled=await sql.begin(async tx=>enrollFlightDeckPgGroupMember({workspaceId,groupId:setup.groups.People,memberNpub:testNpub('dm-group-enrollment'),kind:'human',createdByActorId:setup.actors.creator.actor_id},tx as unknown as typeof sql));
+    expect((await authority(enrolled.actor.npub,'scope.read',{type:'scope',scopeId:scope.id})).allowed).toBe(true);
+    // Repair is scoped; no other workspace acquires this grant. Existing
+    // membership checks still deny removed participants, even with stale grants.
+    const other = await setupFlightDeckPgDevWorkspace({...input,workspaceServiceNpub:testNpub('dm-other-workspace')},sql);
+    expect((await authority(npubs[1]!,'scope.read',{type:'scope',scopeId:scope.id},other.workspace_id)).allowed).toBe(false);
+    await sql`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspaceId} AND actor_id=${members[1]!.id}`;
+    await reconcileFlightDeckPgDmDefaults(sql,workspaceId);
+    expect((await authority(npubs[2]!,'scope.read',{type:'scope',scopeId:scope.id})).allowed).toBe(false);
+    expect((await request(`/channels/${channelId}/messages`,2)).status).toBe(403);
+    expect(await sql`SELECT 1 FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspaceId} AND actor_id=${members[1]!.id}`).toHaveLength(0);
   });
 });
