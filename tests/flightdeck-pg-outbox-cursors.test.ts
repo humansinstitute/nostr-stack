@@ -95,7 +95,13 @@ describe('Flight Deck PG outbox cursor schema', () => {
     await ensureRuntimeSchema(sql);
     const event = await insertOutboxEvent('flightdeck_pg.schema.clean');
 
-    expect(event.row_version).toBe(1);
+    // Startup now repairs canonical DMs visibility through the ordinary
+    // outbox. That first event must receive a valid initial cursor too.
+    const [repair] = await sql`SELECT event_type, row_version FROM flightdeck_pg_outbox_events
+      WHERE workspace_id=${workspaceId} ORDER BY row_version LIMIT 1`;
+    expect(repair.event_type).toBe('scope.access_updated');
+    expect(repair.row_version).toBe(1);
+    expect(event.row_version).toBe(2);
   });
 
   test('preserves sparse high cursors across repeated schema assurance', async () => {
