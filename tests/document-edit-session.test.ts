@@ -15,7 +15,7 @@ const port = Number(process.env.DOCUMENT_EDIT_TEST_PORT);
 describe.skipIf(!port || port === 5432)('document editing authority on disposable PostgreSQL', () => {
   const database = `document_edit_${process.pid}_${Date.now()}`;
   const conn = {host:'127.0.0.1',port,username:'postgres',password:'postgres',onnotice:()=>{}};
-  const secrets = [new Uint8Array(32).fill(123),new Uint8Array(32).fill(124)];
+  const secrets = [new Uint8Array(32).fill(123),new Uint8Array(32).fill(124),new Uint8Array(32).fill(125)];
   const identities = secrets.map(s=>nip19.npubEncode(getPublicKey(s)));
   let db:ReturnType<typeof postgres>, previous:ReturnType<typeof postgres>, app:ReturnType<typeof createApp>;
   let workspace:string, channel:string, scope:string, actors:string[];
@@ -49,13 +49,13 @@ describe.skipIf(!port || port === 5432)('document editing authority on disposabl
     const admin=postgres({...conn,database:'postgres'});await admin.unsafe(`CREATE DATABASE ${database}`);await admin.end();
     db=postgres({...conn,database});previous=getDb();setDb(db);
     for(const statement of splitSqlStatements(readFileSync(new URL('../src/schema/001_init.sql',import.meta.url),'utf8')))await db.unsafe(statement);
-    const rows=await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${identities[0]!},'human'),(${identities[1]!},'human') RETURNING id`;actors=rows.map(r=>r.id);
+    const rows=await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${identities[0]!},'human'),(${identities[1]!},'human'),(${identities[2]!},'human') RETURNING id`;actors=rows.map(r=>r.id);
     const [w]=await db`INSERT INTO flightdeck_pg_workspaces(tower_service_npub,workspace_service_npub,workspace_owner_npub,app_npub,name)
       VALUES('document-edit-tower','document-edit-workspace',${identities[0]!},'document-edit-app','Disposable document editing') RETURNING id`;workspace=w!.id;
     for(const actor of actors)await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspace},${actor},'member')`;
     const [s]=await db`INSERT INTO flightdeck_pg_scopes(workspace_id,name,kind) VALUES(${workspace},'Fixture','project') RETURNING id`;scope=s!.id;
     const [c]=await db`INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name) VALUES(${workspace},${scope},'Fixture') RETURNING id`;channel=c!.id;
-    for(const actor of actors)for(const permission of ['channel.read','channel.write','doc.read','doc.write'])await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission)
+    for(const actor of actors)for(const permission of (actor===actors[2]?['channel.read','doc.read']:['channel.read','channel.write','doc.read','doc.write']))await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission)
       VALUES(${workspace},'actor',${actor},'channel',${channel},${permission})`;
     await ensureRuntimeSchema();app=createApp();
   });
@@ -130,13 +130,46 @@ describe.skipIf(!port || port === 5432)('document editing authority on disposabl
     const current=await call(path,'POST',{row_version:2,base_body_sha256_hex:object.sha256_hex,lease_token:next.body.lease.lease_token});
     expect(current.status).toBe(200);expect(current.body.doc.title).toBe('Preserved old title');expect(current.body.doc.row_version).toBe(3);
   });
-  test('other actors cannot take over; concurrent acquisitions grant exactly one document authority',async()=>{
-    const {doc}=await fixture();const first=await acquire(doc.id,randomUUID());
+  test('another authorized writer can explicitly take over and fences the previous editor',async()=>{
+    const {doc,object}=await fixture();const oldSession=randomUUID(),first=await acquire(doc.id,oldSession);
     const other=await call(`${base()}/edit-leases/acquire`,'POST',{entity_type:'document',entity_id:doc.id,document_edit_protocol:DOCUMENT_EDIT_PROTOCOL,
       editor_session_id:randomUUID(),takeover:true,expected_lease_id:first.body.lease.id},1);
-    expect(other.status).toBe(409);expect(other.body.code).toBe('edit_lease_held');
+    expect(other.status).toBe(201);expect(other.body.taken_over).toBe(true);
+    expect(other.body.lease.holder_actor_npub).toBe(identities[1]);expect(other.body.doc.row_version).toBe(2);
+    expect(other.body.canonical_version.storage_object_id).toBe(object.id);expect(other.body.doc.title).toBe('Original title');
+    expect((await call(`${base()}/edit-leases/${first.body.lease.id}/renew`,'POST',{lease_token:first.body.lease.lease_token,ttl_seconds:120})).body.code).toBe('document_edit_session_superseded');
+    expect((await acquire(doc.id,oldSession)).body.code).toBe('document_edit_session_superseded');
+    const stale=await patch(doc.id,first.body.lease.lease_token,1,object,'Previous writer draft');
+    expect(stale.status).toBe(409);expect(stale.body.code).toBe('document_recovery_created');
+    const saved=await call(`${base()}/docs/${doc.id}`,'PATCH',{row_version:2,lease_token:other.body.lease.lease_token,title:'New writer title'},1);
+    expect(saved.status).toBe(200);expect(saved.body.doc.title).toBe('New writer title');
+    expect((await call(`${base()}/edit-leases/${first.body.lease.id}/release`,'POST',{lease_token:first.body.lease.lease_token})).body.released).toBe(false);
+    expect((await call(`${base()}/edit-leases/${other.body.lease.id}/renew`,'POST',{lease_token:other.body.lease.lease_token,ttl_seconds:120},1)).status).toBe(200);
+  });
+  test('read-only actors cannot override a checkout or acquire edit authority',async()=>{
+    const {doc}=await fixture();const first=await acquire(doc.id,randomUUID());
+    for(const extra of [{},{takeover:true,expected_lease_id:first.body.lease.id}]){
+      const denied=await call(`${base()}/edit-leases/acquire`,'POST',{entity_type:'document',entity_id:doc.id,document_edit_protocol:DOCUMENT_EDIT_PROTOCOL,editor_session_id:randomUUID(),...extra},2);
+      expect(denied.status).toBe(403);
+    }
+    expect((await call(`${base()}/edit-leases/${first.body.lease.id}/renew`,'POST',{lease_token:first.body.lease.lease_token,ttl_seconds:120})).status).toBe(200);
+    const [head]=await db`SELECT row_version FROM flightdeck_pg_docs WHERE id=${doc.id}`;expect(head!.row_version).toBe(1);
+  });
+  test('concurrent ordinary acquisitions grant exactly one document authority',async()=>{
     const fresh=await fixture();const race=await Promise.all([acquire(fresh.doc.id,randomUUID()),acquire(fresh.doc.id,randomUUID())]);
     expect(race.map(r=>r.status).sort()).toEqual([201,409]);
+  });
+  test('competing writers cannot both replace the same observed checkout',async()=>{
+    const {doc}=await fixture();const first=await acquire(doc.id,randomUUID());
+    const attempts=await Promise.all([0,1].map(actor=>call(`${base()}/edit-leases/acquire`,'POST',{
+      entity_type:'document',entity_id:doc.id,document_edit_protocol:DOCUMENT_EDIT_PROTOCOL,
+      editor_session_id:randomUUID(),takeover:true,expected_lease_id:first.body.lease.id,
+    },actor)));
+    expect(attempts.map(r=>r.status).sort()).toEqual([201,409]);
+    expect(attempts.find(r=>r.status===409)!.body.code).toBe('edit_lease_changed');
+    const [head]=await db`SELECT row_version FROM flightdeck_pg_docs WHERE id=${doc.id}`;expect(head!.row_version).toBe(2);
+    const active=await db`SELECT id FROM flightdeck_pg_edit_leases WHERE entity_id=${doc.id} AND released_at IS NULL AND superseded_at IS NULL AND expires_at>NOW()`;
+    expect(active).toHaveLength(1);
   });
   test('takeover waits for canonical row lock and returns coherent latest content and title',async()=>{
     const {doc,object}=await fixture();const first=await acquire(doc.id,randomUUID());

@@ -1,4 +1,4 @@
-# Document editor sessions and explicit device takeover
+# Document editor sessions and explicit checkout takeover
 
 An open document can checkpoint through the existing canonical body PATCH. It does not need a new shared-draft family. Tower remains the editing authority, while each client retains durable local drafts and existing typed recovery versions. This protocol is additive: ordinary Save from older native, Android, web and agent clients continues to work.
 
@@ -8,7 +8,7 @@ An open document can checkpoint through the existing canonical body PATCH. It do
 
 Every active document lease conflicts with an ordinary acquire, including one held by the same actor on another device. Conflict responses retain top-level holder/expiry and add `lease`, `lease_id` and the same values under `details`, without exposing a token or editor session. A session holding its token renews it; an acquire never silently rotates its authority.
 
-A user may explicitly take over their own editing session by sending the protocol/session pair, `takeover: true` and the last inspected `expected_lease_id`. Use a fresh editor session UUID for the takeover. The request fails if the lease changed or belongs to another actor. It never grants a cross-actor override.
+Any authorized document writer may explicitly take over an editing session, including one held by another person, by sending the protocol/session pair, `takeover: true` and the last inspected `expected_lease_id`. Use a fresh editor session UUID for the takeover. The acquire route requires `doc.write` or `channel.write` on the document's channel before changing authority; read access alone cannot override a checkout. The request fails if the observed lease changed. Opening a document elsewhere must not prevent another authorized writer from deliberately taking over.
 
 A successful takeover, in one transaction:
 
@@ -36,6 +36,6 @@ Remote autosave must serialize saves, skip unchanged bodies, retain fresh typing
 
 ## Validation and activation
 
-`tests/document-edit-session.test.ts` requires an explicit disposable PostgreSQL port in `DOCUMENT_EDIT_TEST_PORT` and refuses port 5432. It exercises legacy Save, same-actor conflicts, explicit takeover, coherent barrier snapshots, old-token rejection, persistent supersession, unchanged old-base recovery after successor expiry, cross-actor denial, concurrent acquisition, document-lock ordering and rollback of authority/head/history/audit as one transaction. It uses synthetic identities/documents only.
+`tests/document-edit-session.test.ts` requires an explicit disposable PostgreSQL port in `DOCUMENT_EDIT_TEST_PORT` and refuses port 5432. It exercises legacy Save, same-actor conflicts, explicit same-actor and cross-actor writer takeover, read-only denial, coherent barrier snapshots, old-token rejection, persistent supersession, unchanged old-base recovery after successor expiry, concurrent acquisition, document-lock ordering and rollback of authority/head/history/audit as one transaction. It uses synthetic identities/documents only.
 
 Source tests do not activate the managed Tower. Build/restart and authenticated live smoke checks belong to the authorized runtime owner. Do not advertise live takeover until the serving Tower echoes this protocol and the clients are installed/serving.

@@ -51,9 +51,8 @@ export async function acquireDocumentEditSession(input: DocumentEditAcquireInput
       ok: false, reason: 'edit_lease_changed', ...(active ? { lease: serializeFlightDeckPgEditLease(active) } : {}),
     } as DocumentEditAcquireError;
     if (active.editor_session_id && active.editor_session_id === session) return {ok:false,reason:'edit_lease_changed',lease:serializeFlightDeckPgEditLease(active)} as DocumentEditAcquireError;
-    if (active.holder_actor_id !== input.actorId) return {
-      ok: false, reason: 'lease_conflict', lease: serializeFlightDeckPgEditLease(active),
-    } as DocumentEditAcquireError;
+    // The acquire route has already authorized doc.write/channel.write. Any authorized
+    // writer may explicitly replace the observed editor, including another actor.
     // A takeover is also a version barrier. Legacy clients can reacquire after expiry but their captured
     // pre-takeover base can only produce a typed recovery, even when the body's hash did not change.
     await sql`UPDATE flightdeck_pg_edit_leases SET released_at=COALESCE(released_at,NOW()),superseded_at=NOW(),updated_at=NOW()
