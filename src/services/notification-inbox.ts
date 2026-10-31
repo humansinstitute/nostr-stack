@@ -1,3 +1,4 @@
+import { channelActivityVisibleSql } from './notification-channel-preferences';
 import { getDb } from '../db';
 import {
   type Sql, type RuleRow, type RuleMode, asJson, CORE_CATEGORIES, CORE_SOURCE, CORE_SOURCE_LABEL, INBOX_COUNT_CAP, NotificationError, hashOf, isUuid,
@@ -27,9 +28,9 @@ export async function loadAccessKeys(sql: Sql, r: Recipient): Promise<string[]> 
  * Client-app view filter (presentation only, never access authority). One SQL predicate is shared by list, counts,
  * changes and bulk so they cannot disagree. No client_app_id => no app filtering.
  */
-const appVisibleSql = (sql: Sql, clientAppId: string | undefined) => clientAppId
+const appVisibleSql = (sql: Sql, clientAppId: string | undefined) => sql`(${channelActivityVisibleSql(sql)} AND ${clientAppId
   ? sql`flightdeck_pg_notification_item_visible(i.workspace_id, i.recipient_actor_id, i.source_app_id, i.category, i.audience_client_apps, ${clientAppId})`
-  : sql`TRUE`;
+  : sql`TRUE`})`;
 
 const visibleSql = (sql: Sql, keys: string[]) => sql`
   (i.removed_at IS NULL AND (i.acl_family IS NULL OR ('channel:' || i.acl_channel_id::text || ':' || i.acl_family) = ANY(${keys}::text[])))`;
@@ -185,6 +186,8 @@ export async function getItem(sql: Sql, r: Recipient, id: string) {
   const [row] = await sql<ItemRow[]>`SELECT i.* FROM flightdeck_pg_notification_items i WHERE i.id = ${id} AND i.workspace_id = ${r.workspaceId} AND i.recipient_actor_id = ${r.actorId}`;
   if (!row) throw new NotificationError(404, 'notification_not_found', 'Notification not found');
   if (row.removed_at) return serializeTombstone(row);
+  const [shown] = await sql`SELECT 1 FROM flightdeck_pg_notification_items i WHERE i.id = ${id} AND ${channelActivityVisibleSql(sql)}`;
+  if (!shown) throw new NotificationError(404, 'notification_not_found', 'Notification not found');
   const [labels, actors] = await Promise.all([sourceLabels(sql, r.workspaceId, [row]), actorSummaries(sql, [row])]);
   const accessible = !row.acl_family || keys.includes(`channel:${row.acl_channel_id}:${row.acl_family}`);
   return serializeItem(row, labels, actors, accessible ? 'ok' : 'unavailable');

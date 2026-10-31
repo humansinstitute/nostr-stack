@@ -210,6 +210,19 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- Personal channel notification mode; a durable all row preserves compare-and-set history.
+CREATE TABLE IF NOT EXISTS flightdeck_pg_notification_channel_preferences (
+  workspace_id UUID NOT NULL,
+  actor_id UUID NOT NULL,
+  channel_id UUID NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('all', 'mentions_only')),
+  row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version > 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (workspace_id, actor_id, channel_id),
+  FOREIGN KEY (workspace_id, actor_id) REFERENCES flightdeck_pg_workspace_memberships(workspace_id, actor_id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, channel_id) REFERENCES flightdeck_pg_channels(workspace_id, id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS flightdeck_pg_notification_audit (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID,

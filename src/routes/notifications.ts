@@ -1,3 +1,4 @@
+import { getChannelPreferences, putChannelPreference } from '../services/notification-channel-preferences';
 import type { Context, Hono } from 'hono';
 import { requireNip98AuthResolved } from '../auth';
 import { getDb } from '../db';
@@ -186,6 +187,25 @@ export function registerNotificationRoutes(router: Hono) {
       mutationId: body.mutation_id, op: body.op, ids: selector.ids, upToSeq: selector.up_to_seq, view: selector.view,
       category: selector.category, sourceAppId: selector.source_app_id, clientAppId: clientAppParam(selector.client_app_id, 'selector.client_app_id'),
     })) });
+  }));
+
+  router.get(`${base}/channel-preferences`, consumer(async ({ c, sql, identity, workspaceId, actorId }) => {
+    queryKeys(c, []);
+    return c.json({ identity, ...(await getChannelPreferences(sql, { workspaceId, actorId })) });
+  }));
+
+  router.put(`${base}/channel-preferences/:channelId`, consumer(async ({ c, sql, identity, workspaceId, actorId, userNpub, appNpub }) => {
+    queryKeys(c, []);
+    const channelId = c.req.param('channelId') ?? '';
+    if (!isUuid(channelId)) throw new NotificationError(400, 'validation_error', 'invalid channel id');
+    const decision = await authorizeFlightDeckPgOperation({ actorNpub: userNpub, appNpub, workspaceId,
+      permission: 'channel.read', resource: { type: 'channel', channelId } });
+    if (!decision.allowed) throw new NotificationError(403, 'permission_denied', 'Channel read access is required');
+    const { body } = await readBody(c);
+    onlyKeys(body, ['mode', 'expected_row_version']);
+    if (!['all', 'mentions_only'].includes(body.mode)) throw new NotificationError(400, 'validation_error', 'mode must be all or mentions_only');
+    if (!Number.isSafeInteger(body.expected_row_version) || body.expected_row_version < 0) throw new NotificationError(400, 'validation_error', 'expected_row_version must be a non-negative integer (0 when absent)');
+    return c.json({ identity, ...(await putChannelPreference(sql, { workspaceId, actorId }, channelId, body.mode, body.expected_row_version)) });
   }));
 
   router.get(`${base}/categories`, consumer(async ({ c, sql, identity, workspaceId }) => {

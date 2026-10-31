@@ -1,3 +1,4 @@
+import { channelActivityAllowed } from './notification-channel-preferences';
 import { getDb } from '../db';
 import { getEffectiveFlightDeckPgGroupIds, getFlightDeckPgWorkspaceMembership, resolveFlightDeckPgActorByNpub } from './flightdeck-pg-authorization';
 import webpush, { type SendResult } from 'web-push';
@@ -105,6 +106,16 @@ export function extractFlightDeckMentions(text: string): FlightDeckPgMention[] {
     });
   }
   return mentions;
+}
+
+/** Current events carry canonical identities; legacy events without structured mentions retain exact-tag compatibility. */
+function eventPersonMentions(event: OutboxEventRow, body: string): FlightDeckPgMention[] {
+  if (!Object.prototype.hasOwnProperty.call(event.payload ?? {}, 'mentions')) return extractFlightDeckMentions(body).filter(entry => entry.type === 'person');
+  const raw = event.payload.mentions;
+  const list = Array.isArray(raw) ? raw : Array.isArray((raw as any)?.current) ? (raw as any).current : [];
+  return list.flatMap((mention: any) => uuidOrNull(mention?.actor_id)
+    ? [{ type: 'person', id: mention.actor_id, label: typeof mention.label === 'string' ? mention.label : null }]
+    : []);
 }
 
 function uniqueActorCandidates(candidates: NotificationCandidate[]): NotificationCandidate[] {
@@ -379,7 +390,7 @@ async function buildCandidates(event: OutboxEventRow, sql: DbClient): Promise<No
         target: { channel_id: channel.id, thread_id: message.thread_id, ...(message.thread_id ? { thread_title: threadTitle } : {}) },
       });
     }
-    for (const mention of extractFlightDeckMentions(message.body).filter((entry) => entry.type === 'person')) {
+    for (const mention of eventPersonMentions(event, message.body)) {
       const actor = await resolvePersonMentionActor(workspaceId, mention.id, sql);
       if (!actor || actor.id === message.created_by_actor_id) continue;
       if (await canReadChannel(workspaceId, channel.id, actor.id, 'channel.read', sql)) {
@@ -410,7 +421,7 @@ async function buildCandidates(event: OutboxEventRow, sql: DbClient): Promise<No
     if (!comment || !task) return [];
     const route = `/workspaces/${workspaceId}/tasks/${comment.task_id}`;
     const candidates: NotificationCandidate[] = [];
-    for (const mention of extractFlightDeckMentions(comment.body).filter((entry) => entry.type === 'person')) {
+    for (const mention of eventPersonMentions(event, comment.body)) {
       const actor = await resolvePersonMentionActor(workspaceId, mention.id, sql);
       if (!actor || actor.id === comment.created_by_actor_id) continue;
       if (await canReadChannel(workspaceId, comment.channel_id, actor.id, 'task.read', sql)) {
@@ -441,7 +452,7 @@ async function buildCandidates(event: OutboxEventRow, sql: DbClient): Promise<No
     if (!comment || !doc) return [];
     const route = `/workspaces/${workspaceId}/docs/${comment.doc_id}`;
     const candidates: NotificationCandidate[] = [];
-    for (const mention of extractFlightDeckMentions(comment.body).filter((entry) => entry.type === 'person')) {
+    for (const mention of eventPersonMentions(event, comment.body)) {
       const actor = await resolvePersonMentionActor(workspaceId, mention.id, sql);
       if (!actor || actor.id === comment.created_by_actor_id) continue;
       if (await canReadChannel(workspaceId, comment.channel_id, actor.id, 'doc.read', sql)) {
@@ -684,6 +695,11 @@ export async function evaluateFlightDeckPgNotificationOutboxEvent(
   const title = `Flight Deck: ${workspace?.name ?? 'Workspace'}`;
   let deliveries = 0;
   for (const candidate of candidates) {
+    if (!await channelActivityAllowed(sql, { workspaceId: event.workspace_id, actorId: candidate.actorId }, event.channel_id, 'flightdeck.core', candidate.category)) {
+      await recordDelivery({ event, candidate, subscription: null, decision: 'skipped', reason: 'channel_mentions_only' }, sql);
+      deliveries += 1;
+      continue;
+    }
     const preferences = await getFlightDeckPgNotificationPreferences(event.workspace_id, candidate.actorId, sql);
     if (!preferenceEnabled(preferences, candidate.category)) {
       await recordDelivery({ event, candidate, subscription: null, decision: 'skipped', reason: 'preference_disabled' }, sql);

@@ -680,4 +680,32 @@ describe.skipIf(!port || port === 5432)('notification push delivery against disp
     const queue = await call(`${base()}/admin/notifications/queue`, 'GET', 0);
     expect(queue.status === 200 || queue.status === 403).toBe(true);
   });
+  test('channel mute suppresses queued ordinary APNs and projection, while a structured direct mention still reaches the sender', async () => {
+    await freshBob();
+    const rule = await n('/rules', 'PUT', 2, { mutation_id: randomUUID(), rules: [{ source_app_id: 'flightdeck.core', category: 'chat_thread', client_app_id: '*', channel: 'alert', mode: 'on', expected_row_version: 0 }] });
+    expect(rule.status).toBe(200);
+    const queuedThread = await ping([]);
+    expect((await alertsFor()).some((a: any) => a.state === 'pending')).toBe(true);
+    const save = await n(`/channel-preferences/${ch1}`, 'PUT', 2, { mode: 'mentions_only', expected_row_version: 0 });
+    expect(save.status).toBe(200);
+    const blocked = recorder();
+    await processAlertBatch({ sql: db, sender: blocked.sender });
+    expect(blocked.calls).toHaveLength(0);
+    expect((await alertsFor()).find((a: any) => a.state === 'suppressed')!.reason).toBe('channel_mentions_only');
+    const quietThread = await ping([]);
+    expect((await db`SELECT 1 FROM flightdeck_pg_notification_items WHERE recipient_actor_id = ${actors[2]!} AND subject->>'thread_id' = ${quietThread}`)).toHaveLength(0);
+    const taggedThread = await ping([2]);
+    const direct = recorder();
+    expect((await processAlertBatch({ sql: db, sender: direct.sender })).sent).toBe(1);
+    expect(direct.calls).toHaveLength(1);
+    expect((await n('/items', 'GET', 2)).body.items.some((i: any) => i.subject.thread_id === taggedThread && i.category === 'mention')).toBe(true);
+    expect((await n('/items', 'GET', 2)).body.items.some((i: any) => i.subject.thread_id === queuedThread)).toBe(false);
+    const restored = await n(`/channel-preferences/${ch1}`, 'PUT', 2, { mode: 'all', expected_row_version: 1 });
+    expect(restored.status).toBe(200);
+    await ping([]);
+    const resumed = recorder();
+    expect((await processAlertBatch({ sql: db, sender: resumed.sender })).sent).toBe(1);
+    expect(resumed.calls).toHaveLength(1);
+  });
+
 });

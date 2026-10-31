@@ -326,3 +326,34 @@ order equals commit order for that recipient. Canonical lock order for every wri
 mutation advisory lock → recipient cursor lock (`flightdeck_pg_notification_lock_recipient`) → item rows (by id) →
 `next_seq`; multi-recipient writers (resolve, withdraw, source revoke, maintenance, projection pages) lock
 recipients ascending, so item PATCH/bulk/view-bridge/projection/tombstone cannot deadlock.
+
+### Personal channel mentions-only mode
+
+`GET /workspaces/:workspaceId/notifications/channel-preferences` returns the verified
+caller's `{channel_preferences: [{channel_id, mode, row_version}], rules_revision}`.
+The list contains readable non-DM channels with saved preferences. An absent row
+means `all`. Preferences belong to the workspace actor, not the installation or app.
+
+`PUT /workspaces/:workspaceId/notifications/channel-preferences/:channelId` requires
+`channel.read`, with `{mode: "mentions_only" | "all", expected_row_version: 0 | n}`.
+Use the exact saved row version, or 0 when absent. A stale write returns 409
+`channel_preference_conflict` and the current complete preference list/revision;
+nothing is written. Successful writes return the same shape as GET. An `all` row
+is kept and versioned so a stale device cannot resurrect a prior mute. DMs reject
+this operation and retain their separate category setting.
+
+`mentions_only` suppresses ordinary `flightdeck.core/chat_thread` activity at
+projection, legacy Web Push eligibility, APNs enqueue and APNs pre-send recheck.
+Direct mentions and comment tags derive from structured recipient identities;
+DMs, task assignments, external app notifications and other category/app rules
+keep their existing behavior. Current built-in task/doc comments notify only
+directly tagged recipients, so have no ordinary comment category to suppress.
+
+The same channel predicate filters list, counts, changes, direct item lookup and
+bulk selection, including ordinary items created before the channel was muted.
+Muting never marks content or notifications read, deletes messages, or changes
+category preferences. Changes increment the existing recipient `rules_revision`;
+clients must perform the existing snapshot reset to remove hidden cached entries
+and update bell counts across devices. Newly muted events are not projected and
+are not backfilled on unmute; future ordinary activity resumes. Previously saved
+items are only hidden by the preference, so may appear again on unmute.

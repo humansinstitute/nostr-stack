@@ -45,6 +45,14 @@ const pushSchemas = {
 };
 
 export const notificationSchemas = {
+  ChannelNotificationPreference: {
+    type: 'object', required: ['channel_id', 'mode', 'row_version'], additionalProperties: false,
+    properties: { channel_id: uuid, mode: { enum: ['all', 'mentions_only'] }, row_version: { type: 'integer', minimum: 1 } },
+  },
+  ChannelNotificationPreferencesState: {
+    type: 'object', required: ['channel_preferences', 'rules_revision'],
+    properties: { channel_preferences: { type: 'array', items: ref('ChannelNotificationPreference') }, rules_revision: { type: 'integer', minimum: 0 } },
+  },
   NotificationItem: {
     type: 'object', required: ['schema', 'version', 'id', 'workspace_id', 'recipient_actor_id', 'change_seq', 'row_version', 'source', 'category', 'reasons', 'severity', 'status', 'subject', 'presentation', 'state', 'access'],
     properties: {
@@ -192,6 +200,21 @@ export const notificationPaths = {
     }),
   },
   [`${base}/notifications/categories`]: { get: op('Source and category registry visible to the caller', { responses: { '200': json({ type: 'object', properties: { sources: { type: 'array', items: { type: 'object' } } } }) } }) },
+  [`${base}/notifications/channel-preferences`]: {
+    get: op('Read the caller’s personal channel notification modes (absent means all)', {
+      responses: { '200': json(ref('ChannelNotificationPreferencesState')), '401': err, '403': err, '404': err },
+    }),
+  },
+  [`${base}/notifications/channel-preferences/{channelId}`]: {
+    put: op('Save a personal channel mode with compare-and-set; channel.read required, DMs excluded', {
+      parameters: [{ name: 'channelId', in: 'path', required: true, schema: uuid }],
+      requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', additionalProperties: false,
+        required: ['mode', 'expected_row_version'], properties: { mode: { enum: ['all', 'mentions_only'] }, expected_row_version: { type: 'integer', minimum: 0 } },
+      } } } },
+      responses: { '200': json(ref('ChannelNotificationPreferencesState')), '400': err, '403': err, '404': err,
+        '409': json({ allOf: [ref('ChannelNotificationPreferencesState'), { type: 'object', properties: { code: { const: 'channel_preference_conflict' } } }] }, 'Nothing changed; reload returned preferences') },
+    }),
+  },
   [`${base}/notifications/rules`]: {
     get: op('Read the caller\'s preference rules (with row_version per key) and rules_revision', { responses: { '200': json(ref('NotificationRulesState')) } }),
     put: op('Per-key compare-and-swap of preference rules, all or nothing; replay-safe by mutation_id', {

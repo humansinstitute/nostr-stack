@@ -1,3 +1,4 @@
+import { channelActivityAllowed } from './notification-channel-preferences';
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db';
 import {
@@ -76,6 +77,7 @@ export async function enqueueAlerts(tx: Sql, itemId: string, refold: boolean): P
   const [item] = await tx<ItemFacts[]>`SELECT * FROM flightdeck_pg_notification_items WHERE id = ${itemId}`;
   if (!item || item.removed_at || item.read_at || item.dismissed_at || item.archived_at || item.status !== 'active') return 0;
   if (item.expires_at && new Date(item.expires_at).getTime() <= Date.now()) return 0;
+  if (!await channelActivityAllowed(tx, { workspaceId: item.workspace_id, actorId: item.recipient_actor_id }, item.acl_channel_id, item.source_app_id, item.category)) return 0;
 
   const candidates = await tx<{ transport_id: string; client_app_id: string; environment: string; bundle_id: string; registered_origin: string | null }[]>`
     SELECT t.id AS transport_id, i.client_app_id, t.environment, t.bundle_id, t.registered_origin
@@ -191,6 +193,7 @@ async function gate(sql: Sql, alert: Claimed, config: ApnsConfig): Promise<Gate>
   await sweepRecipient(sql, r, keys);
   const [item] = await sql<ItemFacts[]>`SELECT * FROM flightdeck_pg_notification_items WHERE id = ${alert.item_id}`;
   if (!item || item.removed_at) return { ok: false, reason: 'item_removed' };
+  if (!await channelActivityAllowed(sql, r, item.acl_channel_id, item.source_app_id, item.category)) return { ok: false, reason: 'channel_mentions_only' };
   if (item.read_at || item.dismissed_at || item.archived_at || item.status !== 'active') return { ok: false, reason: 'read_before_send' };
   if (item.expires_at && new Date(item.expires_at).getTime() <= Date.now()) return { ok: false, reason: 'item_expired' };
   if (item.acl_family && !keys.includes(`channel:${item.acl_channel_id}:${item.acl_family}`)) return { ok: false, reason: 'no_access' };

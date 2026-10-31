@@ -1,3 +1,4 @@
+import { channelActivityAllowed } from './notification-channel-preferences';
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db';
 import { enqueueAlertsInProjection } from './notification-alerts';
@@ -366,6 +367,7 @@ type ItemSeed = {
  */
 async function writeItem(tx: Sql, seed: ItemSeed): Promise<'created' | 'folded' | 'duplicate'> {
   await lockRecipient(tx, seed.workspaceId, seed.recipient);
+  if (!await channelActivityAllowed(tx, { workspaceId: seed.workspaceId, actorId: seed.recipient }, seed.aclChannelId, seed.source, seed.category)) return 'duplicate';
   const [receipt] = await tx`SELECT 1 FROM flightdeck_pg_notification_item_events WHERE event_id = ${seed.event.id} AND recipient_actor_id = ${seed.recipient}`;
   if (receipt) return 'duplicate';
 
