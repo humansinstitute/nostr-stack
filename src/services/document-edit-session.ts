@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { getDb } from '../db';
-import { DOCUMENT_EDIT_PROTOCOL, type DocumentEditSessionRequest } from '../types';
+import { DOCUMENT_EDIT_PROTOCOL, DOCUMENT_CONCURRENT_EDIT_PROTOCOL, type DocumentEditSessionRequest } from '../types';
 import {
   resolveFlightDeckPgDocVersionIdentity, snapshotFlightDeckPgDocVersion, flightDeckPgCanonicalDocVersionId,
   createFlightDeckPgDocOutboxEvent, serializeFlightDeckPgEditLease,
@@ -13,7 +13,7 @@ export type DocumentEditAcquireInput = DocumentEditSessionRequest & {
 };
 export type DocumentEditAcquireError = {
   ok: false;
-  reason: 'lease_conflict' | 'document_edit_session_required' | 'document_edit_session_superseded' | 'edit_lease_changed' | 'doc_not_found';
+  reason: 'document_edit_protocol_conflict' | 'lease_conflict' | 'document_edit_session_required' | 'document_edit_session_superseded' | 'edit_lease_changed' | 'doc_not_found';
   lease?: FlightDeckPgSerializedEditLease;
 };
 
@@ -34,7 +34,9 @@ export async function acquireDocumentEditSession(input: DocumentEditAcquireInput
   const head = await resolveFlightDeckPgDocVersionIdentity({ workspaceId: input.workspaceId, docId: input.entityId, lock: true }, sql);
   if (!head) return { ok: false, reason: 'doc_not_found' } as DocumentEditAcquireError;
   const session = input.editor_session_id || null;
+  const concurrent = input.document_edit_protocol === DOCUMENT_CONCURRENT_EDIT_PROTOCOL && Boolean(session);
   const protocol = input.document_edit_protocol === DOCUMENT_EDIT_PROTOCOL && Boolean(session);
+  if ((input.document_edit_protocol && !session) || (session && !protocol && !concurrent)) return {ok:false,reason:'document_edit_session_required'} as DocumentEditAcquireError;
   if (input.takeover && !protocol) return { ok: false, reason: 'document_edit_session_required' } as DocumentEditAcquireError;
   if (session) {
     const [superseded] = await sql`SELECT id FROM flightdeck_pg_edit_leases
@@ -42,10 +44,18 @@ export async function acquireDocumentEditSession(input: DocumentEditAcquireInput
         AND holder_actor_id=${input.actorId} AND editor_session_id=${session} AND superseded_at IS NOT NULL LIMIT 1`;
     if (superseded) return { ok: false, reason: 'document_edit_session_superseded' } as DocumentEditAcquireError;
   }
-  const [active] = await sql<FlightDeckPgEditLeaseRow[]>`SELECT * FROM flightdeck_pg_edit_leases
+  const activeLeases = await sql<FlightDeckPgEditLeaseRow[]>`SELECT * FROM flightdeck_pg_edit_leases
     WHERE workspace_id=${input.workspaceId} AND entity_type='document' AND entity_id=${input.entityId}
       AND released_at IS NULL AND superseded_at IS NULL AND expires_at>NOW()
-    ORDER BY created_at DESC,id DESC LIMIT 1`;
+    ORDER BY created_at DESC,id DESC`;
+  const active = activeLeases[0];
+  // Modes never overlap. A legacy takeover must not revoke live concurrent tokens.
+  const incompatible = activeLeases.find(lease =>
+    (lease.document_edit_protocol === DOCUMENT_CONCURRENT_EDIT_PROTOCOL) !== concurrent);
+  if (incompatible) return {ok:false, reason: concurrent ? 'lease_conflict' : 'document_edit_protocol_conflict',
+    lease:serializeFlightDeckPgEditLease(incompatible)} as DocumentEditAcquireError;
+  const sameSession = concurrent && activeLeases.find(lease => lease.holder_actor_id === input.actorId && lease.editor_session_id === session);
+  if (sameSession) return {ok:false,reason:'lease_conflict',lease:serializeFlightDeckPgEditLease(sameSession)} as DocumentEditAcquireError;
   if (input.takeover) {
     if (!active || active.id !== input.expected_lease_id) return {
       ok: false, reason: 'edit_lease_changed', ...(active ? { lease: serializeFlightDeckPgEditLease(active) } : {}),
@@ -70,7 +80,7 @@ export async function acquireDocumentEditSession(input: DocumentEditAcquireInput
       payload:{doc_id:input.entityId,storage_object_id:head.doc.storage_object_id,authority_barrier:true,
         body_version:{storage_object_id:head.identity.storage_object_id,sha256_hex:head.identity.body_sha256_hex,size_bytes:head.identity.size_bytes},
         author:{actor_id:input.actorId,actor_npub:input.actorNpub}} },sql);
-  } else if (active) {
+  } else if (active && !concurrent) {
     // This applies to legacy clients too. Same actor on another device is a distinct editor.
     return { ok: false, reason: 'lease_conflict', lease: serializeFlightDeckPgEditLease(active) } as DocumentEditAcquireError;
   }
@@ -79,9 +89,9 @@ export async function acquireDocumentEditSession(input: DocumentEditAcquireInput
       AND released_at IS NULL AND expires_at<=NOW()`;
   const token = randomUUID(), ttl = Math.max(30, Math.min(600, Math.floor(input.leaseSeconds || 120)));
   const [lease] = await sql<FlightDeckPgEditLeaseRow[]>`INSERT INTO flightdeck_pg_edit_leases
-    (workspace_id,entity_type,entity_id,lease_token_hash,holder_actor_id,holder_actor_npub,editor_session_id,expires_at)
+    (workspace_id,entity_type,entity_id,lease_token_hash,holder_actor_id,holder_actor_npub,editor_session_id,document_edit_protocol,expires_at)
     VALUES(${input.workspaceId},'document',${input.entityId},${createHash('sha256').update(token).digest('hex')},
-      ${input.actorId},${input.actorNpub},${protocol ? session : null},NOW()+(${ttl}::integer*INTERVAL '1 second')) RETURNING *`;
+      ${input.actorId},${input.actorNpub},${protocol || concurrent ? session : null},${input.document_edit_protocol || null},NOW()+(${ttl}::integer*INTERVAL '1 second')) RETURNING *`;
   return { ok: true as const, lease: serializeFlightDeckPgEditLease(lease!, {leaseToken:token}),
-    ...(protocol ? { document_edit_protocol: DOCUMENT_EDIT_PROTOCOL } : {}), doc: head.doc, canonical_version: head.identity, taken_over: input.takeover === true };
+    ...(protocol || concurrent ? { document_edit_protocol: input.document_edit_protocol } : {}), doc: head.doc, canonical_version: head.identity, taken_over: input.takeover === true };
 }

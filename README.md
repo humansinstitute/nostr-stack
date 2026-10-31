@@ -124,3 +124,9 @@ its error and branch semantics, and the separate runtime activation check.
 ## Workspace membership administration
 
 [Workspace membership administration v1](docs/contract/workspace-membership-administration-v1.md) defines explicit owner-controlled agent-manager coverage, exact-identity removal previews, durable authorship, revocable private downloads, enrollment tombstones and Tower-first activation. Installing the feature does not remove or grant access to any real identity.
+
+## Concurrent document editing
+
+[Concurrent document sessions v1](docs/contract/document-concurrent-edit-v1.md)
+adds opt-in concurrent human/bot editors with persistent peer tokens, existing
+CAS/recovery saves, capability negotiation and explicit legacy-mode fencing.

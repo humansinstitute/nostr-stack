@@ -547,6 +547,7 @@ export type FlightDeckPgEditLeaseRow = {
   field_path: string | null;
   lease_token_hash: string;
   editor_session_id: string | null;
+  document_edit_protocol: DocumentEditSessionRequest['document_edit_protocol'] | null;
   superseded_at: Date | null;
   holder_actor_id: string;
   holder_actor_npub: string;
@@ -563,6 +564,7 @@ export type FlightDeckPgSerializedEditLease = {
   field_path: string | null;
   lease_token?: string;
   editor_session_id?: string;
+  document_edit_protocol?: DocumentEditSessionRequest['document_edit_protocol'];
   holder_actor_npub: string;
   expires_at: Date;
 };
@@ -2060,6 +2062,7 @@ export function serializeFlightDeckPgEditLease(
     entity_type: lease.entity_type,
     entity_id: lease.entity_id,
     field_path: lease.field_path,
+    ...(lease.document_edit_protocol ? { document_edit_protocol: lease.document_edit_protocol } : {}),
     ...(options.leaseToken ? { lease_token: options.leaseToken, ...(lease.editor_session_id ? { editor_session_id: lease.editor_session_id } : {}) } : {}),
     holder_actor_npub: lease.holder_actor_npub,
     expires_at: lease.expires_at,

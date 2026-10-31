@@ -7,7 +7,7 @@ import { getDb, setDb } from '../src/db';
 import { createApp } from '../src/server';
 import { ensureRuntimeSchema } from '../src/schema/ensure-runtime-schema';
 import { splitSqlStatements } from '../src/schema/sql-statements';
-import { DOCUMENT_EDIT_PROTOCOL } from '../src/types';
+import { DOCUMENT_EDIT_PROTOCOL, DOCUMENT_CONCURRENT_EDIT_PROTOCOL } from '../src/types';
 import { lockDocumentEditAuthority } from '../src/services/document-edit-session';
 
 // An explicit disposable fixture is mandatory; never touch the managed runtime or real user documents.
@@ -57,6 +57,8 @@ describe.skipIf(!port || port === 5432)('document editing authority on disposabl
     const [c]=await db`INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name) VALUES(${workspace},${scope},'Fixture') RETURNING id`;channel=c!.id;
     for(const actor of actors)for(const permission of (actor===actors[2]?['channel.read','doc.read']:['channel.read','channel.write','doc.read','doc.write']))await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission)
       VALUES(${workspace},'actor',${actor},'channel',${channel},${permission})`;
+    // Exercise the additive runtime migration from a pre-concurrent schema as well as bootstrap.
+    await db`ALTER TABLE flightdeck_pg_edit_leases DROP COLUMN document_edit_protocol`;
     await ensureRuntimeSchema();app=createApp();
   });
   afterAll(async()=>{setDb(previous);await db?.end();const admin=postgres({...conn,database:'postgres'});await admin.unsafe(`DROP DATABASE IF EXISTS ${database}`);await admin.end();});
@@ -199,6 +201,109 @@ describe.skipIf(!port || port === 5432)('document editing authority on disposabl
     expect((await db`SELECT id FROM flightdeck_pg_audit_events WHERE resource_id=${doc.id} AND action='doc.edit.takeover'`)).toHaveLength(0);
     expect((await db`SELECT row_version FROM flightdeck_pg_doc_versions WHERE doc_id=${doc.id} AND row_version=2`)).toHaveLength(0);
     expect((await call(`${base()}/edit-leases/${first.body.lease.id}/renew`,'POST',{lease_token:first.body.lease.lease_token,ttl_seconds:120})).status).toBe(200);
+  });
+  const concurrentAcquire=(id:string,actor=0,session=randomUUID())=>call(`${base()}/edit-leases/acquire`,'POST',{
+    entity_type:'document',entity_id:id,document_edit_protocol:DOCUMENT_CONCURRENT_EDIT_PROTOCOL,editor_session_id:session,
+  },actor);
+  test('concurrent editors acquire without advancing history and keep tokens through peer saves and stale recovery',async()=>{
+    const {doc,object}=await fixture();
+    const inspected=await call(`${base()}/edit-leases?entity_type=document&entity_id=${doc.id}`);
+    expect(inspected.body.document_edit_protocols).toEqual([DOCUMENT_EDIT_PROTOCOL,DOCUMENT_CONCURRENT_EDIT_PROTOCOL]);
+    const [a,b]=await Promise.all([concurrentAcquire(doc.id),concurrentAcquire(doc.id,1)]);
+    for(const result of [a,b]) {expect(result.status).toBe(201);expect(result.body.document_edit_protocol).toBe(DOCUMENT_CONCURRENT_EDIT_PROTOCOL);expect(result.body.doc.row_version).toBe(1);}
+    expect(await db`SELECT row_version FROM flightdeck_pg_doc_versions WHERE doc_id=${doc.id}`).toHaveLength(0);
+    const saves=await Promise.all([a,b].map((lease,actor)=>call(`${base()}/docs/${doc.id}`,'PATCH',{
+      row_version:1,base_version_id:`${doc.id}:1`,base_body_sha256_hex:object.sha256_hex,
+      storage_object_id:object.id,lease_token:lease.body.lease.lease_token,title:`Writer ${actor}`,
+    },actor)));
+    expect(saves.map(s=>s.status).sort()).toEqual([200,409]);
+    const loser=saves.findIndex(s=>s.status===409),winner=1-loser;
+    expect(saves[loser].body.code).toBe('document_recovery_created');
+    const retry=await call(`${base()}/docs/${doc.id}`,'PATCH',{
+      row_version:1,base_version_id:`${doc.id}:1`,base_body_sha256_hex:object.sha256_hex,
+      storage_object_id:object.id,lease_token:[a,b][loser].body.lease.lease_token,title:`Writer ${loser}`,
+    },loser);
+    expect(retry.body.recovery.id).toBe(saves[loser].body.recovery.id);
+    for(const [actor,lease] of [a,b].entries()) {
+      const renewed=await call(`${base()}/edit-leases/${lease.body.lease.id}/renew`,'POST',{lease_token:lease.body.lease.lease_token},actor);
+      expect(renewed.status).toBe(200);expect(renewed.body.document_edit_protocol).toBe(DOCUMENT_CONCURRENT_EDIT_PROTOCOL);
+    }
+    const merged=await call(`${base()}/docs/${doc.id}/recoveries/${retry.body.recovery.id}/promote`,'POST',{
+      row_version:2,base_version_id:`${doc.id}:2`,base_body_sha256_hex:object.sha256_hex,lease_token:[a,b][loser].body.lease.lease_token,
+    },loser);
+    expect(merged.status).toBe(200);expect(merged.body.doc.row_version).toBe(3);
+    const next=await call(`${base()}/docs/${doc.id}`,'PATCH',{row_version:3,lease_token:[a,b][winner].body.lease.lease_token,title:'Peer still editing'},winner);
+    expect(next.status).toBe(200);expect(next.body.doc.row_version).toBe(4);
+    expect(await db`SELECT id FROM flightdeck_pg_edit_leases WHERE entity_id=${doc.id} AND released_at IS NULL AND superseded_at IS NULL`).toHaveLength(2);
+  });
+  test('v6 draft vs v8 head preserves the submitted body, merges to v9 and fences a later review race',async()=>{
+    const {doc,object}=await fixture();await db`UPDATE flightdeck_pg_docs SET row_version=6 WHERE id=${doc.id}`;
+    const a=await concurrentAcquire(doc.id),b=await concurrentAcquire(doc.id);
+    const remote7=await storage('remote version seven'),remote8=await storage('remote version eight'),local=await storage('local version six draft');
+    const save=(lease:any,version:number,baseObject:any,submitted:any,title:string)=>call(`${base()}/docs/${doc.id}`,'PATCH',{
+      row_version:version,base_version_id:`${doc.id}:${version}`,base_body_sha256_hex:baseObject.sha256_hex,
+      storage_object_id:submitted.id,lease_token:lease.body.lease.lease_token,title,
+    });
+    expect((await save(b,6,object,remote7,'Remote seven')).status).toBe(200);
+    expect((await save(b,7,remote7,remote8,'Remote eight')).status).toBe(200);
+    const stale=await save(a,6,object,local,'Local draft');expect(stale.status).toBe(409);
+    expect(stale.body.code).toBe('document_recovery_created');expect(stale.body.current_head.row_version).toBe(8);
+    const [recovery]=await db`SELECT * FROM flightdeck_pg_doc_recovery_versions WHERE id=${stale.body.recovery.id}`;
+    expect(recovery!.storage_object_id).toBe(local.id);expect(recovery!.submitted_patch.title).toBe('Local draft');
+    const merged=await storage('merged local and remote eight');
+    const accepted=await save(a,8,remote8,merged,'Merged nine');expect(accepted.status).toBe(200);expect(accepted.body.doc.row_version).toBe(9);
+    const later=await save(b,8,remote8,remote7,'Review raced');expect(later.status).toBe(409);expect(later.body.current_head.row_version).toBe(9);
+    const [head]=await db`SELECT * FROM flightdeck_pg_docs WHERE id=${doc.id}`;
+    expect(head!.storage_object_id).toBe(merged.id);expect(head!.title).toBe('Merged nine');
+    expect((await db`SELECT row_version FROM flightdeck_pg_doc_versions WHERE doc_id=${doc.id} ORDER BY row_version`).map(r=>r.row_version)).toEqual([7,8,9]);
+    const events=await db`SELECT entity_row_version FROM flightdeck_pg_outbox_events WHERE entity_id=${doc.id} AND event_type='flightdeck_pg.doc.updated' ORDER BY entity_row_version`;
+    expect(events.map(r=>Number(r.entity_row_version))).toEqual([7,8,9]);
+  });
+  test('mixed-mode acquisition races serialize and old protocol-less lease rows remain exclusive',async()=>{
+    const {doc}=await fixture();const race=await Promise.all([concurrentAcquire(doc.id),acquire(doc.id)]);
+    expect(race.map(r=>r.status).sort()).toEqual([201,409]);
+    const active=await db`SELECT * FROM flightdeck_pg_edit_leases WHERE entity_id=${doc.id} AND released_at IS NULL`;
+    expect(active).toHaveLength(1);expect((await db`SELECT row_version FROM flightdeck_pg_docs WHERE id=${doc.id}`)[0]!.row_version).toBe(1);
+    const old=await fixture(),exclusive=await acquire(old.doc.id,randomUUID());
+    await db`UPDATE flightdeck_pg_edit_leases SET document_edit_protocol=NULL WHERE id=${exclusive.body.lease.id}`;
+    expect((await concurrentAcquire(old.doc.id)).status).toBe(409);
+    expect((await call(`${base()}/edit-leases/${exclusive.body.lease.id}/renew`,'POST',{lease_token:exclusive.body.lease.lease_token})).body.document_edit_protocol).toBe(DOCUMENT_EDIT_PROTOCOL);
+  });
+  test('mixed mode cannot silently fence concurrent tokens, and release affects only the exact editor',async()=>{
+    const {doc}=await fixture();const a=await concurrentAcquire(doc.id),b=await concurrentAcquire(doc.id);
+    expect((await acquire(doc.id)).body.code).toBe('document_edit_protocol_conflict');
+    const takeover=await acquire(doc.id,randomUUID(),{takeover:true,expected_lease_id:a.body.lease.id});
+    expect(takeover.status).toBe(409);expect(takeover.body.code).toBe('document_edit_protocol_conflict');
+    expect((await call(`${base()}/edit-leases/${a.body.lease.id}/release`,'POST',{lease_token:b.body.lease.lease_token})).body.released).toBe(false);
+    expect((await call(`${base()}/edit-leases/${a.body.lease.id}/release`,'POST',{lease_token:a.body.lease.lease_token})).body.released).toBe(true);
+    expect((await acquire(doc.id)).status).toBe(409);
+    await db`UPDATE flightdeck_pg_edit_leases SET expires_at=NOW()-INTERVAL '1 second' WHERE id=${b.body.lease.id}`;
+    const legacy=await acquire(doc.id);expect(legacy.status).toBe(201);expect(legacy.body.doc.row_version).toBe(1);
+    expect((await concurrentAcquire(doc.id)).body.code).toBe('edit_lease_held');
+    expect((await call(`${base()}/edit-leases/${b.body.lease.id}/renew`,'POST',{lease_token:b.body.lease.lease_token})).status).toBe(409);
+    expect(await db`SELECT row_version FROM flightdeck_pg_doc_versions WHERE doc_id=${doc.id}`).toHaveLength(0);
+  });
+  test('concurrent negotiation is explicit, rejects takeover and preserves writer permission checks',async()=>{
+    const {doc}=await fixture(),session=randomUUID();
+    const first=await concurrentAcquire(doc.id,0,session);expect(first.status).toBe(201);
+    expect((await concurrentAcquire(doc.id,0,session)).status).toBe(409);
+    expect((await concurrentAcquire(doc.id,2)).status).toBe(403);
+    for(const extra of [{editor_session_id:undefined},{takeover:true,expected_lease_id:first.body.lease.id},{document_edit_protocol:'unknown'}]) {
+      const result=await call(`${base()}/edit-leases/acquire`,'POST',{entity_type:'document',entity_id:doc.id,
+        document_edit_protocol:DOCUMENT_CONCURRENT_EDIT_PROTOCOL,editor_session_id:randomUUID(),...extra});
+      expect(result.status).toBe(400);
+    }
+    const stolen=await call(`${base()}/docs/${doc.id}`,'PATCH',{row_version:1,lease_token:first.body.lease.lease_token,title:'Other actor'},1);
+    expect(stolen.status).toBe(409);
+    const denied=await call(`${base()}/docs/${doc.id}`,'PATCH',{row_version:1,lease_token:first.body.lease.lease_token,title:'Read only'},2);
+    expect(denied.status).toBe(403);
+    await db`UPDATE flightdeck_pg_actors SET kind='agent' WHERE id=${actors[1]!}`;
+    const bot=await concurrentAcquire(doc.id,1);expect(bot.status).toBe(201);
+    await db`DELETE FROM flightdeck_pg_permission_grants WHERE workspace_id=${workspace} AND principal_actor_id=${actors[1]!} AND permission IN ('doc.write','channel.write')`;
+    expect((await call(`${base()}/docs/${doc.id}`,'PATCH',{row_version:1,lease_token:bot.body.lease.lease_token,title:'Revoked bot'},1)).status).toBe(403);
+    // Restore fixture permissions for subsequent tests.
+    for(const permission of ['doc.write','channel.write']) await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission)
+      VALUES(${workspace},'actor',${actors[1]!},'channel',${channel},${permission})`;
   });
   test('task and scope ordinary acquisition retain their existing same-actor behavior',async()=>{
     const target=randomUUID();

@@ -1661,6 +1661,7 @@ CREATE TABLE IF NOT EXISTS flightdeck_pg_edit_leases (
   holder_actor_id UUID NOT NULL,
   holder_actor_npub TEXT NOT NULL,
   editor_session_id UUID,
+  document_edit_protocol TEXT,
   superseded_at TIMESTAMPTZ,
   expires_at TIMESTAMPTZ NOT NULL,
   released_at TIMESTAMPTZ,

@@ -6,7 +6,7 @@ import {
   enrollFlightDeckPgGroupMember,
   createFlightDeckPgEnrollmentOutbox,
 } from '../services/flightdeck-pg-enrollment';
-import { DOCUMENT_EDIT_PROTOCOL } from '../types';
+import { DOCUMENT_EDIT_PROTOCOL, DOCUMENT_CONCURRENT_EDIT_PROTOCOL, DOCUMENT_EDIT_PROTOCOLS } from '../types';
 import { lockDocumentEditAuthority, lockDocumentLeaseAuthority } from '../services/document-edit-session';
 import { applyLegacyPreferencePatch } from '../services/notification-inbox';
 import { registerNotificationRoutes } from './notifications';
@@ -6611,7 +6611,7 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/edit-leases', async (c) => {
     entityType: entityType!,
     entityId,
   });
-  return c.json({ identity, ...(entityType === 'document' ? { document_edit_protocol: DOCUMENT_EDIT_PROTOCOL } : {}), lease: lease ? serializeFlightDeckPgEditLease(lease) : null });
+  return c.json({ identity, ...(entityType === 'document' ? { document_edit_protocol: DOCUMENT_EDIT_PROTOCOL, document_edit_protocols: DOCUMENT_EDIT_PROTOCOLS } : {}), lease: lease ? serializeFlightDeckPgEditLease(lease) : null });
 });
 
 flightDeckPgRouter.post('/workspaces/:workspaceId/edit-leases/acquire', async (c) => {
@@ -6634,9 +6634,10 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/edit-leases/acquire', async (c
     fields.push({ path: 'ttl_seconds', code: 'invalid', message: 'ttl_seconds must be between 30 and 600' });
   }
   if (entityType === 'document') {
-    if (body.document_edit_protocol !== undefined && body.document_edit_protocol !== DOCUMENT_EDIT_PROTOCOL) fields.push({path:'document_edit_protocol',code:'unsupported',message:'Unsupported document edit protocol'});
+    if (body.document_edit_protocol !== undefined && body.document_edit_protocol !== DOCUMENT_EDIT_PROTOCOL && body.document_edit_protocol !== DOCUMENT_CONCURRENT_EDIT_PROTOCOL) fields.push({path:'document_edit_protocol',code:'unsupported',message:'Unsupported document edit protocol'});
     if (body.editor_session_id !== undefined && (!isUuid(String(body.editor_session_id)) || !body.document_edit_protocol)) fields.push({path:'editor_session_id',code:'invalid',message:'A protocol and UUID editor session are required together'});
     if (body.document_edit_protocol && !isUuid(String(body.editor_session_id || ''))) fields.push({path:'editor_session_id',code:'required',message:'editor_session_id must be a UUID'});
+    if (body.document_edit_protocol === DOCUMENT_CONCURRENT_EDIT_PROTOCOL && (body.takeover === true || body.expected_lease_id !== undefined)) fields.push({path:'takeover',code:'unsupported',message:'Concurrent sessions do not support takeover'});
     if (body.takeover !== undefined && typeof body.takeover !== 'boolean') fields.push({path:'takeover',code:'invalid',message:'takeover must be boolean'});
     if (body.takeover === true && (!body.document_edit_protocol || !isUuid(String(body.expected_lease_id || '')))) fields.push({path:'expected_lease_id',code:'required',message:'Explicit takeover requires protocol and expected_lease_id UUID'});
     if (body.field_path != null) fields.push({path:'field_path',code:'unsupported',message:'Document edit authority covers the whole document'});
@@ -6679,7 +6680,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/edit-leases/acquire', async (c
     actorNpub: auth.userNpub,
     leaseSeconds: ttlSeconds,
     ...(entityType === 'document' ? {
-      document_edit_protocol: body.document_edit_protocol === DOCUMENT_EDIT_PROTOCOL ? DOCUMENT_EDIT_PROTOCOL : undefined,
+      document_edit_protocol: body.document_edit_protocol === DOCUMENT_CONCURRENT_EDIT_PROTOCOL ? DOCUMENT_CONCURRENT_EDIT_PROTOCOL : body.document_edit_protocol === DOCUMENT_EDIT_PROTOCOL ? DOCUMENT_EDIT_PROTOCOL : undefined,
       editor_session_id: body.editor_session_id === undefined ? undefined : String(body.editor_session_id),
       takeover: body.takeover === true,
       expected_lease_id: body.expected_lease_id === undefined ? undefined : String(body.expected_lease_id),
@@ -6732,7 +6733,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/edit-leases/:leaseId/renew', a
     }, sql);
   });
   if (!lease.ok) return jsonError(c, 409, lease.reason, 'PG edit lease is invalid or expired', identity);
-  return c.json({ identity, ...(lease.lease.entity_type === 'document' && lease.lease.editor_session_id ? {document_edit_protocol:DOCUMENT_EDIT_PROTOCOL} : {}), lease: lease.lease });
+  return c.json({ identity, ...(lease.lease.entity_type === 'document' && lease.lease.editor_session_id ? {document_edit_protocol:lease.lease.document_edit_protocol || DOCUMENT_EDIT_PROTOCOL} : {}), lease: lease.lease });
 });
 
 flightDeckPgRouter.post('/workspaces/:workspaceId/edit-leases/:leaseId/release', async (c) => {

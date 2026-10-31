@@ -2,6 +2,8 @@
 
 An open document can checkpoint through the existing canonical body PATCH. It does not need a new shared-draft family. Tower remains the editing authority, while each client retains durable local drafts and existing typed recovery versions. This protocol is additive: ordinary Save from older native, Android, web and agent clients continues to work.
 
+The opt-in [concurrent protocol](document-concurrent-edit-v1.md) is additive. Active concurrent sessions block legacy acquisition and takeover; the exclusive semantics below apply within exclusive mode.
+
 ## Wire contract
 
 `POST /api/v4/flightdeck-pg/workspaces/:workspaceId/edit-leases/acquire` accepts the existing entity/TTL fields. Documents optionally add `document_edit_protocol: "document_edit_session_v1"` and a random UUID `editor_session_id` for that open editor. The pair is required together. Task and scope leases keep their previous semantics. Document field leases are unsupported: the authority covers the entire document.

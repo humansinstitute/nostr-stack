@@ -6980,6 +6980,40 @@ export function buildOpenApiDocument(origin: string) {
           },
         },
       },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/edit-leases': {
+        get: {
+          tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Inspect edit authority and document protocol capabilities',
+          description: 'Does not acquire or renew authority. Documents retain document_edit_protocol=document_edit_session_v1 and add document_edit_protocols=[document_edit_session_v1,document_concurrent_edit_v1]. The singular lease is one active lease, not a complete concurrent editor roster. No token or editor session ID is exposed.',
+          parameters: [{name:'workspaceId',in:'path',required:true,schema:{type:'string',format:'uuid'}}, {name:'entity_type',in:'query',required:true,schema:{enum:['task','document','scope']}}, {name:'entity_id',in:'query',required:true,schema:{type:'string',format:'uuid'}}],
+          responses: {'200':{description:'Identity, optional document capabilities and active lease or null'},'400':{description:'Invalid entity'},'403':{description:'Workspace access denied'}},
+        },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/edit-leases/acquire': {
+        post: {
+          tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Acquire an edit lease or opt-in concurrent document session',
+          description: 'Documents require doc.write/channel.write. Supply document_edit_protocol and UUID editor_session_id together. Concurrent sessions echo document_concurrent_edit_v1, return the unchanged canonical doc/version, never revoke peers or advance the head on acquisition, and remain valid through peer saves. Active exclusive and concurrent modes cannot overlap: concurrent acquire against exclusive returns edit_lease_held; legacy acquire/takeover against concurrent returns document_edit_protocol_conflict. Concurrent takeover is unsupported. Exclusive v1 takeover retains expected_lease_id fencing and its version barrier. Tasks/scopes are unchanged.',
+          parameters:[{name:'workspaceId',in:'path',required:true,schema:{type:'string',format:'uuid'}}],
+          requestBody:{required:true,content:{'application/json':{schema:{type:'object',required:['entity_type','entity_id'],properties:{entity_type:{enum:['task','document','scope']},entity_id:{type:'string',format:'uuid'},ttl_seconds:{type:'integer',minimum:30,maximum:600,default:120},field_path:{type:['string','null']},document_edit_protocol:{enum:['document_edit_session_v1','document_concurrent_edit_v1']},editor_session_id:{type:'string',format:'uuid'},takeover:{type:'boolean'},expected_lease_id:{type:'string',format:'uuid'}}}}}},
+          responses:{'201':{description:'Lease with token, selected protocol echo and coherent document canonical version'},'400':{description:'Invalid negotiation or unsupported concurrent takeover'},'403':{description:'Write permission denied'},'404':{description:'Entity not found'},'409':{description:'Active lease conflict, mixed protocol conflict or superseded editor'}},
+        },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/edit-leases/{leaseId}/renew': {
+        post: {
+          tags:['Flight Deck PG'],security:[{nip98:[]}],summary:'Renew the exact actor-bound edit token',
+          description:'Returns selected document_edit_protocol for session-aware document leases. Peer concurrent saves do not invalidate tokens. Released, expired or superseded tokens cannot be revived.',
+          parameters:['workspaceId','leaseId'].map(name=>({name,in:'path',required:true,schema:{type:'string',format:'uuid'}})),
+          requestBody:{required:true,content:{'application/json':{schema:{type:'object',required:['lease_token'],properties:{lease_token:{type:'string'},ttl_seconds:{type:'integer',minimum:30,maximum:600}}}}}},
+          responses:{'200':{description:'Renewed lease and selected document protocol'},'400':{description:'Invalid request'},'409':{description:'Invalid, expired or superseded lease'}},
+        },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/edit-leases/{leaseId}/release': {
+        post: {
+          tags:['Flight Deck PG'],security:[{nip98:[]}],summary:'Release only the exact actor-bound edit token',
+          parameters:['workspaceId','leaseId'].map(name=>({name,in:'path',required:true,schema:{type:'string',format:'uuid'}})),
+          requestBody:{required:true,content:{'application/json':{schema:{type:'object',required:['lease_token'],properties:{lease_token:{type:'string'}}}}}},
+          responses:{'200':{description:'Idempotent released boolean; other editor tokens remain intact'}},
+        },
+      },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/docs/{docId}': {
         patch: {
           tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Save a document revision',

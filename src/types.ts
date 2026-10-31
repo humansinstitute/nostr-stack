@@ -3471,8 +3471,10 @@ export interface NotificationPushEnvelopeV1 {
 
 /** Additive document editing authority; legacy ordinary saves retain their base/version contract. */
 export const DOCUMENT_EDIT_PROTOCOL = 'document_edit_session_v1' as const;
+export const DOCUMENT_CONCURRENT_EDIT_PROTOCOL = 'document_concurrent_edit_v1' as const;
+export const DOCUMENT_EDIT_PROTOCOLS = [DOCUMENT_EDIT_PROTOCOL, DOCUMENT_CONCURRENT_EDIT_PROTOCOL] as const;
 export interface DocumentEditSessionRequest {
-  document_edit_protocol?: typeof DOCUMENT_EDIT_PROTOCOL;
+  document_edit_protocol?: typeof DOCUMENT_EDIT_PROTOCOLS[number];
   editor_session_id?: string;
   takeover?: boolean;
   expected_lease_id?: string;
