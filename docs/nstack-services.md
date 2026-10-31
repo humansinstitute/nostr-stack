@@ -144,3 +144,21 @@ bun run nstack:smoke
 The smoke authenticates to the relay, publishes a signed event, queries it from
 persistent storage, uploads hash-scoped bytes to Blossom, verifies GET/HEAD,
 deletes as the owner, and validates the enabled three-service descriptor.
+
+## Optional Autopilot HTTPS discovery
+
+`NSTACK_AUTOPILOT_PUBLIC_ORIGIN=https://autopilot.example.com` adds one public
+`id: autopilot`, `kind: autopilot` service with HTTPS/NIP-98 protocols and
+`agents.read`. It is omitted unless explicitly configured as a safe root origin;
+no host-name inference occurs. Availability is `unknown`: authenticated clients
+check owner-space health and authorized agents independently of FIPS listening.
+No owner or agent inventory is public in this descriptor.
+
+Clients verify the selected app through
+`GET /api/v4/flightdeck-pg/workspaces/:workspaceId/app-registration` with typed
+`workspace.read` authority. The route derives owner and app from the selected
+workspace and returns `identity` plus `registration` (`installed`, `enabled`,
+`app_npub`, `app_name`). It neither creates an app nor widens the legacy owner
+namespace route's ACL. Missing registration remains explicit. Display names are
+not stable product identifiers; clients must review the exact registered app
+identity from the authorized locator rather than guessing an Ambulando namespace.

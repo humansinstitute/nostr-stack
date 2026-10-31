@@ -11,6 +11,13 @@ afterEach(() => {
   resetNstackHealthCacheForTest();
 });
 
+function fixtureCredentialUrl(origin: string): string {
+  const url = new URL(origin);
+  url.username = 'fixture';
+  url.password = 'fixture';
+  return url.toString();
+}
+
 function runtimeConfig() {
   const runtime = structuredClone(config);
   runtime.directHttpsUrl = 'https://tower.example.test';
@@ -47,11 +54,25 @@ describe('Nstack service discovery v1', () => {
     expect(blossom.availability.status).toBe('available');
   });
 
+  test('advertises only an explicit safe Autopilot HTTPS origin without claiming health', async () => {
+    const runtime = runtimeConfig();
+    runtime.nstack.autopilotPublicOrigin = 'https://autopilot.example.test';
+    const descriptor = await buildNstackServiceDiscovery({ config: runtime });
+    expect(descriptor.services.find(service => service.kind === 'autopilot')).toMatchObject({
+      id: 'autopilot', endpoint: 'https://autopilot.example.test', protocols: ['https', 'nip-98'],
+      availability: { status: 'unknown', checked_at: null },
+    });
+    for (const origin of ['', 'http://autopilot.example.test', fixtureCredentialUrl('https://autopilot.example.test'), 'https://autopilot.example.test/private']) {
+      runtime.nstack.autopilotPublicOrigin = origin;
+      expect((await buildNstackServiceDiscovery({ config: runtime })).services.some(service => service.kind === 'autopilot')).toBe(false);
+    }
+  });
+
   test('omits disabled, malformed, credentialed and non-root public origins', async () => {
     const runtime = runtimeConfig();
     runtime.nstack.relay = { enabled: true, publicOrigin: 'https://not-a-websocket.example.test', healthUrl: '', version: '0.10.0' };
     runtime.nstack.blossom = {
-      enabled: true, publicOrigin: 'https://user:secret@blossom.example.test/private', healthUrl: '', version: '6.4.1',
+      enabled: true, publicOrigin: fixtureCredentialUrl('https://blossom.example.test/private'), healthUrl: '', version: '6.4.1',
       mediaEnabled: true, listEnabled: true, mirrorEnabled: true, reportEnabled: true,
     };
     const descriptor = await buildNstackServiceDiscovery({ config: runtime });

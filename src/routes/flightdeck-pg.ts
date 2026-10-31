@@ -1,3 +1,4 @@
+import { getWorkspaceApp } from '../services/workspace-apps';
 import { MembershipAdminError, previewWorkspaceMemberRemoval, removeWorkspaceMember, setWorkspaceAgentManager, inspectWorkspaceMemberAccess } from '../services/flightdeck-pg-membership-admin';
 import { registerPermissionDiagnosticRoutes } from './permission-diagnostics';
 import {
@@ -1745,6 +1746,30 @@ flightDeckPgRouter.post('/hosted/workspaces', async (c) => {
     if (error instanceof HostedSignupError) return c.json({ error: error.code, code: error.code }, error.status as 400);
     throw error;
   }
+});
+
+flightDeckPgRouter.get('/workspaces/:workspaceId/app-registration', async (c) => {
+  const auth = await requireNip98AuthResolved(c);
+  if (auth instanceof Response) return auth;
+  const result = await requireFlightDeckPgContext(c, auth.userNpub);
+  if ('response' in result) return result.response;
+  const { context, identity } = result;
+  const requestedApp = c.req.header('x-flightdeck-pg-app-npub') || c.req.query('app_npub');
+  if ((requestedApp && requestedApp !== context.workspace.app_npub)
+    || (c.req.query('app_npub') && c.req.query('app_npub') !== context.workspace.app_npub)
+    || (c.req.query('owner_npub') && c.req.query('owner_npub') !== context.workspace.workspace_owner_npub)) {
+    return c.json({ error: 'workspace_app_identity_mismatch' }, 403);
+  }
+  const decision = await authorizeFlightDeckPgOperation({ actorNpub: auth.userNpub,
+    appNpub: context.workspace.app_npub, workspaceId: context.workspace.id,
+    permission: 'workspace.read', resource: { type: 'workspace' } });
+  if (!decision.allowed) return authorizationError(c, decision, identity, 'workspace.read');
+  // The selected UUID resolves owner and app; caller-supplied labels never select a namespace.
+  const registration = await getWorkspaceApp(context.workspace.workspace_owner_npub, context.workspace.app_npub);
+  return c.json({ identity, registration: {
+    installed: Boolean(registration), enabled: registration?.enabled === true,
+    app_npub: context.workspace.app_npub, app_name: registration?.app_name ?? null,
+  } });
 });
 
 flightDeckPgRouter.get('/workspaces/:workspaceId/descriptor', async (c) => {

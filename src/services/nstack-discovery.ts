@@ -100,6 +100,16 @@ export async function buildNstackServiceDiscovery(
     });
   }
 
+  // Public metadata only. Each consumer must still authenticate owner access.
+  const autopilotOrigin = configuredPublicOrigin(runtime.nstack.autopilotPublicOrigin, 'https');
+  if (autopilotOrigin) {
+    services.push({
+      id: 'autopilot', kind: 'autopilot', endpoint: autopilotOrigin, version: '1',
+      protocols: ['https', 'nip-98'], capabilities: ['agents.read'],
+      features: { nips: [98] }, availability: { status: 'unknown', checked_at: null },
+    });
+  }
+
   const relayOrigin = runtime.nstack.relay.enabled
     ? configuredPublicOrigin(runtime.nstack.relay.publicOrigin, 'wss')
     : null;

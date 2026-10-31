@@ -2737,8 +2737,8 @@ export function buildOpenApiDocument(origin: string) {
           additionalProperties: false,
           required: ['id', 'kind', 'endpoint', 'version', 'protocols', 'capabilities', 'features', 'availability'],
           properties: {
-            id: { type: 'string', enum: ['tower', 'relay', 'blossom'] },
-            kind: { type: 'string', enum: ['tower', 'nostr_relay', 'blossom'] },
+            id: { type: 'string', enum: ['tower', 'relay', 'blossom', 'autopilot'] },
+            kind: { type: 'string', enum: ['tower', 'nostr_relay', 'blossom', 'autopilot'] },
             endpoint: { type: 'string', format: 'uri', description: 'Canonical public origin from explicit operator configuration; never inferred from forwarding headers.' },
             version: { type: 'string' },
             protocols: { type: 'array', items: { type: 'string' } },
@@ -4422,6 +4422,17 @@ export function buildOpenApiDocument(origin: string) {
                 },
               },
             },
+          },
+        },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/app-registration': {
+        get: {
+          tags: ['Flight Deck PG'], summary: 'Read the exact selected workspace app registration',
+          description: 'Requires typed workspace.read. Resolves owner and app from the workspace UUID and returns only public installed/enabled registration fields. Does not create or select another app.',
+          parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+          responses: {
+            '200': { description: 'Exact workspace identity and registration: installed, enabled, app_npub, app_name', content: { 'application/json': { schema: { type: 'object', required: ['identity', 'registration'], properties: { identity: { type: 'object' }, registration: { type: 'object', required: ['installed', 'enabled', 'app_npub'], properties: { installed: { type: 'boolean' }, enabled: { type: 'boolean' }, app_npub: { type: 'string' }, app_name: { type: ['string', 'null'] } } } } } } } },
+            '403': { description: 'Typed workspace access denied' }, '404': { description: 'Workspace unavailable' },
           },
         },
       },

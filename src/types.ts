@@ -2243,12 +2243,12 @@ export interface StorageBlossomMetadata {
 
 // ---- Public Nstack service discovery ----
 
-export type NstackServiceId = 'tower' | 'relay' | 'blossom';
+export type NstackServiceId = 'tower' | 'relay' | 'blossom' | 'autopilot';
 export type NstackServiceAvailability = 'available' | 'unavailable' | 'unknown';
 
 export interface NstackServiceDescriptor {
   id: NstackServiceId;
-  kind: 'tower' | 'nostr_relay' | 'blossom';
+  kind: 'tower' | 'nostr_relay' | 'blossom' | 'autopilot';
   endpoint: string;
   version: string;
   protocols: string[];

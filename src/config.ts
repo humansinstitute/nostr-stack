@@ -107,6 +107,7 @@ export const config = {
   },
   nstack: {
     descriptorCacheTtlSeconds: positiveIntEnv('NSTACK_DESCRIPTOR_CACHE_TTL_SECONDS', 30),
+    autopilotPublicOrigin: String(process.env.NSTACK_AUTOPILOT_PUBLIC_ORIGIN || '').trim(),
     relay: {
       enabled: booleanEnv('NSTACK_RELAY_ENABLED'),
       publicOrigin: String(process.env.NSTACK_RELAY_PUBLIC_ORIGIN || '').trim(),

@@ -202,6 +202,39 @@ describe('Flight Deck PG setup workspace bootstrap', () => {
     expect(groups).toHaveLength(0);
   });
 
+  test('reads exact app registration for PG-only members without granting legacy owner authority', async () => {
+    const memberSecret = new Uint8Array(32).fill(67);
+    const memberNpub = nip19.npubEncode(getPublicKey(memberSecret));
+    const setup = await setupFlightDeckPgDevWorkspace({
+      towerServiceNpub: testNpub('registration-tower'), workspaceServiceNpub: testNpub('registration-workspace'),
+      workspaceOwnerNpub: testNpub('registration-owner'), appNpub: testNpub('registration-app'),
+      creatorNpub: ADMIN_NPUB, workspaceName: 'Registration fixture', towerBaseUrl: 'http://localhost',
+    }, sql);
+    await createFlightDeckPgWorkspaceMember({ workspaceId: setup.workspace_id, actorNpub: memberNpub,
+      role: 'member', kind: 'human', createdByActorId: setup.actors.creator.actor_id }, sql);
+    const path = `/api/v4/flightdeck-pg/workspaces/${setup.workspace_id}/app-registration`;
+    const read = async (secret: Uint8Array, appNpub = setup.app_npub) => app.request(path, {
+      headers: { authorization: authHeader(path, 'GET', secret), 'x-flightdeck-pg-app-npub': appNpub },
+    });
+    let response = await read(memberSecret);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ identity: { workspace_id: setup.workspace_id,
+      workspace_owner_npub: setup.descriptor.identity.workspace_owner_npub, app_npub: setup.app_npub },
+      registration: { installed: false, enabled: false, app_npub: setup.app_npub } });
+    await sql`INSERT INTO workspace_apps (workspace_owner_npub, app_npub, app_name, enabled, capabilities, created_by_npub)
+      VALUES (${setup.descriptor.identity.workspace_owner_npub}, ${setup.app_npub}, 'User registered app', true, '{}', ${ADMIN_NPUB})`;
+    response = await read(memberSecret);
+    expect(response.status).toBe(200);
+    expect((await response.json()).registration).toMatchObject({ installed: true, enabled: true, app_npub: setup.app_npub });
+    expect((await read(memberSecret, testNpub('wrong-registration-app'))).status).toBe(403);
+    const outsider = new Uint8Array(32).fill(68);
+    expect((await read(outsider)).status).toBe(403);
+    const spoof = path + '?owner_npub=' + testNpub('spoof-owner') + '&app_npub=' + testNpub('spoof-app');
+    const spoofResponse = await app.request(spoof, { headers: { authorization: authHeader(spoof, 'GET', memberSecret), 'x-flightdeck-pg-app-npub': setup.app_npub } });
+    // Existing app query/header validation rejects a different app before exposing registration.
+    expect(spoofResponse.status).toBe(403);
+  });
+
   test('is idempotent for default group bootstrap and prints descriptor-compatible fields', async () => {
     const input = {
       towerServiceNpub: testNpub('fdpg-setup-tower'),
