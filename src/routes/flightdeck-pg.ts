@@ -6012,6 +6012,11 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/messages',
       ? await advanceFlightDeckPgResourceActivity({ workspaceId: context.workspace.id, actorId: context.actor.id, resourceType: 'thread', resourceId: thread.id }, sql)
       : null;
     if (activity && thread) thread.activity_version = activity.resource.activity_version;
+    if (activity && thread) {
+      await sql`UPDATE flightdeck_pg_messages SET mention_activity_version=${Number(activity.resource.activity_version)} WHERE workspace_id=${context.workspace.id} AND id=${message.id}`;
+      const [fresh] = await sql`SELECT attention FROM flightdeck_pg_threads WHERE workspace_id=${context.workspace.id} AND id=${thread.id}`;
+      Object.assign(thread, { attention: fresh?.attention });
+    }
     const viewStateOutbox = activity
       ? await createFlightDeckPgResourceViewStateOutboxEvent({ workspaceId: context.workspace.id, actorId: context.actor.id, state: activity.state, activityVersion: Number(activity.resource.activity_version) }, sql)
       : null;
@@ -6260,6 +6265,10 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/messages/:messageId', async (
       rowVersion,
     }, sql);
     if (!updated) return null;
+    if (updated.thread_id && newlyAddedMentions.length) {
+      const activity = await advanceFlightDeckPgResourceActivity({ workspaceId: context.workspace.id, actorId: context.actor.id, resourceType: 'thread', resourceId: updated.thread_id }, sql);
+      await sql`UPDATE flightdeck_pg_messages SET mention_positions=mention_positions - ${newlyAddedMentions.map(m => m.actor_id)}::text[], mention_activity_version=${Number(activity.resource.activity_version)} WHERE workspace_id=${context.workspace.id} AND id=${updated.id}`;
+    }
     const attachmentLinks = await syncFlightDeckPgMessageAttachmentLinks({
       workspaceId: context.workspace.id,
       channelId: updated.channel_id,

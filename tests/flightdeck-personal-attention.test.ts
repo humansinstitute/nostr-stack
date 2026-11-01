@@ -291,4 +291,86 @@ describe.skipIf(!port || port === 5432)('personal attention in disposable Tower 
     expect((await db`SELECT position,epoch FROM flightdeck_pg_record_clock WHERE workspace_id=${workspaceId}`)[0]).toEqual(clock);
     expect([...(await db`SELECT * FROM flightdeck_pg_resource_view_states WHERE workspace_id=${workspaceId} ORDER BY viewer_actor_id,resource_type,resource_id`)]).toEqual([...before]);
   });
+  test('muted unread projection preserves history, exact thread mentions clear and unrelated activity cannot revive them', async () => {
+    const [root]=await db`INSERT INTO flightdeck_pg_threads(workspace_id,scope_id,channel_id,title,created_by_actor_id,updated_by_actor_id) VALUES(${workspaceId},${scope},${channel},'Muted thread',${author},${author}) RETURNING id`;
+    const thread=root!.id;
+    await read('thread',thread);
+    const send=async(mentions:any[]=[])=>{
+      const result=await advanceFlightDeckPgResourceActivity({workspaceId,actorId:author,resourceType:'thread',resourceId:thread},db);
+      const [message]=await db`INSERT INTO flightdeck_pg_messages(workspace_id,scope_id,channel_id,thread_id,body,metadata,mention_activity_version,created_by_actor_id,updated_by_actor_id) VALUES(${workspaceId},${scope},${channel},${thread},'Activity',${db.json({mentions})},${Number(result.resource.activity_version)},${author},${author}) RETURNING id`;
+      return {thread:result.resource,message:message!};
+    };
+    const tagged=await send([mention()]);
+    const mentionPosition=Number(tagged.thread.activity_version);
+    await send();
+    const state=async()=> (await request(`${base()}/resource-view-states`,'GET',undefined,viewerKey)).states.find((x:any)=>x.resource_id===thread);
+    const before=await state();
+    await request(`${base()}/notifications/channel-preferences/${channel}`,'PUT',{mode:'mentions_only',expected_row_version:0},viewerKey);
+    const muted=await state();
+    expect(muted.channel_mentions_only).toBe(true);expect(muted.mention_activity_version).toBe(mentionPosition);
+    expect(muted.viewed_activity_version).toBe(before.viewed_activity_version);expect(muted.activity_version).toBe(before.activity_version);
+    expect(muted.mention_activity_version).toBeGreaterThan(muted.viewed_activity_version);
+    await read('thread',thread);await send();
+    const cleared=await state();expect(cleared.unread).toBe(true);expect(cleared.mention_activity_version).toBeLessThanOrEqual(cleared.viewed_activity_version);
+    await request(`${base()}/notifications/channel-preferences/${channel}`,'PUT',{mode:'all',expected_row_version:1},viewerKey);
+    expect((await state()).channel_mentions_only).toBe(false);expect((await state()).unread).toBe(true);
+    const [canonical]=await db`SELECT attention FROM flightdeck_pg_threads WHERE id=${thread}`;
+    expect(canonical!.attention.mention_activity_versions[viewer]).toBe(mentionPosition);
+    const [clock]=await db`SELECT position FROM flightdeck_pg_record_clock WHERE workspace_id=${workspaceId}`;
+    await ensureRuntimeSchema(db);await ensureRuntimeSchema(db);
+    expect((await db`SELECT position FROM flightdeck_pg_record_clock WHERE workspace_id=${workspaceId}`)[0]).toEqual(clock);
+    const other=await state();expect(other.mention_activity_version).toBe(mentionPosition);
+    await db`UPDATE flightdeck_pg_messages SET metadata='{}'::jsonb WHERE id=${tagged.message.id}`;
+    expect((await state()).mention_activity_version).toBe(0);
+  });
+
+  test('signed chat route creation, edit add/remove and historical backfill preserve per-recipient positions', async () => {
+    function signature(body:string, threadId?:string, messageId?:string, revision?:number) {
+      const hash=createHash('sha256').update(body).digest('hex');
+      const tags=[['protocol','flightdeck_pg_message_instruction'],['body_sha256',hash],['workspace_id',workspaceId],['channel_id',channel]];
+      if(threadId)tags.push(['thread_id',threadId]);if(messageId)tags.push(['message_id',messageId]);if(revision!==undefined)tags.push(['revision',String(revision)]);
+      return {version:1,signer_npub:npub(authorKey),body_sha256:hash,nostr_event:finalizeEvent({kind:33358,created_at:Math.floor(Date.now()/1000),tags,content:body},authorKey)};
+    }
+    const text=`Hello @[Viewer](mention:person:${npub(viewerKey)})`;
+    const root=await request(`${base()}/channels/${channel}/messages`,'POST',{body:text,create_thread:true,mentions:[mention()],message_signature:signature(text)});
+    const id=root.thread.id, original=Number(root.thread.activity_version), msg=root.message.id;
+    expect(root.thread.attention.mention_activity_versions[viewer]).toBe(original);
+    await read('thread',id);
+    const ordinary='Another ordinary reply';
+    await request(`${base()}/channels/${channel}/messages`,'POST',{body:ordinary,thread_id:id,mentions:[],message_signature:signature(ordinary,id)});
+    const query=async(actor=viewer,w=workspaceId)=>Number((await db`SELECT flightdeck_pg_mention_version(${w}::uuid,'thread',${id}::uuid,${actor}::uuid) AS version`)[0]!.version);
+    expect(await query()).toBe(original);expect(await query(author)).toBe(0);expect(await query(viewer,randomUUID())).toBe(0);
+    // Recover the root and reply from exact historic thread event links; later activity cannot promote them.
+    await db`UPDATE flightdeck_pg_messages SET mention_activity_version=0,mention_positions='{}'::jsonb WHERE id=${msg}`;
+    await db.unsafe(readFileSync(new URL('../src/schema/unread-mentions-v1.sql',import.meta.url),'utf8'));
+    expect(await query()).toBe(original);
+    const removed='Mention removed';
+    await request(`${base()}/messages/${msg}`,'PATCH',{body:removed,row_version:1,mentions:[],message_signature:signature(removed,id,msg,2)});
+    expect(await query()).toBe(0);
+    const restored=`New @[Viewer](mention:person:${npub(viewerKey)})`;
+    await request(`${base()}/messages/${msg}`,'PATCH',{body:restored,row_version:2,mentions:[mention()],message_signature:signature(restored,id,msg,3)});
+    const fresh=await query();expect(fresh).toBeGreaterThan(original);
+    await read('thread',id);
+    // Add another recipient after the viewer read: their new mention must not revive the viewer's old one.
+    await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspaceId},${outsider},'member') ON CONFLICT DO NOTHING`;
+    await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission) VALUES(${workspaceId},'actor',${outsider},'channel',${channel},'channel.read')`;
+    const both=restored+` @[Other](mention:person:${npub(outsiderKey)})`;
+    await request(`${base()}/messages/${msg}`,'PATCH',{body:both,row_version:3,mentions:[mention(),mention(outsider,outsiderKey)],message_signature:signature(both,id,msg,4)});
+    expect(await query()).toBe(fresh);expect(await query(outsider)).toBeGreaterThan(fresh);
+    await db`UPDATE flightdeck_pg_messages SET deleted_at=now() WHERE id=${msg}`;expect(await query()).toBe(0);
+    const plain='Historical reply parent';
+    const parent=await request(`${base()}/channels/${channel}/messages`,'POST',{body:plain,create_thread:true,mentions:[],message_signature:signature(plain)});
+    const historical=await request(`${base()}/channels/${channel}/messages`,'POST',{body:text,thread_id:parent.thread.id,mentions:[mention()],message_signature:signature(text,parent.thread.id)});
+    const replyPosition=Number(historical.thread.activity_version);
+    await read('thread',parent.thread.id);
+    await request(`${base()}/channels/${channel}/messages`,'POST',{body:ordinary,thread_id:parent.thread.id,mentions:[],message_signature:signature(ordinary,parent.thread.id)});
+    await db`UPDATE flightdeck_pg_messages SET mention_activity_version=0,mention_positions='{}'::jsonb WHERE id=${historical.message.id}`;
+    await db.unsafe(readFileSync(new URL('../src/schema/unread-mentions-v1.sql',import.meta.url),'utf8'));
+    const [recovered]=await db`SELECT flightdeck_pg_mention_version(${workspaceId}::uuid,'thread',${parent.thread.id}::uuid,${viewer}::uuid) AS version`;
+    expect(Number(recovered!.version)).toBe(replyPosition);
+    const [cursor]=await db`SELECT viewed_activity_version FROM flightdeck_pg_resource_view_states WHERE workspace_id=${workspaceId} AND resource_id=${parent.thread.id} AND viewer_actor_id=${viewer}`;
+    expect(Number(recovered!.version)).toBeLessThanOrEqual(Number(cursor!.viewed_activity_version));
+
+  });
+
 });

@@ -6788,6 +6788,7 @@ export function buildOpenApiDocument(origin: string) {
         get: {
           tags: ['Flight Deck PG'], security: [{ nip98: [] }],
           summary: 'List the current viewer resource view states',
+          description: 'Preserves raw activity_version and viewed_activity_version. Additive mention_activity_version identifies the exact surviving structured direct-human mention event position; channel_mentions_only is the personal non-DM channel preference. Clients use mention position for muted unread attention without marking content read. Canonical threads expose attention.policy_version=1 and attention.mention_activity_versions for record-sync clients.',
           description: 'Baselines visible resources on first use, then returns every visible thread/task/document in deterministic resource_type/resource_id order. Resources created after baseline without a stored view row are returned with viewed_activity_version and row_version 0. Legacy unread remains activity_version > viewed_activity_version. Additive attention_policy_version=1, attention_activity_version and attention_unread separate personal attention from general activity; task/doc responses also expose server-owned attention positions keyed by canonical actor ID. Follow next_cursor until null for a complete Dexie hydration snapshot.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },

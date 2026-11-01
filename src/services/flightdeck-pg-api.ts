@@ -1276,6 +1276,7 @@ export function serializeFlightDeckPgThread(thread: FlightDeckPgThreadRow) {
     title: effectiveFlightDeckPgThreadTitle(thread.title, extended.source_message_body ?? thread.latest),
     latest: thread.latest,
     metadata: thread.metadata,
+    attention: thread.attention,
     record_state: thread.deleted_at ? 'deleted' : thread.archived_at ? 'archived' : 'active',
     archived_at: thread.archived_at,
     deleted_at: thread.deleted_at,
@@ -1290,7 +1291,7 @@ export function serializeFlightDeckPgThread(thread: FlightDeckPgThreadRow) {
   };
 }
 
-export function serializeFlightDeckPgResourceViewState(state: FlightDeckPgResourceViewState & { activity_version?: number; attention_activity_version?: number }) {
+export function serializeFlightDeckPgResourceViewState(state: FlightDeckPgResourceViewState & { activity_version?: number; attention_activity_version?: number; mention_activity_version?: number; channel_mentions_only?: boolean }) {
   const activityVersion = Number(state.activity_version ?? state.viewed_activity_version);
   return {
     workspace_id: state.workspace_id,
@@ -1302,6 +1303,7 @@ export function serializeFlightDeckPgResourceViewState(state: FlightDeckPgResour
     activity_version: activityVersion,
     viewed_activity_version: Number(state.viewed_activity_version),
     unread: activityVersion > Number(state.viewed_activity_version),
+    ...(state.mention_activity_version !== undefined ? { mention_activity_version: Number(state.mention_activity_version), channel_mentions_only: state.channel_mentions_only === true } : {}),
     ...(state.attention_activity_version !== undefined ? { attention_policy_version: 1, attention_activity_version: Number(state.attention_activity_version), attention_unread: Number(state.attention_activity_version) > Number(state.viewed_activity_version) } : {}),
     row_version: state.row_version,
     created_at: state.created_at,
@@ -8140,7 +8142,10 @@ export async function listVisibleFlightDeckPgResourceViewStates(
         COALESCE(s.row_version, 0) AS row_version,
         COALESCE(s.created_at, v.created_at) AS created_at,
         COALESCE(s.updated_at, v.updated_at) AS updated_at,
-        v.activity_version, v.attention_activity_version
+        v.activity_version, v.attention_activity_version,
+        flightdeck_pg_mention_version(${input.workspaceId}::uuid,v.resource_type,v.resource_id,${input.actorId}::uuid) AS mention_activity_version,
+        EXISTS(SELECT 1 FROM flightdeck_pg_notification_channel_preferences cp JOIN flightdeck_pg_channels c ON c.workspace_id=cp.workspace_id AND c.id=cp.channel_id
+          WHERE cp.workspace_id=${input.workspaceId} AND cp.actor_id=${input.actorId} AND cp.channel_id=v.channel_id AND cp.mode='mentions_only' AND c.kind<>'dm') AS channel_mentions_only
       FROM visible v
       LEFT JOIN flightdeck_pg_resource_view_states s
         ON s.workspace_id=${input.workspaceId} AND s.viewer_actor_id=${input.actorId}

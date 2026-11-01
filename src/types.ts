@@ -1075,6 +1075,7 @@ export interface FlightDeckPgTask {
 }
 
 export interface FlightDeckPgThread {
+  attention?: FlightDeckPgAttention;
   id: string;
   workspace_id: string;
   scope_id: string;
@@ -1207,6 +1208,9 @@ export interface FlightDeckPgDocRecoveryVersion {
 export type FlightDeckPgResourceViewStateType = 'thread' | 'task' | 'document';
 
 export interface FlightDeckPgResourceViewState {
+  /** Exact direct-human mention position, independent of ordinary activity and assignment attention. */
+  mention_activity_version?: number;
+  channel_mentions_only?: boolean;
   /** Derived attention fields; the stored viewed_activity_version remains authoritative. */
   attention_policy_version?: 1;
   attention_activity_version?: number;
