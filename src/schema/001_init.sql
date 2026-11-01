@@ -4859,7 +4859,7 @@ ALTER TABLE flightdeck_pg_messages ADD COLUMN IF NOT EXISTS mention_positions JS
 UPDATE flightdeck_pg_messages m SET mention_activity_version=p.version FROM (
  SELECT m.id,MAX((e.payload->>'activity_version')::bigint) AS version
  FROM flightdeck_pg_messages m JOIN flightdeck_pg_outbox_events e ON e.workspace_id=m.workspace_id
- AND e.entity_id=m.thread_id AND e.event_type IN ('flightdeck_pg.thread.created','flightdeck_pg.thread.updated')
+ AND e.entity_id=m.thread_id AND e.entity_type='thread' AND e.event_type IN ('flightdeck_pg.thread.created','flightdeck_pg.thread.updated')
  AND (e.payload->>'unarchived_by_message_id'=m.id::text OR (e.event_type='flightdeck_pg.thread.created' AND e.payload->>'source_message_id'=m.id::text))
  WHERE m.mention_activity_version=0 AND m.row_version=1 AND jsonb_array_length(CASE WHEN jsonb_typeof(m.metadata->'mentions')='array' THEN m.metadata->'mentions' ELSE '[]'::jsonb END)>0
  AND e.payload->>'activity_version' ~ '^[0-9]+$' GROUP BY m.id
@@ -4875,7 +4875,11 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS fd_stamp_message_mentions ON flightdeck_pg_messages;
 CREATE TRIGGER fd_stamp_message_mentions BEFORE INSERT OR UPDATE OF metadata,mention_activity_version ON flightdeck_pg_messages FOR EACH ROW EXECUTE FUNCTION flightdeck_pg_stamp_message_mentions();
-UPDATE flightdeck_pg_messages SET mention_activity_version=mention_activity_version WHERE mention_positions='{}'::jsonb AND mention_activity_version>0;
+UPDATE flightdeck_pg_messages row SET mention_activity_version=mention_activity_version
+ WHERE row.mention_positions='{}'::jsonb AND row.mention_activity_version>0 AND row.row_version=1
+ AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(row.metadata->'mentions')='array' THEN row.metadata->'mentions' ELSE '[]'::jsonb END) m
+ JOIN flightdeck_pg_actors a ON (m->>'actor_id'=a.id::text OR (m->>'actor_id' IS NULL AND m->>'npub'=a.npub))
+ WHERE a.kind='human' AND a.id<>row.created_by_actor_id AND m->>'type' IN ('person','human','agent'));
 CREATE OR REPLACE FUNCTION flightdeck_pg_refresh_thread_mentions(w UUID,target UUID) RETURNS VOID LANGUAGE sql AS $$
  WITH projection AS (SELECT jsonb_build_object('policy_version',1,'mention_activity_versions',COALESCE((
  SELECT jsonb_object_agg(actor_id,version) FROM (
@@ -4901,7 +4905,7 @@ WITH repaired AS (
  WHERE (p.value::text)::bigint<>m.mention_activity_version OR EXISTS (
  SELECT 1 FROM flightdeck_pg_outbox_events original
  CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(original.payload->'mentions')='array' THEN original.payload->'mentions' ELSE '[]'::jsonb END) mention
- WHERE original.workspace_id=m.workspace_id AND original.entity_id=m.id AND original.event_type='flightdeck_pg.message.created'
+ WHERE original.workspace_id=m.workspace_id AND original.entity_id=m.id AND original.entity_type='message' AND original.event_type='flightdeck_pg.message.created'
  AND (mention->>'actor_id'=p.key OR (mention->>'actor_id' IS NULL AND mention->>'npub'=(SELECT npub FROM flightdeck_pg_actors WHERE id=p.key::uuid)))
  )), '{}'::jsonb) AS positions
  FROM flightdeck_pg_messages m WHERE m.row_version>1 AND m.mention_positions<>'{}'::jsonb AND EXISTS (
