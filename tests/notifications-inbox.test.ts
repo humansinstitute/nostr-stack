@@ -3,6 +3,7 @@ import postgres from 'postgres';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
+import { channelActivityAllowed } from '../src/services/notification-channel-preferences';
 import { setDb } from '../src/db';
 import { createApp } from '../src/server';
 import { splitSqlStatements } from '../src/schema/sql-statements';
@@ -717,6 +718,18 @@ describe.skipIf(!port || port === 5432)('shared notification inbox against dispo
     expect((await channelItems(2))).toHaveLength(1);
     expect((await n('/counts', 'GET', 1)).body.unread_total).toBe(oldCounts.unread_total - 1);
     expect((await n(`/items/${oldItem.id}`, 'GET', 1)).status).toBe(404);
+    const recipient={workspaceId:w1,actorId:actors[1]!};
+    expect(await channelActivityAllowed(db,recipient,channel,'flightdeck.core','task_assignment')).toBe(false);
+    expect(await channelActivityAllowed(db,recipient,channel,'flightdeck.core','mention')).toBe(true);
+    expect(await channelActivityAllowed(db,recipient,channel,'flightdeck.core','comment_tag')).toBe(true);
+    expect(await channelActivityAllowed(db,recipient,channel,'flightdeck.core','dm')).toBe(true);
+    expect(await channelActivityAllowed(db,{workspaceId:w1,actorId:actors[2]!},channel,'flightdeck.core','task_assignment')).toBe(true);
+    // Reuse a known authorized historical item to exercise assignment list/count/direct lookup filtering.
+    await db`UPDATE flightdeck_pg_notification_items SET category='task_assignment' WHERE id=${oldItem.id}`;
+    expect((await channelItems(1))).toHaveLength(0);
+    expect((await n(`/items/${oldItem.id}`, 'GET', 1)).status).toBe(404);
+    expect((await n('/counts','GET',1)).body.unread_total).toBe(oldCounts.unread_total-1);
+    await db`UPDATE flightdeck_pg_notification_items SET category='chat_thread' WHERE id=${oldItem.id}`;
     const changed = await n(`/changes?after_seq=${oldCounts.head_seq}&rules_revision=${oldCounts.rules_revision}`, 'GET', 1);
     expect(changed.status).toBe(410); expect(changed.body.reason).toBe('rules_changed');
     const stale = await n(`/channel-preferences/${channel}`, 'PUT', 1, { mode: 'all', expected_row_version: 0 });
@@ -753,6 +766,7 @@ describe.skipIf(!port || port === 5432)('shared notification inbox against dispo
     expect((await db`SELECT count(*)::int AS n FROM flightdeck_pg_notification_items WHERE recipient_actor_id = ${actors[1]!} AND subject->>'message_id' = ${quiet.messageId}`)[0]!.n).toBe(0);
     const restored = await n(`/channel-preferences/${channel}`, 'PUT', 1, { mode: 'all', expected_row_version: 1 });
     expect(restored.status).toBe(200);
+    expect(await channelActivityAllowed(db,recipient,channel,'flightdeck.core','task_assignment')).toBe(true);
     expect(restored.body.channel_preferences).toContainEqual({ channel_id: channel, mode: 'all', row_version: 2 });
     await message(0, { channel }); await drain();
     expect((await channelItems(1)).filter((i: any) => i.category === 'chat_thread')).toHaveLength(1);

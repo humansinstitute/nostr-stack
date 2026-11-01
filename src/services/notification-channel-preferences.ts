@@ -4,14 +4,14 @@ export type ChannelNotificationMode = 'all' | 'mentions_only';
 export type ChannelNotificationPreference = { channel_id: string; mode: ChannelNotificationMode; row_version: number };
 type Recipient = { workspaceId: string; actorId: string };
 
-/** A channel mute is independent of category/app rules. Direct mentions, DMs, assignments and external apps keep their own rules. */
+/** A channel mute is independent of category/app rules. Direct mentions, comment tags, DMs and external apps keep their own rules. */
 export function isOrdinaryChannelActivity(source: string, category: string) {
-  return source === CORE_SOURCE && category === 'chat_thread';
+  return source === CORE_SOURCE && ['chat_thread', 'task_assignment'].includes(category);
 }
 
 /** SQL predicate for notification item alias i; use on every collection/count/change/bulk selection. */
 export const channelActivityVisibleSql = (sql: Sql) => sql`NOT (
-  i.source_app_id = ${CORE_SOURCE} AND i.category = 'chat_thread'
+  i.source_app_id = ${CORE_SOURCE} AND i.category IN ('chat_thread', 'task_assignment')
   AND EXISTS (SELECT 1 FROM flightdeck_pg_notification_channel_preferences cp
     JOIN flightdeck_pg_channels c ON c.workspace_id = cp.workspace_id AND c.id = cp.channel_id
     WHERE cp.workspace_id = i.workspace_id AND cp.actor_id = i.recipient_actor_id
