@@ -29,7 +29,7 @@ import { Hono } from 'hono';
 import { jsonAgentChatError } from '../agent-chat-errors';
 import { verifyNip98AuthHeader } from '../auth';
 import { resolveStreamAccess } from '../services/stream-access';
-import { openReadRefusal } from '../services/agent-notifications';
+import { openReadRefusal, openReadRefusalResponse } from '../services/agent-notifications';
 import { sseHub } from '../sse-hub';
 import type { SSEClient } from '../sse-hub';
 
@@ -106,9 +106,15 @@ streamRouter.get('/:ownerNpub/stream', async (c) => {
   // Parse last_event_id for replay
   const lastEventId = lastEventIdParam ? parseInt(lastEventIdParam, 10) : null;
 
+  // The ceiling admitted this request before the awaited setup above. Re-decide before replay or any frame; the
+  // stream starts synchronously after this last read, and later deliveries go through the client's admission.
+  const request = c.req.raw;
+  const identity = { signerNpub, actingNpub: actorNpub };
+  const setupRefusal = await openReadRefusal(request, identity);
+  if (setupRefusal) return openReadRefusalResponse(setupRefusal);
+
   // Hoist the client reference so cancel() can clean up on disconnect.
   let client: SSEClient | null = null;
-  const request = c.req.raw;
 
   const stream = new ReadableStream({
     start(controller) {
@@ -120,7 +126,7 @@ streamRouter.get('/:ownerNpub/stream', async (c) => {
         heartbeatTimer: null,
         lifetimeTimer: null,
         // The notification-only ceiling admitted this request once; re-decide before every delivery.
-        admission: async () => (await openReadRefusal(request, { signerNpub, actingNpub: actorNpub }))?.code ?? null,
+        admission: async () => (await openReadRefusal(request, identity))?.code ?? null,
       };
 
       sseHub.addClient(client);

@@ -488,6 +488,17 @@ export async function openReadRefusal(request: Request, identity: OpenReadIdenti
   };
 }
 
+/** The response a connection gets when its setup re-check refuses it: the same status and body as the ceiling. */
+export function openReadRefusalResponse(refusal: OpenReadRefusal) {
+  return Response.json({
+    error: refusal.code,
+    ...refusal,
+    message: refusal.code === 'authorization_unavailable'
+      ? 'Authorization state is unavailable; retry later'
+      : 'This identity is a notification-only agent here. Use the agent-notifications API (capability agent_notifications.v1).',
+  }, { status: refusal.code === 'authorization_unavailable' ? 503 : 403 });
+}
+
 /** Whether `npub` is notification-only in `workspaceId`, from the provider that admitted `request` (fails by throwing). */
 export async function classifiedInWorkspace(request: Request, npub: string, workspaceId: string) {
   const provider = admittedBy.get(request) ?? databaseCeilingProvider();

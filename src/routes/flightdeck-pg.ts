@@ -12,7 +12,7 @@ import { lockDocumentEditAuthority, lockDocumentLeaseAuthority } from '../servic
 import { applyLegacyPreferencePatch } from '../services/notification-inbox';
 import { registerNotificationRoutes } from './notifications';
 import { inboxApiEnabled } from '../services/notification-core';
-import { agentNotificationApiEnabled, classifiedInWorkspace, openReadRefusal, type OpenReadRefusal } from '../services/agent-notifications';
+import { agentNotificationApiEnabled, classifiedInWorkspace, openReadRefusal, openReadRefusalResponse, type OpenReadRefusal } from '../services/agent-notifications';
 import { taskRequestIdentity, taskRequestHash, hasTaskRelationships, validateTaskRelationships } from '../services/task-relationships';
 import { movePersonalPin } from '../services/personal-pin-order';
 import { readPrivatePreference, writePrivatePreference, PrivatePreferenceError } from '../services/private-preferences';
@@ -3659,6 +3659,20 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/events/stream', async (c) => {
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let activeAudienceNpubs = initialAudience?.audience.map((member) => member.npub) ?? [];
   let rejectedAudienceNpubs = initialAudience?.rejectedNpubs ?? [];
+  // The ceiling admitted this request before the awaited setup above. Re-decide before the first frame: an audience
+  // member classified meanwhile is reported as rejected, a classified caller gets the ceiling's refusal. The stream
+  // starts synchronously after this last read.
+  const openReadIdentity = { signerNpub: auth.signerNpub, actingNpub: auth.userNpub };
+  const classifiedAtSetup: string[] = [];
+  for (const npub of activeAudienceNpubs) {
+    if (await classifiedInWorkspace(c.req.raw, npub, context.workspace.id)) classifiedAtSetup.push(npub);
+  }
+  if (classifiedAtSetup.length) {
+    activeAudienceNpubs = activeAudienceNpubs.filter((npub) => !classifiedAtSetup.includes(npub));
+    rejectedAudienceNpubs = [...rejectedAudienceNpubs, ...classifiedAtSetup].sort();
+  }
+  const setupRefusal = await openReadRefusal(c.req.raw, openReadIdentity);
+  if (setupRefusal) return openReadRefusalResponse(setupRefusal);
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -3671,7 +3685,6 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/events/stream', async (c) => {
       // The notification-only ceiling ran once, at connect. A classification committed later must end this stream:
       // re-run the same ceiling decision for the original request and the identity authenticated at connect (verified
       // signer and the identity it resolved to) before polling and again before emitting.
-      const openReadIdentity = { signerNpub: auth.signerNpub, actingNpub: auth.userNpub };
       const endRefused = (refusal: OpenReadRefusal) => {
         controller.enqueue(encodeSseFrame({ event: 'flightdeck_pg.error', data: { error: refusal.code, ...refusal } }));
         close();

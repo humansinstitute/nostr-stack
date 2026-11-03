@@ -90,10 +90,14 @@ describe.skipIf(!port || port === 5432)('legacy event stream lifetime under noti
     return readStream(await app.request(path, { headers: { Authorization: sign([['u', `http://localhost${path}`], ['method', 'GET']], actor) } }));
   }
   // Owner-scoped advisory record stream (NIP-98 in the token query parameter).
-  async function openOwnerStream(actor: number): Promise<OpenStream> {
-    const path = `/api/v4/workspaces/${npubs[actor]}/stream`;
+  // Only `token` is excluded from the signed URL; last_event_id is signed.
+  const ownerStreamUrl = (actor: number, lastEventId?: number) => {
+    const path = `/api/v4/workspaces/${npubs[actor]}/stream${lastEventId === undefined ? '' : `?last_event_id=${lastEventId}`}`;
     const token = sign([['u', `http://localhost${path}`], ['method', 'GET']], actor).slice(6);
-    return readStream(await app.request(`${path}?token=${encodeURIComponent(token)}`));
+    return `${path}${lastEventId === undefined ? '?' : '&'}token=${encodeURIComponent(token)}`;
+  };
+  async function openOwnerStream(actor: number, lastEventId?: number): Promise<OpenStream> {
+    return readStream(await app.request(ownerStreamUrl(actor, lastEventId)));
   }
   function readStream(response: Response): OpenStream {
     let buffer = '';
@@ -451,5 +455,58 @@ describe.skipIf(!port || port === 5432)('legacy event stream lifetime under noti
     await managerBot.until(() => managerBot.ended(), 4_000);
     expect(after(managerBot, mark)).not.toContain('flightdeck_pg.audience_changed');
     expect(after(managerBot, mark)).toContain('agent_notification_upgrade_required');
+  });
+
+  // Setup race: the ceiling admits the request from state read BEFORE the classification commits (its alias lookup is
+  // held on a lock while the classification commits); the route's remaining setup then runs on committed state.
+  async function admittedBeforeClassification(start: () => Promise<Response>, classifySql: () => Promise<unknown>) {
+    clearWsKeyCacheForTests();
+    let release!: () => void; let locked!: () => void;
+    const released = new Promise<void>((r) => { release = r; });
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const holder = db.begin(async (tx) => { await tx`LOCK TABLE user_workspace_keys IN ACCESS EXCLUSIVE MODE`; locked(); await released; });
+    await isLocked;
+    const pending = start();
+    const waiting = async () => Number((await db<{ n: number }[]>`SELECT COUNT(*)::int AS n FROM pg_locks WHERE relation = 'user_workspace_keys'::regclass AND NOT granted`)[0]!.n);
+    for (let i = 0; i < 60 && await waiting() === 0; i++) await Bun.sleep(50);
+    expect(await waiting()).toBeGreaterThan(0);
+    await classifySql();
+    release();
+    await holder;
+    return pending;
+  }
+
+  test('setup race: an event stream whose caller is classified during connection setup sends no frame (no audience metadata)', async () => {
+    const query = [`cursor=${encodeURIComponent(await headCursor(w1))}`, `audience_npub=${encodeURIComponent(npubs[D]!)}`].join('&');
+    const path = `/api/v4/flightdeck-pg/workspaces/${w1}/events/stream?${query}`;
+    const response = await admittedBeforeClassification(
+      () => app.request(path, { headers: { Authorization: sign([['u', `http://localhost${path}`], ['method', 'GET']], M) } }),
+      () => db`INSERT INTO flightdeck_pg_agent_access_profiles (workspace_id, actor_id, profile) VALUES (${w1}, ${actors[M]!}, 'notification_only')`,
+    );
+    const body = readStream(response);
+    await body.until(() => body.ended(), 2_000);
+    expect(body.text()).not.toContain('event: connected');
+    expect(body.text()).not.toContain(npubs[D]!);
+    expect(response.status).toBe(403);
+    expect(body.text()).toContain('agent_notification_upgrade_required');
+  });
+
+  test('setup race: an advisory stream whose owner is classified during connection setup replays nothing', async () => {
+    const before = sseHub.getCurrentEventId();
+    sseHub.emit(npubs[A]!, { event: 'record-changed', data: { record_id: 'SENTINEL-REPLAY-d1d1', family_hash: 'f', version: 1 } });
+    const url = ownerStreamUrl(A, before);
+    const response = await admittedBeforeClassification(
+      () => app.request(url),
+      () => db`INSERT INTO flightdeck_pg_agent_access_profiles (workspace_id, actor_id, profile) VALUES (${w3}, ${actors[A]!}, 'notification_only')`,
+    );
+    const body = readStream(response);
+    await body.until(() => body.ended(), 2_000);
+    expect(body.text()).not.toContain('SENTINEL-REPLAY-d1d1');
+    expect(response.status).toBe(403);
+    expect(body.text()).toContain('agent_notification_upgrade_required');
+    // Control: unclassified, the same replay is delivered.
+    await unclassify();
+    const control = await openOwnerStream(A, before);
+    expect(await control.until((t) => t.includes('SENTINEL-REPLAY-d1d1'))).toBe(true);
   });
 });
