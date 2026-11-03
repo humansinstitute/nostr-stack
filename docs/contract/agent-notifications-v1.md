@@ -219,6 +219,24 @@ Other effects of classification:
 
 Residual: an allowed write's response echoes the bound record written (for example, the created message and its thread descriptor).
 
+Error bodies for classified callers:
+
+- mention errors collapse unknown and inaccessible identities into `mention_unavailable`;
+- an audio-note target that is unknown, in another channel, or in a thread the caller did not name answers `404 audio_note_target_not_found` (the caller must name the target's thread itself, so the created note never discloses it);
+- a receipted lease conflict is a bare `409 edit_lease_held`, without holder, lease id or expiry;
+- an agent-activity collision omits the existing row.
+
+Supported agent-activity ids are UUIDs and Autopilot's 32 lowercase hex.
+
+Residual existence oracles (ids only, no content), recorded for review:
+
+- task create/update relationship validation (`metadata.parent_task_id`, `predecessor_task_ids`) distinguishes unknown from inaccessible task ids;
+- a notification-bound doc comment's `parent_comment_id` is validated only by foreign key, so an unknown id fails differently from a known one, and the id may belong to another doc;
+- file create `folder_scope_mismatch` versus an unknown folder;
+- idempotency conflicts (`idempotency_conflict`) reveal that the caller's own `client_request_id` was used before.
+
+None returns another record's body or metadata.
+
 Idempotent writes never grant reads of changed existing output. For a classified caller:
 
 - a task-create replay (`client_request_id`) returns the existing task only while the caller's own live receipt covers exactly its current `row_version` (without `attention`/`activity_version`, with `work_receipt`);

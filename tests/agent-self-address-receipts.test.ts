@@ -735,4 +735,71 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     // Humans are unchanged: a human may link a human object.
     expect((await request(fd(w1, `/channels/${ch1}/files`), 'POST', H, { storage_object_id: orphan, display_name: 'human.txt' })).status).toBe(201);
   });
+
+  // ------------------------------------------------------------------------------------------------ reviewer F4-F6
+  test('Autopilot-shaped (32-hex) activity ids publish under classification; a collision never echoes the other row', async () => {
+    const o = await origin('activity-hex');
+    const autopilotId = (turn: string, actor: number) => createHash('sha256').update(`${w1}:${turn}:${npubs[actor]}`).digest('hex').slice(0, 32);
+    const activity = (actor: number, threadId: string, trigger: string, turn: string, summary: string) => ({
+      channel_id: ch1, thread_id: threadId, trigger_message_id: trigger, turn_id: turn, session_id: `session-${actor}`, agent_npub: npubs[actor],
+      state: 'working', visibility: 'user_visible', sequence: 1, summary,
+    });
+    const id = autopilotId('turn-hex', A);
+    expect(id).toMatch(/^[0-9a-f]{32}$/);
+    const own = await request(fd(w1, `/agent-activities/${id}`), 'PUT', A, activity(A, o.threadId, o.messageId, 'turn-hex', 'bot working'));
+    expect([200, 201]).toContain(own.status);
+    const other = await origin('activity-hex-b');
+    const forB = await post(ch1, 'B status', { threadId: other.threadId, mentions: [B] });
+    const bId = autopilotId('turn-b', B);
+    expect([200, 201]).toContain((await request(fd(w1, `/agent-activities/${bId}`), 'PUT', B, activity(B, other.threadId, forB.body.message.id, 'turn-b', 'SENTINEL-B-HEX-ACTIVITY'))).status);
+    const collide = await request(fd(w1, `/agent-activities/${bId}`), 'PUT', A, activity(A, o.threadId, o.messageId, 'turn-b', 'mine'));
+    expect([collide.status, collide.body.current]).toEqual([409, undefined]);
+    expect(collide.text).not.toContain('SENTINEL-B-HEX-ACTIVITY');
+    // Unsupported shapes stay refused.
+    expect((await request(fd(w1, `/agent-activities/${id.toUpperCase()}`), 'PUT', A, activity(A, o.threadId, o.messageId, 'turn-hex', 'x'))).status).toBe(403);
+  });
+
+  test('a receipted lease conflict is bare: no other holder, lease id or expiry', async () => {
+    const o = await origin('lease-conflict');
+    const doc = await createDoc(A, 'Lease doc', o.notificationId);
+    const human = await lease(H, doc.body.doc.id);
+    expect(human.status).toBe(201);
+    const conflict = await lease(A, doc.body.doc.id);
+    expect([conflict.status, conflict.body.code]).toEqual([409, 'edit_lease_held']);
+    expect(Object.keys(conflict.body).sort()).toEqual(['code', 'error', 'identity', 'retryable']);
+    const { identity: _identity, ...rest } = conflict.body; // identity names the workspace owner by design
+    expect(JSON.stringify(rest)).not.toContain(npubs[H]!);
+    expect(conflict.text).not.toContain(human.body.lease.id);
+    // Humans keep the detailed conflict.
+    expect((await lease(C, doc.body.doc.id)).body.holder_actor_npub).toBe(npubs[H]);
+  });
+
+  test('classified mention and audio-target errors disclose nothing about other identities or records', async () => {
+    const o = await origin('oracles');
+    const mention = async (actor: number, target: string) => {
+      const body = 'mention test';
+      const mentions = [{ type: 'agent', npub: target }];
+      return request(fd(w1, `/channels/${ch1}/messages`), 'POST', actor, { body, thread_id: o.threadId, mentions, message_signature: signature(body, actor, w1, ch1, o.threadId, mentions, 'none') });
+    };
+    const unknownNpub = nip19.npubEncode(getPublicKey(new Uint8Array(32).fill(250)));
+    const unknown = await mention(A, unknownNpub);
+    const inaccessible = await mention(A, npubs[H2]!); // an actor outside this workspace
+    expect([unknown.status, inaccessible.status]).toEqual([400, 400]);
+    expect(unknown.body.details).toEqual(inaccessible.body.details);
+    expect(unknown.body.details.fields[0].code).toBe('mention_unavailable');
+    expect((await mention(H, unknownNpub)).body.details.fields[0].code).toBe('unknown_actor'); // humans unchanged
+    // Audio targets: other-channel, unknown and thread-revealing targets answer identically.
+    const elsewhere = await post(ch2, 'other channel message', { createThread: true });
+    const sameChannel = await post(ch1, 'same channel threaded', { threadId: o.threadId });
+    const audio = async (actor: number, targetId: string, threadId?: string) => request(fd(w1, `/channels/${ch1}/audio-notes`), 'POST', actor, {
+      storage_object_id: await blob(actor, 'audio', 'audio/webm'), mime_type: 'audio/webm', target_type: 'message', target_id: targetId, ...(threadId ? { thread_id: threadId } : {}),
+    });
+    const results = [await audio(A, elsewhere.body.message.id), await audio(A, randomUUID()), await audio(A, sameChannel.body.message.id)];
+    for (const r of results) expect([r.status, r.body.code]).toEqual([404, 'audio_note_target_not_found']);
+    expect(new Set(results.map((r) => JSON.stringify(r.body.details ?? null))).size).toBe(1);
+    // Naming the target's thread itself works (nothing new is disclosed).
+    expect((await audio(A, sameChannel.body.message.id, o.threadId)).status).toBe(201);
+    // Humans keep the specific errors.
+    expect((await audio(H, elsewhere.body.message.id)).body.code).toBe('audio_note_target_channel_mismatch');
+  });
 });

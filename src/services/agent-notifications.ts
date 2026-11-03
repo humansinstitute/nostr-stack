@@ -374,7 +374,9 @@ async function bindingAllows(sql: Sql, request: Request, actorId: string, worksp
   if (method === 'GET' && (m = new RegExp(`^/tasks/${UUID_SEG}$`).exec(rest))) return receipted('task', m[1]!);
   if (method === 'GET' && (m = new RegExp(`^/files/${UUID_SEG}(?:/object|/versions/${UUID_SEG}/object)?$`).exec(rest))) return receipted('file', m[1]!);
   if (method === 'GET' && (m = new RegExp(`^/audio-notes/${UUID_SEG}(?:/media)?$`).exec(rest))) return receipted('audio_note', m[1]!);
-  if (method === 'PUT' && new RegExp(`^/agent-activities/${UUID_SEG}$`).test(rest)) {
+  // Supported activity id shapes: a UUID, or Autopilot's 32 lowercase hex (truncated sha256). Ownership stays with the
+  // upsert's identity check (another publisher's id is a 409 without its row).
+  if (method === 'PUT' && new RegExp(`^/agent-activities/(?:${UUID_SEG}|[0-9a-f]{32})$`).test(rest)) {
     const b = await body();
     const channelId = id(b?.channel_id);
     const threadId = b?.thread_id == null || b?.thread_id === '' ? null : id(b.thread_id);
@@ -529,7 +531,14 @@ export async function enforceNotificationCeiling(request: Request, provider: Age
     console.error('[agent-notifications] ceiling classification unavailable; refusing request:', error instanceof Error ? error.message : error);
     return Response.json({ error: 'authorization_unavailable', code: 'authorization_unavailable', message: 'Authorization state is unavailable; retry later', retryable: true }, { status: 503 });
   }
+  if (profile) classifiedRequests.add(request);
   return ceilingDecision(request, profile, signer, sql);
+}
+
+// Requests whose signer is notification-only somewhere: handlers use this only to make error bodies less specific.
+const classifiedRequests = new WeakSet<Request>();
+export function isClassifiedRequest(request: Request) {
+  return classifiedRequests.has(request);
 }
 
 /** The ceiling decision once the identity's classification is known (shared by admission and open connections). */
