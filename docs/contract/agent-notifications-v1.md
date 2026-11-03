@@ -229,6 +229,10 @@ Otherwise the replay gets the generic `403 agent_notification_upgrade_required` 
 
 Notifications with `reason: "self_mention"` never bind a write. An `origin_notification_id` named on a message must be live in that exact thread.
 
+## Forgejo sign-in for notification-only identities
+
+`POST /api/v4/git/oidc/authorize/complete` (exact method and path) is admitted for a classified identity. It only proves the signer's identity to the registered OIDC client. The route itself verifies the one-time request id, nonce, `aud`, expiry, payload hash and the Forgejo allowed-login list, and Forgejo owns repository rights. Nothing else under `/api/v4/git` is admitted, and nothing that reads workspace data.
+
 ## Learning for notification-only identities
 
 Learning routes carry no workspace attribution, so a classified identity is otherwise refused there. It may use exactly:

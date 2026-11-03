@@ -453,6 +453,8 @@ async function ownUploadAllowed(sql: Sql, method: string, path: string, npubs: s
 
 const INBOX_ROUTE = new RegExp(`^/api/v4/flightdeck-pg/workspaces/${UUID_SEG}/agent-notifications(?:/|$)`);
 
+const GIT_OIDC_COMPLETE = '/api/v4/git/oidc/authorize/complete';
+
 // Learning has no workspace attribution. A classified identity may use only this reviewed route+method set, and only
 // with an explicitly selected grant it holds (never implicit learner selection, never notification/receipt-derived).
 const LEARNING_ROUTE = /^\/api\/v4\/learning(?:\/|$)/;
@@ -530,6 +532,10 @@ async function ceilingDecision(request: Request, profile: CeilingProfile | null,
   const path = new URL(request.url).pathname;
   if (!isCanonicalRequestPath(path)) return refuseCeiling();
   if (INBOX_ROUTE.test(path)) return null;
+  // Forgejo sign-in is an independent authority: this exact completion step only proves the signer's identity to the
+  // registered OIDC client, and the route itself verifies the one-time request id, nonce, aud, expiry, payload hash
+  // and the allowed-login list. No other git route, and nothing that reads workspace data, is admitted.
+  if (method === 'POST' && path === GIT_OIDC_COMPLETE) return null;
   if (LEARNING_ROUTE.test(path)) {
     try {
       return await learningGrantAllows(request, method, path, signer) ? null : refuseCeiling();
