@@ -1044,6 +1044,14 @@ function receiptView<T extends object>(c: Context, entityType: ReceiptEntityType
   return rest as T;
 }
 
+/**
+ * Write-response bookkeeping (outbox echoes carry the workspace-wide event sequence; activity counters): returned on
+ * ordinary paths, omitted through a receipt, where it would expose activity outside the receipted version.
+ */
+function receiptBookkeeping(c: Context, entityType: ReceiptEntityType, entityId: string, fields: Record<string, unknown>) {
+  return receiptAdmission(c.req.raw, entityType, entityId) ? {} : fields;
+}
+
 /** Mint the receipt for a just-created entity when the request named an origin (inside the create transaction). */
 async function mintNamedReceipt(sql: DbClient, input: {
   originNotificationId: string | undefined; workspaceId: string; actorId: string; channelId: string; entityType: ReceiptEntityType; entityId: string;
@@ -7555,9 +7563,9 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/docs/:docId', async (c) => {
       canonical_version: serializeFlightDeckPgDocVersionIdentity(payload.canonicalVersion),
       storage_link: payload.link ? { id: payload.link.id, storage_object_id: payload.link.storage_object_id } : null,
       audit: { event_id: payload.auditId, operation: 'doc.update', actor_npub: auth.userNpub },
-      outbox: payload.outbox,
-      mention_outbox: payload.mentionOutbox,
-      ...(payload.viewStateOutbox ? { view_state_outbox: payload.viewStateOutbox } : {}),
+      ...receiptBookkeeping(c, 'doc', docId, {
+        outbox: payload.outbox, mention_outbox: payload.mentionOutbox, ...(payload.viewStateOutbox ? { view_state_outbox: payload.viewStateOutbox } : {}),
+      }),
       ...(payload.workReceipt ? { work_receipt: payload.workReceipt } : {}),
     });
   } catch (error) {
@@ -7885,10 +7893,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/docs/:docId/comments', async (
       identity,
       comment: serializeFlightDeckPgDocComment(payload.comment),
       audit: { event_id: payload.auditId, operation: 'doc_comment.create', actor_npub: auth.userNpub },
-      outbox: payload.outbox,
-      mention_outbox: payload.mentionOutbox,
-      ...(receiptAdmission(c.req.raw, 'doc', doc.id) ? {} : { activity_version: payload.activityVersion }),
-      view_state_outbox: payload.viewStateOutbox,
+      ...receiptBookkeeping(c, 'doc', doc.id, { outbox: payload.outbox, mention_outbox: payload.mentionOutbox, activity_version: payload.activityVersion, view_state_outbox: payload.viewStateOutbox }),
     }, 201);
   } catch (error) {
     const sqlCode = (error as { code?: string }).code;
@@ -12602,8 +12607,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/tasks/:taskId/state', async (c
     identity,
     task: receiptView(c, 'task', taskId, serializeFlightDeckPgTask(payload.task)),
     audit: { event_id: payload.auditId, operation: 'task.state', actor_npub: auth.userNpub },
-    outbox: payload.outbox,
-    view_state_outbox: payload.viewStateOutbox,
+    ...receiptBookkeeping(c, 'task', taskId, { outbox: payload.outbox, view_state_outbox: payload.viewStateOutbox }),
     ...(payload.workReceipt ? { work_receipt: payload.workReceipt } : {}),
   });
 });
@@ -12784,9 +12788,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/tasks/:taskId/comments', async
     identity,
     comment: serializeFlightDeckPgTaskComment(Object.assign(payload.comment, { created_by_actor_npub: auth.userNpub })),
     audit: { event_id: payload.auditId, operation: 'task_comment.create', actor_npub: auth.userNpub },
-    outbox: payload.outbox,
-    ...(receiptAdmission(c.req.raw, 'task', task.id) ? {} : { activity_version: payload.activityVersion }),
-    view_state_outbox: payload.viewStateOutbox,
+    ...receiptBookkeeping(c, 'task', task.id, { outbox: payload.outbox, activity_version: payload.activityVersion, view_state_outbox: payload.viewStateOutbox }),
   }, 201);
 });
 

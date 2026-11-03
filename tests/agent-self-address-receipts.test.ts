@@ -573,27 +573,45 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     expect(human.body.file.id).toBe(canonical.body.file.id);
   });
 
-  test('receipted reads omit mutable activity metadata (attention, activity_version); human reads keep it', async () => {
+  test('a later unnotified human comment is not observable through a receipt: identical reads, no counters or event sequence', async () => {
     const o = await origin('receipt-activity');
     const task = await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', A, { title: 'Activity task', origin_notification_id: o.notificationId });
     const doc = await createDoc(A, 'Activity doc', o.notificationId);
+    const paths = [[`/tasks/${task.body.task.id}`, 'task'], [`/docs/${doc.body.doc.id}`, 'doc'], [`/docs/${doc.body.doc.id}/body`, 'doc']] as const;
+    const read = async () => Promise.all(paths.map(async ([path]) => {
+      const res = await request(fd(w1, path), 'GET', A);
+      expect([path, res.status]).toEqual([path, 200]);
+      const { identity: _identity, ...rest } = res.body;
+      return rest;
+    }));
+    const versions = async () => [
+      Number((await db`SELECT row_version FROM flightdeck_pg_tasks WHERE id = ${task.body.task.id}`)[0]!.row_version),
+      Number((await db`SELECT row_version FROM flightdeck_pg_docs WHERE id = ${doc.body.doc.id}`)[0]!.row_version),
+    ];
+    const before = await read();
+    const versionsBefore = await versions();
     const taskComment = await request(fd(w1, `/tasks/${task.body.task.id}/comments`), 'POST', H, { body: 'human task note' });
     const docComment = await request(fd(w1, `/docs/${doc.body.doc.id}/comments`), 'POST', H, { body: 'human doc note' });
     expect([taskComment.status, docComment.status]).toEqual([201, 201]);
-    for (const [path, key] of [[`/tasks/${task.body.task.id}`, 'task'], [`/docs/${doc.body.doc.id}`, 'doc'], [`/docs/${doc.body.doc.id}/body`, 'doc']] as const) {
-      const read = await request(fd(w1, path), 'GET', A);
-      expect([path, read.status]).toEqual([path, 200]);
-      expect(Object.keys(read.body[key])).not.toContain('attention');
-      expect(Object.keys(read.body[key])).not.toContain('activity_version');
-      expect(read.text).not.toContain(taskComment.body.comment.id);
-      expect(read.text).not.toContain(docComment.body.comment.id);
-      expect(read.text).not.toContain(actors[H]!);
+    // The comments leave the parents' row_version unchanged (activity moves independently of it)...
+    expect(await versions()).toEqual(versionsBefore);
+    // ...and nothing observable through the receipt changed.
+    const after = await read();
+    expect(after).toEqual(before);
+    for (const [i, [, key]] of paths.entries()) {
+      expect(Object.keys(after[i]![key])).not.toContain('attention');
+      expect(Object.keys(after[i]![key])).not.toContain('activity_version');
     }
-    // The bot's own comment response carries no activity counter through a receipt.
+    expect(JSON.stringify(after)).not.toContain(taskComment.body.comment.id);
+    expect(JSON.stringify(after)).not.toContain(docComment.body.comment.id);
+    // Receipted write responses carry no activity counter or workspace event sequence.
     const own = await request(fd(w1, `/tasks/${task.body.task.id}/comments`), 'POST', A, { body: 'bot note' });
-    expect(own.status).toBe(201);
-    expect(Object.keys(own.body)).not.toContain('activity_version');
-    // Human reads are unchanged.
+    const state = await request(fd(w1, `/tasks/${task.body.task.id}/state`), 'POST', A, { state: 'in_progress' });
+    expect([own.status, state.status]).toEqual([201, 200]);
+    for (const res of [own, state]) for (const key of ['activity_version', 'outbox', 'view_state_outbox', 'mention_outbox']) expect(Object.keys(res.body)).not.toContain(key);
+    expect(Object.keys(state.body.task)).not.toContain('activity_version');
+    // Ordinary (human) responses are unchanged.
+    expect(Object.keys(taskComment.body)).toEqual(expect.arrayContaining(['outbox', 'activity_version', 'view_state_outbox']));
     const human = await request(fd(w1, `/tasks/${task.body.task.id}`), 'GET', H);
     expect(Object.keys(human.body.task)).toEqual(expect.arrayContaining(['attention', 'activity_version']));
   });
