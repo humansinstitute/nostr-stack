@@ -801,6 +801,15 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     const results = [await audio(A, elsewhere.body.message.id), await audio(A, randomUUID()), await audio(A, sameChannel.body.message.id)];
     for (const r of results) expect([r.status, r.body.code]).toEqual([404, 'audio_note_target_not_found']);
     expect(new Set(results.map((r) => JSON.stringify(r.body.details ?? null))).size).toBe(1);
+    // A named thread without a target: unknown and other-channel threads answer identically.
+    const threadOnly = async (actor: number, threadId: string) => request(fd(w1, `/channels/${ch1}/audio-notes`), 'POST', actor, {
+      storage_object_id: await blob(actor, 'audio', 'audio/webm'), mime_type: 'audio/webm', thread_id: threadId,
+    });
+    const foreignThread = await threadOnly(A, elsewhere.body.message.thread_id);
+    const unknownThread = await threadOnly(A, randomUUID());
+    for (const r of [foreignThread, unknownThread]) expect([r.status, r.body.code]).toEqual([404, 'audio_note_thread_not_found']);
+    expect(JSON.stringify(foreignThread.body.details ?? null)).toBe(JSON.stringify(unknownThread.body.details ?? null));
+    expect((await threadOnly(H, elsewhere.body.message.thread_id)).body.code).toBe('audio_note_thread_channel_mismatch'); // humans unchanged
     // Naming the target's thread itself works (nothing new is disclosed).
     expect((await audio(A, sameChannel.body.message.id, o.threadId)).status).toBe(201);
     // Humans keep the specific errors.

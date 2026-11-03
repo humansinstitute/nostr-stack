@@ -9337,7 +9337,8 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/audio-note
     return jsonError(c, 400, 'audio_note_target_channel_mismatch', 'Audio note target must belong to the target channel', identity);
   }
   const requestedThread = requestedThreadId ? await resolveFlightDeckPgThread(context.workspace.id, requestedThreadId) : null;
-  if (requestedThreadId && !requestedThread) {
+  // Same for a named thread: unknown and other-channel threads answer identically for a notification-only signer.
+  if (requestedThreadId && (!requestedThread || (isClassifiedRequest(c.req.raw) && requestedThread.channel_id !== channel.id))) {
     return jsonError(c, 404, 'audio_note_thread_not_found', 'Flight Deck PG audio note thread was not found', identity);
   }
   if (requestedThread && requestedThread.channel_id !== channel.id) {
