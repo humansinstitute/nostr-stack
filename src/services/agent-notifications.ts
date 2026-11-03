@@ -8,6 +8,7 @@ import { normalizeFlightDeckPgChannelMetadata } from './flightdeck-pg-agent-dire
 import { flightDeckPgCanonicalDocVersionId, listEffectiveFlightDeckPgThreadMessages, serializeFlightDeckPgDocVersionIdentity } from './flightdeck-pg-api';
 import { getStorageObjectContent } from './storage';
 import { explicitGrantAllows } from '../learning/authorization';
+import { explicitWappDelegationAllows } from './wapp-management';
 import { activeWorkReceipt, liveOrigin, parseOriginNotificationId, rememberReceiptAdmission, type ReceiptEntityType } from './agent-work-receipts';
 
 /**
@@ -361,6 +362,12 @@ async function bindingAllows(sql: Sql, request: Request, actorId: string, worksp
     if (await bound('doc_id', m[1]!)) return true;
     const b = await body();
     return b?.parent_comment_id == null && receipted('doc', m[1]!);
+  }
+  // WApp publishing repair: one installation's grant read and publisher rotation, only through an explicit owner
+  // wapp.manage delegation judged on the installation's real facts (never workspace.manage; no list, no edits).
+  if ((method === 'GET' && (m = /^\/wapp-publishing-grants\/([^/]{1,128})$/.exec(rest)))
+    || (method === 'POST' && (m = /^\/wapp-publishing-grants\/([^/]{1,128})\/rotate$/.exec(rest)))) {
+    return explicitWappDelegationAllows({ workspaceId, actorId, wappInstallationId: m[1]! }, sql as any);
   }
   // Receipted reads: the bot's own work output at the version it wrote (comments are never receipted).
   if (method === 'GET' && (m = new RegExp(`^/docs/${UUID_SEG}(?:/body)?$`).exec(rest))) return receipted('doc', m[1]!);

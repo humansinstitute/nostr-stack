@@ -233,6 +233,15 @@ Notifications with `reason: "self_mention"` never bind a write. An `origin_notif
 
 `POST /api/v4/git/oidc/authorize/complete` (exact method and path) is admitted for a classified identity. It only proves the signer's identity to the registered OIDC client. The route itself verifies the one-time request id, nonce, `aud`, expiry, payload hash and the Forgejo allowed-login list, and Forgejo owns repository rights. Nothing else under `/api/v4/git` is admitted, and nothing that reads workspace data.
 
+## WApp publishing repair for notification-only identities
+
+A classified identity may use exactly `GET …/wapp-publishing-grants/{wapp_installation_id}` and `POST …/wapp-publishing-grants/{wapp_installation_id}/rotate`, and only through an explicit owner delegation:
+
+- its latest delegation from the workspace owner is `wapp.manage`, unrevoked, and inside `valid_from`/`expires_at`;
+- every non-empty filter covers the installation's real (hydrated) facts: installation id, app id, destination scopes and channels, grant capabilities, registered open origins, Autopilot origin. An empty filter keeps its explicit wildcard meaning. A filtered fact with no recorded value fails closed.
+
+`workspace.manage` alone never admits a classified identity, at the ceiling or in the route (the route re-checks the same predicate and never takes its `workspace.manage` branch). The grant list, PUT, disable and revoke stay refused. Otherwise the request gets the generic refusal, identical for unknown installations. Rotation keeps all existing validation: the current-key match, the nonce/expiry window and stale-key protection.
+
 ## Learning for notification-only identities
 
 Learning routes carry no workspace attribution, so a classified identity is otherwise refused there. It may use exactly:

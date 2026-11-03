@@ -1,4 +1,7 @@
 import { Hono } from 'hono';
+import { classifiedInWorkspace } from '../services/agent-notifications';
+import { RECEIPT_NOT_LIVE } from '../services/agent-work-receipts';
+import { explicitWappDelegationAllows } from '../services/wapp-management';
 import type { Context } from 'hono';
 import { requireNip98AuthResolved } from '../auth';
 import { config } from '../config';
@@ -89,9 +92,19 @@ async function requireWorkspaceManager(c: Context) {
   return result;
 }
 
-async function requireWappManager(c: Context, request: Record<string, unknown> = {}, prefetched?: Exclude<Awaited<ReturnType<typeof requireHumanContext>>, Response>) {
+async function requireWappManager(c: Context, request: Record<string, unknown> = {}, prefetched?: Exclude<Awaited<ReturnType<typeof requireHumanContext>>, Response>, options: { notificationOnlyRepair?: boolean } = {}) {
   const result = prefetched ?? await requireHumanContext(c);
   if (result instanceof Response) return result;
+  // A notification-only identity never takes the workspace.manage branch: only the repair routes, and only through an
+  // explicit owner delegation that covers this installation's real facts. Otherwise the ceiling's generic refusal.
+  if (await classifiedInWorkspace(c.req.raw, result.auth.userNpub, result.context.workspace.id)
+    || (result.auth.signerNpub !== result.auth.userNpub && await classifiedInWorkspace(c.req.raw, result.auth.signerNpub, result.context.workspace.id))) {
+    const allowed = options.notificationOnlyRepair && await explicitWappDelegationAllows({
+      workspaceId: result.context.workspace.id, actorId: result.context.actor.id, wappInstallationId: String(request.wapp_installation_id || ''),
+    });
+    if (!allowed) return c.json({ ...RECEIPT_NOT_LIVE, identity: result.identity }, 403);
+    return { ...result, delegation: null };
+  }
   const decision = await authorizeFlightDeckPgOperation({ actorNpub: result.auth.userNpub, appNpub: result.context.workspace.app_npub, workspaceId: result.context.workspace.id, permission: 'workspace.manage', resource: { type: 'workspace' } });
   if (decision.allowed) return { ...result, delegation: null };
   const [owner] = await getDb()<any[]>`SELECT a.id FROM flightdeck_pg_actors a JOIN flightdeck_pg_workspace_memberships m ON m.actor_id=a.id AND m.workspace_id=${result.context.workspace.id} WHERE a.npub=${result.context.workspace.workspace_owner_npub}`;
@@ -167,7 +180,7 @@ wappActivityFlightDeckRouter.get('/workspaces/:workspaceId/wapp-publishing-grant
 });
 
 wappActivityFlightDeckRouter.get('/workspaces/:workspaceId/wapp-publishing-grants/:wappInstallationId', async (c) => {
-  const result = await requireWappManager(c, { wapp_installation_id: c.req.param('wappInstallationId') });
+  const result = await requireWappManager(c, { wapp_installation_id: c.req.param('wappInstallationId') }, undefined, { notificationOnlyRepair: true });
   if (result instanceof Response) return result;
   try {
     const grant = await resolveWappPublishingGrantByInstallation(result.context.workspace.id, c.req.param('wappInstallationId'));
@@ -214,7 +227,7 @@ wappActivityFlightDeckRouter.post('/workspaces/:workspaceId/wapp-publishing-gran
 });
 
 wappActivityFlightDeckRouter.post('/workspaces/:workspaceId/wapp-publishing-grants/:wappInstallationId/rotate', async (c) => {
-  const result = await requireWappManager(c, { wapp_installation_id: c.req.param('wappInstallationId') });
+  const result = await requireWappManager(c, { wapp_installation_id: c.req.param('wappInstallationId') }, undefined, { notificationOnlyRepair: true });
   if (result instanceof Response) return result;
   try {
     const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;

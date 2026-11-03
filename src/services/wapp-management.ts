@@ -230,3 +230,48 @@ export async function listManagedWappInstallations(workspaceId: string, sql: DbC
 export async function getManagedWappInstallation(workspaceId: string, installationId: string, sql: DbClient = getDb()) { const rows=await listManagedWappInstallations(workspaceId,sql); return rows.find((r:any)=>r.wapp_installation_id===installationId)??null; }
 export async function requestWappReconciliation(workspaceId:string,installationId:string,actorId:string,sql:DbClient=getDb()){const [r]=await sql<any[]>`UPDATE flightdeck_pg_wapp_installations i SET lifecycle_status='reconciliation_required',updated_at=NOW() FROM flightdeck_pg_wapp_install_intents intent WHERE intent.workspace_id=${workspaceId} AND intent.installation_id=i.id AND i.wapp_installation_id=${installationId} RETURNING i.*`;if(!r)throw new WappManagementError('installation_not_found','Installation not found',404);await sql`INSERT INTO flightdeck_pg_outbox_events(workspace_id,actor_id,event_type,entity_type,entity_id,operation,payload)VALUES(${workspaceId},${actorId},'flightdeck_pg.wapp_installation.reconcile_requested','wapp_installation',${r.id},'reconcile_requested',${sql.json({wapp_installation_id:installationId} as any)})`;return r;}
 export async function revokeManagedWappInstallation(workspaceId:string,installationId:string,actorId:string,sql:DbClient=getDb()){return sql.begin(async(tx)=>{const db=tx as unknown as DbClient;const [r]=await db<any[]>`UPDATE flightdeck_pg_wapp_installations i SET lifecycle_status='revoked',updated_at=NOW() FROM flightdeck_pg_wapp_install_intents intent WHERE intent.workspace_id=${workspaceId} AND intent.installation_id=i.id AND i.wapp_installation_id=${installationId} RETURNING i.*`;if(!r)throw new WappManagementError('installation_not_found','Installation not found',404);await db`UPDATE flightdeck_pg_personal_wapps SET status='archived',deleted_at=COALESCE(deleted_at,NOW()),row_version=row_version+1,updated_by_actor_id=${actorId},updated_at=NOW() WHERE workspace_id=${workspaceId} AND wapp_installation_id=${r.id}`;await db`UPDATE flightdeck_pg_wapp_publishing_grants SET status='revoked',revoked_at=COALESCE(revoked_at,NOW()),disable_open_links=true,grant_version=grant_version+1,updated_at=NOW() WHERE workspace_id=${workspaceId} AND installation_id=${r.id}`;await db`UPDATE flightdeck_pg_wapp_install_intents SET status='revoked',intent_version=intent_version+1,updated_at=NOW() WHERE workspace_id=${workspaceId} AND installation_id=${r.id}`;await db`INSERT INTO flightdeck_pg_outbox_events(workspace_id,actor_id,event_type,entity_type,entity_id,operation,payload)VALUES(${workspaceId},${actorId},'flightdeck_pg.wapp_installation.revoked','wapp_installation',${r.id},'revoked',${db.json({wapp_installation_id:installationId,teardown_requested:true} as any)})`;return r;});}
+
+/**
+ * Strict delegated WApp management for one installation, judged on HYDRATED installation facts (never on request
+ * fields): the acting identity's latest delegation from the workspace owner must be wapp.manage, unrevoked, and inside
+ * valid_from/expires_at. Every non-empty filter must contain the installation's actual id, app, destinations
+ * (scopes/channels), capabilities, registered open origins and Autopilot origin. An empty filter keeps its explicit
+ * wildcard meaning, and a filtered fact Tower does not know fails closed. Used for notification-only identities, which
+ * never take the workspace.manage branch.
+ */
+export async function explicitWappDelegationAllows(input: { workspaceId: string; actorId: string; wappInstallationId: string }, sql: DbClient = getDb()): Promise<boolean> {
+  const [owner] = await sql<{ id: string }[]>`
+    SELECT a.id FROM flightdeck_pg_workspaces w
+    JOIN flightdeck_pg_actors a ON a.npub = w.workspace_owner_npub
+    JOIN flightdeck_pg_workspace_memberships m ON m.workspace_id = w.id AND m.actor_id = a.id
+    WHERE w.id = ${input.workspaceId}`;
+  if (!owner || owner.id === input.actorId) return false;
+  const [delegation] = await sql<any[]>`
+    SELECT * FROM flightdeck_pg_wapp_delegations
+    WHERE workspace_id = ${input.workspaceId} AND delegate_actor_id = ${input.actorId} AND owner_actor_id = ${owner.id}
+    ORDER BY created_at DESC LIMIT 1`;
+  const now = Date.now();
+  if (!delegation || delegation.permission !== 'wapp.manage' || delegation.revoked_at
+    || new Date(delegation.valid_from).getTime() > now || new Date(delegation.expires_at).getTime() <= now) return false;
+  const [installation] = await sql<any[]>`
+    SELECT i.wapp_installation_id, i.app_id, i.autopilot_origin, g.id AS grant_id, g.capabilities, g.registered_open_origins
+    FROM flightdeck_pg_wapp_installations i
+    JOIN flightdeck_pg_wapp_publishing_grants g ON g.installation_id = i.id AND g.workspace_id = ${input.workspaceId}
+    WHERE i.wapp_installation_id = ${input.wappInstallationId}`;
+  if (!installation) return false;
+  const destinations = await sql<{ scope_id: string; channel_id: string }[]>`
+    SELECT scope_id, channel_id FROM flightdeck_pg_wapp_publishing_destinations WHERE grant_id = ${installation.grant_id}`;
+  let f: WappManagementFilters;
+  try { f = normalizeWappManagementFilters(delegation.filters); } catch { return false; }
+  const covers = (allowed: string[], values: Array<string | null | undefined>) =>
+    !allowed.length || (values.length > 0 && values.every((v) => typeof v === 'string' && allowed.includes(v)));
+  let autopilotOrigin: string | null = null;
+  try { autopilotOrigin = installation.autopilot_origin ? exactOrigin(installation.autopilot_origin, 'autopilot_origin') : null; } catch { autopilotOrigin = null; }
+  return covers(f.installation_ids, [installation.wapp_installation_id])
+    && covers(f.app_ids, [installation.app_id])
+    && covers(f.scope_ids, destinations.map((d) => d.scope_id))
+    && covers(f.channel_ids, destinations.map((d) => d.channel_id))
+    && covers(f.capabilities, installation.capabilities ?? [])
+    && covers(f.open_origins, installation.registered_open_origins ?? [])
+    && covers(f.autopilot_origins, [autopilotOrigin]);
+}
