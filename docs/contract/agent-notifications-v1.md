@@ -202,7 +202,7 @@ Bound writes (each still subject to its normal route ACL):
 | `POST tasks/{id}/comments`, `POST tasks/{id}/state` | The task is bound. |
 | `POST docs/{id}/comments`, `PATCH docs/{id}` | The doc is bound. |
 | `POST edit-leases/acquire`, `POST edit-leases/{id}/renew\|release` | The bound task/doc, and the bot's own lease. |
-| `POST channels/{ch}/(docs\|tasks\|files\|audio-notes)` | Requested work products, created only in a channel where the bot holds a live notification. With `origin_notification_id`, that exact origin must be live in this channel (the create then mints a work receipt). |
+| `POST channels/{ch}/(docs\|tasks\|files\|audio-notes)` | Requested work products, created only in a channel where the bot holds a live notification. With `origin_notification_id`, that exact origin must be live in this channel (the create then mints a work receipt). A file create carrying `metadata.text_attachment_lineage` is refused (it could adopt and return another creator's canonical file); the refusal is the generic one, before any lineage lookup. |
 | Receipted reads/updates (see Work receipts) | The bot holds a receipt for that entity whose origin is live. |
 | `POST storage/prepare` | Only while the bot holds a live notification in the workspace. |
 | `PUT /api/v4/storage/{id}`, `POST /api/v4/storage/{id}/complete` | Only the bot's own uncompleted upload. |
@@ -259,7 +259,7 @@ A create of a doc, task, file or audio note that names `origin_notification_id` 
 "work_receipt": { "entity_type": "doc", "entity_id": "…", "receipt_row_version": 3, "origin_notification_id": "…", "body_sha256_hex": "…", "version_id": null }
 ```
 
-The key is absent without an origin. A task create replayed with the same `client_request_id` returns the original receipt. A file create that adopts an existing text-attachment-lineage file mints nothing.
+The key is absent without an origin. A task create replayed with the same `client_request_id` returns the original receipt. Text-attachment lineage creates are refused for classified identities (see Bound writes), so no lineage file is ever adopted or minted through them.
 
 For a classified bot a live receipt (origin still live) admits only that entity, only at the receipted version, checked in the ceiling AND in the handler transaction:
 

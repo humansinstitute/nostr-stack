@@ -399,6 +399,9 @@ async function bindingAllows(sql: Sql, request: Request, actorId: string, worksp
   // With an explicit origin (minting a receipt) that exact origin must be live in this channel.
   if (method === 'POST' && (m = new RegExp(`^/channels/${UUID_SEG}/(docs|tasks|files|audio-notes)$`).exec(rest))) {
     const b = await body();
+    // A text-attachment lineage file create can adopt (and return) another creator's canonical file: refused before
+    // any lineage lookup, with the same refusal as any unbound write (no existence oracle).
+    if (m[2] === 'files' && b?.metadata && typeof b.metadata === 'object' && b.metadata.text_attachment_lineage !== undefined) return false;
     return parseOriginNotificationId(b) === undefined ? liveIn(m[1]!) : originAt(b, m[1]!);
   }
   // Uploads (attachments, file bytes, document bodies) only while the bot holds a live notification in this workspace;

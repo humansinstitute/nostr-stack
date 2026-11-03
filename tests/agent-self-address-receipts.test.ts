@@ -538,4 +538,38 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
       await db`UPDATE flightdeck_pg_agent_notification_subscriptions SET revoked_at = NULL WHERE workspace_id = ${w1} AND recipient_actor_id = ${actors[A]!}`;
     }
   });
+
+  test('text-attachment lineage: a classified bot cannot adopt or see a human canonical file; own uploads and human lineage unchanged', async () => {
+    const o = await origin('lineage'); // the bot holds a live notification in ch1
+    // A human pastes text, and a human lineage file with sentinel metadata becomes the canonical file.
+    const pasted = await blob(H, 'pasted original', 'text/plain');
+    const body = 'see attached';
+    const sent = await request(fd(w1, `/channels/${ch1}/messages`), 'POST', H, {
+      body, metadata: { attachments: [{ kind: 'file', storage_object_id: pasted, filename: 'Pasted text.txt', content_type: 'text/plain' }] },
+      message_signature: signature(body, H, w1, ch1, undefined, [], 'none'),
+    });
+    expect(sent.status).toBe(201);
+    const lineage = { text_attachment_lineage: { v: 1, origin_message_id: sent.body.message.id, origin_storage_object_id: pasted, origin_filename: 'Pasted text.txt' } };
+    const canonical = await request(fd(w1, `/channels/${ch1}/files`), 'POST', H, { display_name: 'SENTINEL-HUMAN-CANONICAL-FILE', storage_object_id: await blob(H, 'human edit', 'text/plain'), metadata: lineage });
+    expect(canonical.status).toBe(201);
+    // The classified bot's lineage create (own new upload, live channel notification): generic refusal, no metadata.
+    const filesBefore = Number((await db`SELECT COUNT(*)::int AS n FROM flightdeck_pg_files`)[0]!.n);
+    for (const extra of [{}, { origin_notification_id: o.notificationId }]) {
+      const adopt = await request(fd(w1, `/channels/${ch1}/files`), 'POST', A, { display_name: 'bot edit', storage_object_id: await blob(A, 'bot edit', 'text/plain'), metadata: lineage, ...extra });
+      expect([adopt.status, adopt.body.code]).toEqual([403, 'agent_notification_upgrade_required']);
+      expect(adopt.text).not.toContain('SENTINEL-HUMAN-CANONICAL-FILE');
+      expect(adopt.text).not.toContain(canonical.body.file.id);
+    }
+    // Same refusal for a lineage that matches nothing (no existence oracle).
+    const nothing = await request(fd(w1, `/channels/${ch1}/files`), 'POST', A, { display_name: 'x', storage_object_id: await blob(A, 'x', 'text/plain'),
+      metadata: { text_attachment_lineage: { v: 1, origin_message_id: randomUUID(), origin_storage_object_id: randomUUID(), origin_filename: 'x.txt' } } });
+    expect([nothing.status, nothing.body.code]).toEqual([403, 'agent_notification_upgrade_required']);
+    expect(Number((await db`SELECT COUNT(*)::int AS n FROM flightdeck_pg_files`)[0]!.n)).toBe(filesBefore);
+    // The bot's ordinary own upload still works.
+    expect((await request(fd(w1, `/channels/${ch1}/files`), 'POST', A, { display_name: 'bot.txt', storage_object_id: await blob(A, 'bot bytes', 'text/plain') })).status).toBe(201);
+    // Human lineage behaviour is unchanged: another human is handed the canonical file.
+    const human = await request(fd(w1, `/channels/${ch1}/files`), 'POST', C, { display_name: 'c edit', storage_object_id: await blob(C, 'c edit', 'text/plain'), metadata: lineage });
+    expect(human.status).toBe(409);
+    expect(human.body.file.id).toBe(canonical.body.file.id);
+  });
 });
