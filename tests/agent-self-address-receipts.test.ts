@@ -572,4 +572,29 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     expect(human.status).toBe(409);
     expect(human.body.file.id).toBe(canonical.body.file.id);
   });
+
+  test('receipted reads omit mutable activity metadata (attention, activity_version); human reads keep it', async () => {
+    const o = await origin('receipt-activity');
+    const task = await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', A, { title: 'Activity task', origin_notification_id: o.notificationId });
+    const doc = await createDoc(A, 'Activity doc', o.notificationId);
+    const taskComment = await request(fd(w1, `/tasks/${task.body.task.id}/comments`), 'POST', H, { body: 'human task note' });
+    const docComment = await request(fd(w1, `/docs/${doc.body.doc.id}/comments`), 'POST', H, { body: 'human doc note' });
+    expect([taskComment.status, docComment.status]).toEqual([201, 201]);
+    for (const [path, key] of [[`/tasks/${task.body.task.id}`, 'task'], [`/docs/${doc.body.doc.id}`, 'doc'], [`/docs/${doc.body.doc.id}/body`, 'doc']] as const) {
+      const read = await request(fd(w1, path), 'GET', A);
+      expect([path, read.status]).toEqual([path, 200]);
+      expect(Object.keys(read.body[key])).not.toContain('attention');
+      expect(Object.keys(read.body[key])).not.toContain('activity_version');
+      expect(read.text).not.toContain(taskComment.body.comment.id);
+      expect(read.text).not.toContain(docComment.body.comment.id);
+      expect(read.text).not.toContain(actors[H]!);
+    }
+    // The bot's own comment response carries no activity counter through a receipt.
+    const own = await request(fd(w1, `/tasks/${task.body.task.id}/comments`), 'POST', A, { body: 'bot note' });
+    expect(own.status).toBe(201);
+    expect(Object.keys(own.body)).not.toContain('activity_version');
+    // Human reads are unchanged.
+    const human = await request(fd(w1, `/tasks/${task.body.task.id}`), 'GET', H);
+    expect(Object.keys(human.body.task)).toEqual(expect.arrayContaining(['attention', 'activity_version']));
+  });
 });

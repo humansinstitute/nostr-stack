@@ -1034,6 +1034,16 @@ async function receiptForUpdate(c: Context, sql: DbClient, input: { workspaceId:
   return matchingOwnReceipt(receiptSql(sql), { workspaceId: input.workspaceId, actorId: input.actorId, entityType: input.entityType, entityId: input.entityId }, current);
 }
 
+/**
+ * Through a receipt the bot sees the version it wrote, not the entity's live activity: `attention` (last activity actor,
+ * comment and mention activity ids) and `activity_version` move with human activity, so they are omitted.
+ */
+function receiptView<T extends object>(c: Context, entityType: ReceiptEntityType, entityId: string, serialized: T): T {
+  if (!receiptAdmission(c.req.raw, entityType, entityId)) return serialized;
+  const { attention: _attention, activity_version: _activityVersion, ...rest } = serialized as Record<string, unknown>;
+  return rest as T;
+}
+
 /** Mint the receipt for a just-created entity when the request named an origin (inside the create transaction). */
 async function mintNamedReceipt(sql: DbClient, input: {
   originNotificationId: string | undefined; workspaceId: string; actorId: string; channelId: string; entityType: ReceiptEntityType; entityId: string;
@@ -6885,7 +6895,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/edit-leases/acquire', async (c
   }
   return c.json({ identity, lease: acquire.lease,
     ...('document_edit_protocol' in acquire ? { document_edit_protocol: acquire.document_edit_protocol } : {}),
-    ...('doc' in acquire ? { doc: serializeFlightDeckPgDoc(acquire.doc), canonical_version: serializeFlightDeckPgDocVersionIdentity(acquire.canonical_version), taken_over: acquire.taken_over } : {}),
+    ...('doc' in acquire ? { doc: receiptView(c, 'doc', entityId, serializeFlightDeckPgDoc(acquire.doc)), canonical_version: serializeFlightDeckPgDocVersionIdentity(acquire.canonical_version), taken_over: acquire.taken_over } : {}),
   }, 201);
 });
 
@@ -6977,9 +6987,9 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/docs/:docId', async (c) => {
 
   return c.json({
     identity,
-    doc: serializeFlightDeckPgDoc(doc, {
+    doc: receiptView(c, 'doc', doc.id, serializeFlightDeckPgDoc(doc, {
       storageObject: serializeFlightDeckPgStorageObjectMetadata(readable.storageObject),
-    }),
+    })),
     canonical_version: serializeFlightDeckPgDocVersionIdentity({
       version_id: flightDeckPgCanonicalDocVersionId(doc.id, doc.row_version),
       row_version: doc.row_version,
@@ -7541,7 +7551,7 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/docs/:docId', async (c) => {
 
     return c.json({
       identity,
-      doc: serializeFlightDeckPgDoc(payload.doc),
+      doc: receiptView(c, 'doc', docId, serializeFlightDeckPgDoc(payload.doc)),
       canonical_version: serializeFlightDeckPgDocVersionIdentity(payload.canonicalVersion),
       storage_link: payload.link ? { id: payload.link.id, storage_object_id: payload.link.storage_object_id } : null,
       audit: { event_id: payload.auditId, operation: 'doc.update', actor_npub: auth.userNpub },
@@ -7705,9 +7715,9 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/docs/:docId/body', async (c) =>
   if (receiptRefusal) return receiptRefusal;
   if (!readable.storageObject.completed_at) {
     return jsonError(c, 409, 'doc_body_upload_incomplete', 'Flight Deck PG doc body storage object upload is not completed', identity, {
-      doc: serializeFlightDeckPgDoc(doc, {
+      doc: receiptView(c, 'doc', doc.id, serializeFlightDeckPgDoc(doc, {
         storageObject: serializeFlightDeckPgStorageObjectMetadata(readable.storageObject),
-      }),
+      })),
     });
   }
 
@@ -7716,9 +7726,9 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/docs/:docId/body', async (c) =>
 
   return c.json({
     identity,
-    doc: serializeFlightDeckPgDoc(doc, {
+    doc: receiptView(c, 'doc', doc.id, serializeFlightDeckPgDoc(doc, {
       storageObject: serializeFlightDeckPgStorageObjectMetadata(readable.storageObject),
-    }),
+    })),
     body: {
       object_id: readable.storageObject.id,
       content_type: readable.storageObject.content_type,
@@ -7877,7 +7887,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/docs/:docId/comments', async (
       audit: { event_id: payload.auditId, operation: 'doc_comment.create', actor_npub: auth.userNpub },
       outbox: payload.outbox,
       mention_outbox: payload.mentionOutbox,
-      activity_version: payload.activityVersion,
+      ...(receiptAdmission(c.req.raw, 'doc', doc.id) ? {} : { activity_version: payload.activityVersion }),
       view_state_outbox: payload.viewStateOutbox,
     }, 201);
   } catch (error) {
@@ -12346,7 +12356,7 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/tasks/:taskId', async (c) => {
   const receiptRefusal = await receiptReadGuard(c, identity, 'task', task.id, { rowVersion: task.row_version });
   if (receiptRefusal) return receiptRefusal;
   // Through a receipt only the receipted row itself: assignment rows can change without a task version change.
-  if (receiptAdmission(c.req.raw, 'task', task.id)) return c.json({ identity, task: serializeFlightDeckPgTask(task) });
+  if (receiptAdmission(c.req.raw, 'task', task.id)) return c.json({ identity, task: receiptView(c, 'task', task.id, serializeFlightDeckPgTask(task)) });
 
   const [taskWithAssignments] = await withFlightDeckPgTaskAssignments(context.workspace.id, [task]);
   return c.json({ identity, task: serializeFlightDeckPgTask(taskWithAssignments) });
@@ -12590,7 +12600,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/tasks/:taskId/state', async (c
 
   return c.json({
     identity,
-    task: serializeFlightDeckPgTask(payload.task),
+    task: receiptView(c, 'task', taskId, serializeFlightDeckPgTask(payload.task)),
     audit: { event_id: payload.auditId, operation: 'task.state', actor_npub: auth.userNpub },
     outbox: payload.outbox,
     view_state_outbox: payload.viewStateOutbox,
@@ -12775,7 +12785,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/tasks/:taskId/comments', async
     comment: serializeFlightDeckPgTaskComment(Object.assign(payload.comment, { created_by_actor_npub: auth.userNpub })),
     audit: { event_id: payload.auditId, operation: 'task_comment.create', actor_npub: auth.userNpub },
     outbox: payload.outbox,
-    activity_version: payload.activityVersion,
+    ...(receiptAdmission(c.req.raw, 'task', task.id) ? {} : { activity_version: payload.activityVersion }),
     view_state_outbox: payload.viewStateOutbox,
   }, 201);
 });
