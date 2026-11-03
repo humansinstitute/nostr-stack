@@ -481,7 +481,8 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/sync`, 'GET', A)).body.code).toBe('agent_notification_upgrade_required');
     // A W1 admin cannot block A in W2 (nor on non-workspace routes).
     expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w2}/channels/${w2ch}/messages`, 'GET', A, undefined, false)).status).toBe(200);
-    expect((await legacy('/api/v4/flightdeck-pg/workspaces', 'GET', A, undefined, false)).status).toBe(200);
+    // Unattributable multi-workspace routes are denied safely (default deny) rather than leaking W1 through them.
+    expect((await legacy('/api/v4/flightdeck-pg/workspaces', 'GET', A, undefined, false)).body.code).toBe('agent_notification_upgrade_required');
     // Classified A was removed from the legacy audience it had in W1.
     expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/event-subscription-agents`, 'GET', H)).body.audience_npubs).toEqual([]);
     expect((await call(`${w1path}?actor_npub=${npubs[A]}`, 'DELETE', A)).body.code).toBe('ceiling_lift_forbidden');
@@ -574,6 +575,37 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/events`, 'GET', C)).status).toBe(200);
     // The bot cannot lift its own ceiling.
     expect((await call(`${base()}/access-profile?actor_npub=${npubs[B]}`, 'DELETE', B)).body.code).toBe('ceiling_lift_forbidden');
+  });
+
+  test('review: percent-encoded / non-canonical paths and unattributable routes are refused for a classified bot (default deny)', async () => {
+    // B is classified in W1 (previous test). The attacker signs the exact encoded URL, so NIP-98 itself verifies.
+    const ws = w1;
+    const encodedUuid = `%${ws.charCodeAt(0).toString(16)}${ws.slice(1)}`;
+    const nonCanonical = [
+      `/api/v4/flightdeck-pg/workspaces/${encodedUuid}/sync`,
+      `/api/v4/flightdeck%2Dpg/workspaces/${ws}/sync`,
+      `/api/v4/flightdeck-pg/workspaces/${ws}/channels/${ch1}/messages%3Fthread_id=${threadId}`,
+      `/api/v4/flightdeck-pg//workspaces/${ws}/sync`,
+      `/api/v4/storage/%${randomUUID().slice(0, 2)}${randomUUID().slice(2)}/content`,
+    ];
+    for (const path of nonCanonical) {
+      const res = await legacy(path, 'GET', B);
+      expect([path, res.status, res.body.code]).toEqual([path, 403, 'agent_notification_upgrade_required']);
+    }
+    const [unlinked] = await db`INSERT INTO v4_storage_objects (owner_npub, created_by_npub, content_type, storage_path, sha256_hex, completed_at)
+      VALUES ('npub1unrelatedowner', 'npub1unrelatedowner', 'text/plain', 'x/unlinked', ${'ab'.repeat(32)}, NOW()) RETURNING id`;
+    const unattributable = [
+      '/api/v4/groups/keys', '/api/v4/groups', '/api/v4/graph/nodes', '/api/v4/user/workspace-keys', '/api/v4/flightdeck-pg/workspaces',
+      '/api/v4/workspaces', '/api/v4/records', `/api/v4/storage/${unlinked!.id}/content`, `/api/v4/storage/${unlinked!.id}`, `/${'ab'.repeat(32)}`,
+      `/%61${'b' + 'ab'.repeat(31)}`,
+    ];
+    for (const path of unattributable) {
+      const res = await legacy(path, 'GET', B);
+      expect([path, res.status]).toEqual([path, 403]);
+    }
+    // The inbox and bound writes still work; humans are unaffected by any of the above.
+    expect((await all(B, 'post-review')).notifications.length).toBeGreaterThan(0);
+    for (const path of [`/api/v4/flightdeck-pg/workspaces/${ws}/sync`, '/api/v4/flightdeck-pg/workspaces']) expect((await legacy(path, 'GET', H)).status).toBe(200);
   });
 
   test('classified bots are excluded from human inbox projection', async () => {

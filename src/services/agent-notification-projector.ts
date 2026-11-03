@@ -314,11 +314,25 @@ export async function processAgentIntakeBatch(options: { sql?: Sql; owner?: stri
 
 /** Bounded retention: rows older than the resume window are removed and the per-recipient retention floor advances. */
 export async function runAgentNotificationMaintenance(sql: Sql = getDb(), batch = 500, retentionDays = 7) {
+  // Per recipient, remove only the contiguous prefix of rows older than the window (seq below the first row that is
+  // still within it), so a lower-seq row committed late is never skipped; the retention floor is that prefix's end.
   await sql`
-    WITH gone AS (
-      DELETE FROM flightdeck_pg_agent_notifications WHERE id IN (
-        SELECT id FROM flightdeck_pg_agent_notifications WHERE created_at < NOW() - make_interval(days => ${retentionDays}) ORDER BY created_at LIMIT ${batch}
-      ) RETURNING workspace_id, recipient_actor_id, seq
+    WITH cutoff AS (SELECT NOW() - make_interval(days => ${retentionDays}) AS at),
+    bounds AS (
+      SELECT n.workspace_id, n.recipient_actor_id,
+        COALESCE(MIN(n.seq) FILTER (WHERE n.created_at >= (SELECT at FROM cutoff)) - 1, MAX(n.seq)) AS floor_seq
+      FROM flightdeck_pg_agent_notifications n
+      WHERE EXISTS (SELECT 1 FROM flightdeck_pg_agent_notifications o WHERE o.workspace_id = n.workspace_id
+        AND o.recipient_actor_id = n.recipient_actor_id AND o.created_at < (SELECT at FROM cutoff))
+      GROUP BY n.workspace_id, n.recipient_actor_id
+    ),
+    gone AS (
+      DELETE FROM flightdeck_pg_agent_notifications d USING bounds b
+      WHERE d.id IN (
+        SELECT x.id FROM flightdeck_pg_agent_notifications x JOIN bounds bb ON bb.workspace_id = x.workspace_id AND bb.recipient_actor_id = x.recipient_actor_id
+        WHERE x.seq <= bb.floor_seq ORDER BY x.seq LIMIT ${batch}
+      ) AND d.workspace_id = b.workspace_id AND d.recipient_actor_id = b.recipient_actor_id
+      RETURNING d.workspace_id, d.recipient_actor_id, d.seq
     )
     UPDATE flightdeck_pg_agent_notification_counters c SET retention_floor_seq = GREATEST(c.retention_floor_seq, g.m)
     FROM (SELECT workspace_id, recipient_actor_id, MAX(seq) AS m FROM gone GROUP BY 1, 2) g

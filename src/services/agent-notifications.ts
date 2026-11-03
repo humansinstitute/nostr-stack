@@ -164,6 +164,19 @@ async function withAuthorizedSnapshot<T>(sql: Sql, r: Recipient, work: (tx: Sql)
   }
 }
 
+/**
+ * Channel archival and scope archival change record-access keys: share-lock the channel and scope rows a response
+ * depends on, so such a change committing after our snapshot forces a retry (40001) instead of serving stale access.
+ */
+async function lockChannels(t: Sql, workspaceId: string, channelIds: Array<string | null>) {
+  const ids = [...new Set(channelIds.filter((id): id is string => Boolean(id)))].sort();
+  if (!ids.length) return;
+  const rows = await t<{ scope_id: string }[]>`
+    SELECT scope_id FROM flightdeck_pg_channels WHERE workspace_id = ${workspaceId} AND id = ANY(${ids}::uuid[]) ORDER BY id FOR SHARE`;
+  const scopes = [...new Set(rows.map((row) => row.scope_id))].sort();
+  if (scopes.length) await t`SELECT 1 FROM flightdeck_pg_scopes WHERE workspace_id = ${workspaceId} AND id = ANY(${scopes}::uuid[]) ORDER BY id FOR SHARE`;
+}
+
 // ------------------------------------------------------------------------------------------------------------------
 // Authorization ceiling for notification-only agents (per workspace + principal; fail closed).
 // ------------------------------------------------------------------------------------------------------------------
@@ -351,9 +364,33 @@ async function ownUploadAllowed(sql: Sql, method: string, path: string, npubs: s
   return Boolean(row?.ok);
 }
 
+const INBOX_ROUTE = new RegExp(`^/api/v4/flightdeck-pg/workspaces/${UUID_SEG}/agent-notifications(?:/|$)`);
+
 /**
- * Hono middleware body. Unclassified identities (every human, and legacy bots) pass untouched. A bot classified in a
- * workspace is refused on requests that target that workspace's resources unless the request is notification-bound.
+ * A classified identity may only use plain canonical paths: the ceiling and the router must see the same path.
+ * Percent-encoding (the router decodes it), empty segments and dot segments are refused outright.
+ */
+export function isCanonicalRequestPath(path: string) {
+  return !path.includes('%') && !path.includes('//') && !/(^|\/)\.{1,2}(\/|$)/.test(path) && !path.includes('\\');
+}
+
+const refuseCeiling = () => Response.json({
+  error: 'agent_notification_upgrade_required',
+  code: 'agent_notification_upgrade_required',
+  message: 'This identity is a notification-only agent here. Use the agent-notifications API (capability agent_notifications.v1).',
+  retryable: false,
+  required_capability: AGENT_NOTIFICATION_CAPABILITY,
+}, { status: 403 });
+
+/**
+ * Hono middleware body. Unclassified identities (every human, and legacy bots) pass untouched.
+ * For an identity classified in one or more workspaces the ceiling is DEFAULT DENY:
+ * - only canonical paths are considered at all;
+ * - the agent inbox routes are allowed (they self-enforce strict recipient auth);
+ * - requests attributable ONLY to workspaces where the identity is not classified are allowed (no cross-tenant denial);
+ * - requests touching a classified workspace are allowed only when notification-bound (or the bot's own upload);
+ * - everything not attributable to a workspace (group keys, graph, user, workspace lists, unlinked storage, legacy
+ *   records without an owner, blobs that resolve nowhere) is refused.
  * When classification cannot be determined the request is refused (fail closed), never admitted.
  */
 export async function enforceNotificationCeiling(request: Request, provider: AgentCeilingProvider, sql: Sql = getDb()): Promise<Response | null> {
@@ -370,6 +407,8 @@ export async function enforceNotificationCeiling(request: Request, provider: Age
   }
   if (!profile) return null;
   const path = new URL(request.url).pathname;
+  if (!isCanonicalRequestPath(path)) return refuseCeiling();
+  if (INBOX_ROUTE.test(path)) return null;
   let parsedBody: Promise<any> | null = null;
   const body = () => (parsedBody ??= request.clone().text().then((text) => { try { return text ? JSON.parse(text) : {}; } catch { return null; } }));
   let targets: string[] | null;
@@ -378,19 +417,13 @@ export async function enforceNotificationCeiling(request: Request, provider: Age
   } catch {
     return Response.json({ error: 'authorization_unavailable', code: 'authorization_unavailable', message: 'Authorization state is unavailable; retry later', retryable: true }, { status: 503 });
   }
-  const classifiedTargets = (targets ?? []).filter((ws) => profile!.workspaces.has(ws));
-  if (!classifiedTargets.length) return null;
-  for (const ws of classifiedTargets) {
-    if (FD_WS.exec(path)?.[1]?.toLowerCase() === ws && await bindingAllows(sql, profile.actorId, ws, method, path, body)) return null;
-  }
+  if (!targets || targets.length === 0) return refuseCeiling(); // unattributable: default deny
+  const classifiedTargets = targets.filter((ws) => profile!.workspaces.has(ws));
+  if (!classifiedTargets.length) return null; // only workspaces where this identity is unrestricted
+  if (classifiedTargets.length === 1 && FD_WS.exec(path)?.[1]?.toLowerCase() === classifiedTargets[0]
+    && await bindingAllows(sql, profile.actorId, classifiedTargets[0]!, method, path, body)) return null;
   if (await ownUploadAllowed(sql, method, path, [signer])) return null;
-  return Response.json({
-    error: 'agent_notification_upgrade_required',
-    code: 'agent_notification_upgrade_required',
-    message: 'This identity is a notification-only agent here. Use the agent-notifications API (capability agent_notifications.v1).',
-    retryable: false,
-    required_capability: AGENT_NOTIFICATION_CAPABILITY,
-  }, { status: 403 });
+  return refuseCeiling();
 }
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -511,6 +544,7 @@ export async function listInboxPage(sql: Sql, r: Recipient, rawCursor: unknown, 
       CROSS JOIN (SELECT flightdeck_pg_record_access(${r.workspaceId}::uuid, ${r.actorId}::uuid) AS keys) access
       WHERE n.workspace_id = ${r.workspaceId} AND n.recipient_actor_id = ${r.actorId} AND n.seq > ${seq}
       ORDER BY n.seq ASC LIMIT ${limit}`;
+    await lockChannels(t, r.workspaceId, rows.map((row) => row.channel_id));
     const floor = new Date(subscription.floor_at).getTime();
     // The floor is enforced on EVERY selection (fan-out can commit old sources late); scanned rows still advance.
     const notifications = rows
@@ -686,9 +720,19 @@ async function docBody(tx: Sql, workspaceId: string, docId: string) {
 }
 
 export async function buildContext(sql: Sql, r: Recipient, notificationId: string) {
+  return buildContextThen(sql, r, notificationId, async (context) => context);
+}
+
+/** Builds the context and runs `then` inside the SAME locked snapshot (attachment bytes are served before commit). */
+async function buildContextThen<T>(sql: Sql, r: Recipient, notificationId: string, then: (context: any, t: Sql) => Promise<T>): Promise<T> {
   const n = await loadOwnNotification(sql, r, notificationId);
   const policy = agentNotificationContextPolicy();
-  return withAuthorizedSnapshot(sql, r, async (t) => {
+  return withAuthorizedSnapshot(sql, r, async (t) => then(await contextIn(t, r, n, policy), t));
+}
+
+async function contextIn(t: Sql, r: Recipient, n: FullNotification, policy: ContextPolicy): Promise<any> {
+  {
+    await lockChannels(t, r.workspaceId, [n.channel_id]);
     await assertNotificationLive(t, r, n);
     const w = r.workspaceId;
     const gone = () => fail(410, 'source_gone', 'The notification source no longer exists at its notified location');
@@ -789,21 +833,22 @@ export async function buildContext(sql: Sql, r: Recipient, notificationId: strin
       };
     }
     throw gone();
-  });
+  }
 }
 
-/** Bytes of an attachment of the trigger (or transcript window) entity only; never a bearer URL. */
+/** Bytes of an attachment of the trigger (or transcript window) entity only; never a bearer URL. Read under the lock. */
 export async function readAttachment(sql: Sql, r: Recipient, notificationId: string, storageObjectId: string) {
   if (!isUuid(storageObjectId)) throw fail(404, 'attachment_not_found', 'Attachment not found');
-  const context = await buildContext(sql, r, notificationId) as any;
-  const allowed = new Set<string>();
-  for (const message of [context.trigger?.message, ...(context.window?.messages ?? [])]) {
-    for (const a of message?.attachments ?? []) allowed.add(a.storage_object_id);
-  }
-  if (!allowed.has(storageObjectId)) throw fail(404, 'attachment_not_found', 'Attachment not found');
-  const content = await getStorageObjectContent(storageObjectId);
-  if (!content || !content.row.completed_at) throw fail(404, 'attachment_not_found', 'Attachment not found');
-  return content;
+  return buildContextThen(sql, r, notificationId, async (context) => {
+    const allowed = new Set<string>();
+    for (const message of [context.trigger?.message, ...(context.window?.messages ?? [])]) {
+      for (const a of message?.attachments ?? []) allowed.add(a.storage_object_id);
+    }
+    if (!allowed.has(storageObjectId)) throw fail(404, 'attachment_not_found', 'Attachment not found');
+    const content = await getStorageObjectContent(storageObjectId);
+    if (!content || !content.row.completed_at) throw fail(404, 'attachment_not_found', 'Attachment not found');
+    return content;
+  });
 }
 
 export async function acknowledge(sql: Sql, r: Recipient, notificationId: string, body: any) {

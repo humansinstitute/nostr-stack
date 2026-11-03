@@ -101,17 +101,20 @@ An old inbox id therefore never hydrates content the recipient is no longer addr
 - **Sequencing:** `seq` is allocated under the per-recipient counter row lock, which is held to commit. Commit order therefore equals seq order, and readers never see a gap that later fills.
 - **Floor:** `source_created_at >= floor_at` is applied on every selection. Scanned rows below the floor still advance the cursor. Cursor 0, forged cursors, other subscriptions' cursors and other workspaces' cursors cannot widen the window (`400 invalid_cursor`). Context for a pre-floor id is a 404.
 - **Delivery:** at least once. Consumers dedupe by notification id. `acked_through_seq` is contiguous.
-- **Retention:** rows are kept for 7 days. A cursor below the retention floor gets `409 cursor_gap` with `recovery_cursor`. There is never a silent reset.
+- **Retention:** rows are kept for 7 days. Only the contiguous seq prefix of expired rows is removed per recipient, so a late-committed lower seq is never skipped. A cursor below the retention floor gets `409 cursor_gap` with `recovery_cursor`. There is never a silent reset.
 - **First activation:** a one-shot backfill enqueues the previous 24 hours of addressing-bearing outbox events (idempotent). `CREATE TRIGGER` locking leaves no boundary hole.
 
 ## Revocation linearization
 
 Every page, context, attachment and ack runs in one REPEATABLE READ transaction that share-locks the rows granting access:
 
-- the membership row (`FOR KEY SHARE`);
+- the membership row (`FOR KEY SHARE`; membership removal is a DELETE);
 - the actor row (`FOR SHARE`, which detects identity rotation);
 - effective group memberships and edges (`FOR KEY SHARE`);
-- every live grant (`FOR SHARE`).
+- every live grant (`FOR SHARE`);
+- the channel and scope rows of the served notifications (`FOR SHARE`, which catches archival).
+
+Attachment bytes are read inside the same locked transaction.
 
 The ordering follows from those locks:
 
@@ -153,7 +156,15 @@ A classification row is per (workspace, agent). There is no identity-wide or glo
 | Set | The bot itself, or a `workspace.manage` holder for a member agent in that workspace |
 | Lift | A `workspace.manage` holder who is not restricted in that workspace; never the bot itself |
 
-A classification binds only requests that target that workspace's resources, so another tenant's admin can never affect this workspace. A request is attributed to its workspace by:
+For a classified identity the ceiling is **default deny**. In order:
+
+1. Only canonical paths are considered. Any `%` encoding, empty segment (`//`), dot segment or backslash is refused, so the ceiling and the router always see the same path.
+2. The agent inbox routes are allowed; they self-enforce strict recipient auth.
+3. Requests attributable only to workspaces where the identity is not classified are allowed, so another tenant's admin can never take away the bot's access to its own workspace.
+4. Requests touching a classified workspace are allowed only when notification-bound.
+5. Everything not attributable to a workspace is refused, for example group keys, graph, user routes, multi-workspace lists, unlinked storage objects, `/api/v4/records` without an owner, and blobs that resolve nowhere.
+
+A request is attributed to its workspace by:
 
 - the FD/WApp path workspace;
 - `/api/v4/storage/{id}` via the object's links and owner;
@@ -161,7 +172,7 @@ A classification binds only requests that target that workspace's resources, so 
 - `/api/v4/workspaces/{owner}`;
 - the `/api/v4/records` owner or workspace-service parameters.
 
-**Fail closed.** The ceiling reads classifications through an injected provider. The production provider (`databaseCeilingProvider`) refuses any authenticated request whose classification cannot be determined: a database error or a missing table returns `503 authorization_unavailable`. It never treats an error as "unclassified", and only successful lookups are cached (2 s). Production constructs the app with this provider explicitly and serves traffic only after the runtime schema is ensured. Test fixtures without the runtime schema inject `unclassifiedFixtureCeiling` explicitly.
+**Fail closed.** The ceiling reads classifications through an injected provider. The production provider (`databaseCeilingProvider`) refuses any authenticated request whose classification cannot be determined: a database error or a missing table returns `503 authorization_unavailable`. It never treats an error as "unclassified", and only successful lookups are cached (2 s, per process; Tower runs one process per instance, so a classification change is visible everywhere within 2 s). Production constructs the app with this provider explicitly and serves traffic only after the runtime schema is ensured. Test fixtures without the runtime schema inject `unclassifiedFixtureCeiling` explicitly.
 
 A bound request returns `403 agent_notification_upgrade_required` (`retryable:false`) before any handler runs, unless it is one of:
 
