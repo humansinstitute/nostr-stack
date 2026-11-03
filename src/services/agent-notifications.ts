@@ -194,20 +194,16 @@ export interface AgentCeilingProvider {
 
 export class CeilingUnavailableError extends Error {}
 
-const ceilingCache = new Map<string, { value: CeilingProfile | null; at: number }>();
-const CEILING_CACHE_MS = 2000;
-export function invalidateCeilingCache() { ceilingCache.clear(); }
+/**
+ * No classification cache: every authenticated request reads the (small, indexed) classification rows, so a change
+ * committed on any Tower process applies to the very next request everywhere. Kept as a no-op for call sites.
+ */
+export function invalidateCeilingCache() {}
 
 async function lookupProfile(sql: Sql, npub: string): Promise<CeilingProfile | null> {
-  const hit = ceilingCache.get(npub);
-  if (hit && Date.now() - hit.at < CEILING_CACHE_MS) return hit.value;
   const rows = await sql<{ actor_id: string; workspace_id: string }[]>`
     SELECT p.actor_id, p.workspace_id FROM flightdeck_pg_agent_access_profiles p JOIN flightdeck_pg_actors a ON a.id = p.actor_id WHERE a.npub = ${npub}`;
-  const value = rows.length ? { actorId: rows[0]!.actor_id, workspaces: new Set(rows.map((row) => row.workspace_id)) } : null;
-  // Only successful lookups are cached; an error is never remembered as "unclassified".
-  ceilingCache.set(npub, { value, at: Date.now() });
-  if (ceilingCache.size > 5000) ceilingCache.delete(ceilingCache.keys().next().value!);
-  return value;
+  return rows.length ? { actorId: rows[0]!.actor_id, workspaces: new Set(rows.map((row) => row.workspace_id)) } : null;
 }
 
 export function databaseCeilingProvider(sql: () => Sql = () => getDb()): AgentCeilingProvider {
@@ -216,6 +212,8 @@ export function databaseCeilingProvider(sql: () => Sql = () => getDb()): AgentCe
       try {
         const direct = await lookupProfile(sql(), signerNpub);
         if (direct) return direct;
+        // Same resolver the routes use (resolveNip98Signer): the ceiling and the handler always agree on the acting
+        // identity, so a workspace-key alias can never act as a classified agent while escaping its classification.
         const user = await resolveWsKeyNpub(signerNpub);
         return user && user !== signerNpub ? await lookupProfile(sql(), user) : null;
       } catch (error) {
@@ -287,6 +285,7 @@ async function bindingAllows(sql: Sql, actorId: string, workspaceId: string, met
       SELECT EXISTS (
         SELECT 1 FROM flightdeck_pg_agent_notifications n
         WHERE n.workspace_id = ${workspaceId} AND n.recipient_actor_id = ${actorId}
+          AND ${ACTIVE_FLOOR}
           AND flightdeck_pg_record_access(n.workspace_id, n.recipient_actor_id) @> to_jsonb(n.acl_key)
           AND flightdeck_pg_agent_notification_relation(n.id) = 'ok'
           AND CASE ${column}
@@ -298,9 +297,13 @@ async function bindingAllows(sql: Sql, actorId: string, workspaceId: string, met
       ) AS ok`;
     return Boolean(row?.ok);
   };
+  // Same eligibility as reads: only notifications inside an active subscription's floor can bind a write or output.
+  const ACTIVE_FLOOR = sql`EXISTS (SELECT 1 FROM flightdeck_pg_agent_notification_subscriptions s WHERE s.workspace_id = n.workspace_id
+    AND s.recipient_actor_id = n.recipient_actor_id AND s.revoked_at IS NULL AND s.floor_at <= n.source_created_at)`;
   const liveIn = async (channelId: string | null) => {
     const [row] = await sql<{ ok: boolean }[]>`
       SELECT EXISTS (SELECT 1 FROM flightdeck_pg_agent_notifications n WHERE n.workspace_id = ${workspaceId} AND n.recipient_actor_id = ${actorId}
+        AND ${ACTIVE_FLOOR}
         AND (${channelId}::uuid IS NULL OR n.channel_id = ${channelId}::uuid)
         AND flightdeck_pg_record_access(n.workspace_id, n.recipient_actor_id) @> to_jsonb(n.acl_key)
         AND flightdeck_pg_agent_notification_relation(n.id) = 'ok') AS ok`;

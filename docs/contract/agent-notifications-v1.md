@@ -172,12 +172,12 @@ A request is attributed to its workspace by:
 - `/api/v4/workspaces/{owner}`;
 - the `/api/v4/records` owner or workspace-service parameters.
 
-**Fail closed.** The ceiling reads classifications through an injected provider. The production provider (`databaseCeilingProvider`) refuses any authenticated request whose classification cannot be determined: a database error or a missing table returns `503 authorization_unavailable`. It never treats an error as "unclassified", and only successful lookups are cached (2 s, per process; Tower runs one process per instance, so a classification change is visible everywhere within 2 s). Production constructs the app with this provider explicitly and serves traffic only after the runtime schema is ensured. Test fixtures without the runtime schema inject `unclassifiedFixtureCeiling` explicitly.
+**Fail closed.** The ceiling reads classifications through an injected provider. The production provider (`databaseCeilingProvider`) refuses any authenticated request whose classification cannot be determined: a database error or a missing table returns `503 authorization_unavailable`. It never treats an error as "unclassified". There is no classification cache: every authenticated request reads the small, indexed classification rows, so a committed classification applies to the very next request on every Tower process. Workspace-key aliases resolve through the same resolver the routes use, so the ceiling and the handler always agree on the acting identity. Production constructs the app with this provider explicitly and serves traffic only after the runtime schema is ensured. Test fixtures without the runtime schema inject `unclassifiedFixtureCeiling` explicitly.
 
 A bound request returns `403 agent_notification_upgrade_required` (`retryable:false`) before any handler runs, unless it is one of:
 
 - this inbox;
-- a write bound to a **live** notification of the bot (current access and canonical relationship `ok`).
+- a write bound to a **live** notification of the bot: current access, canonical relationship `ok`, and inside an active subscription's 24h floor (the same eligibility as reads, so retained pre-floor rows bind nothing).
 
 Bound writes (each still subject to its normal route ACL):
 

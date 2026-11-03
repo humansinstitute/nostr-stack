@@ -577,6 +577,28 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     expect((await call(`${base()}/access-profile?actor_npub=${npubs[B]}`, 'DELETE', B)).body.code).toBe('ceiling_lift_forbidden');
   });
 
+  test('write binding uses the same active-subscription floor as reads: retained pre-floor notifications authorize nothing', async () => {
+    const write = async (path: string, body: Record<string, unknown>) => legacy(path, 'POST', B, body);
+    // B is bound to boundTaskId via a live comment mention: allowed.
+    expect((await write(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${boundTaskId}/comments`, { body: 'within floor' })).status).toBe(201);
+    const rows = await db`SELECT id, source_created_at FROM flightdeck_pg_agent_notifications WHERE recipient_actor_id = ${actors[B]!}`;
+    // Retained but older than every B subscription's floor (e.g. 7-day retention window, 24h activation floor).
+    await db`UPDATE flightdeck_pg_agent_notifications SET source_created_at = NOW() - INTERVAL '6 days' WHERE recipient_actor_id = ${actors[B]!}`;
+    try {
+      const refusedComment = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${boundTaskId}/comments`, { body: 'pre-floor' });
+      const refusedTask = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/tasks`, { title: 'pre-floor output' });
+      const refusedUpload = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/storage/prepare`, { file_name: 'x.txt', content_type: 'text/plain', size_bytes: 1 });
+      const msgBody = 'pre-floor reply';
+      const refusedReply = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/messages`, { body: msgBody, thread_id: threadId, message_signature: messageSignature({ body: msgBody, actor: B, workspaceId: w1, channelId: ch1, threadId }) });
+      for (const [name, res] of [['comment', refusedComment], ['task', refusedTask], ['upload', refusedUpload], ['reply', refusedReply]] as const) {
+        expect([name, res.status, res.body.code]).toEqual([name, 403, 'agent_notification_upgrade_required']);
+        expect(JSON.stringify(res.body)).not.toContain(SENTINEL.task);
+      }
+    } finally {
+      for (const row of rows) await db`UPDATE flightdeck_pg_agent_notifications SET source_created_at = ${row.source_created_at} WHERE id = ${row.id}`;
+    }
+  });
+
   test('review: percent-encoded / non-canonical paths and unattributable routes are refused for a classified bot (default deny)', async () => {
     // B is classified in W1 (previous test). The attacker signs the exact encoded URL, so NIP-98 itself verifies.
     const ws = w1;
