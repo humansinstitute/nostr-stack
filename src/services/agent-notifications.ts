@@ -106,7 +106,7 @@ export async function resolveRecipient(sql: Sql, workspaceId: string, npub: stri
   const [row] = await sql<{ workspace_id: string; app_npub: string; actor_id: string | null; kind: string | null; member: boolean; classified: boolean }[]>`
     SELECT w.id AS workspace_id, w.app_npub, a.id AS actor_id, a.kind,
       (m.actor_id IS NOT NULL) AS member,
-      EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = a.id) AS classified
+      EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = a.id AND p.workspace_id = w.id) AS classified
     FROM flightdeck_pg_workspaces w
     LEFT JOIN flightdeck_pg_actors a ON a.npub = ${npub}
     LEFT JOIN flightdeck_pg_workspace_memberships m ON m.workspace_id = w.id AND m.actor_id = a.id

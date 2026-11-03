@@ -194,7 +194,7 @@ async function accessProfileParties(c: Context, auth: StrictAuth, actorNpub: unk
   const member = async (npub: string) => {
     const [row] = await sql<{ workspace_id: string; actor_id: string; kind: string; classified: boolean }[]>`
       SELECT m.workspace_id, a.id AS actor_id, a.kind,
-        EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = a.id) AS classified
+        EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = a.id AND p.workspace_id = m.workspace_id) AS classified
       FROM flightdeck_pg_actors a JOIN flightdeck_pg_workspace_memberships m ON m.actor_id = a.id AND m.workspace_id = ${workspaceId}::uuid
       WHERE a.npub = ${npub}`;
     return row ? { workspaceId: row.workspace_id, actorId: row.actor_id, kind: row.kind, classified: row.classified, npub } : null;

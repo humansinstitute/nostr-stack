@@ -214,7 +214,7 @@ async function resolveRecipients(tx: Sql, workspaceId: string, source: AgentSour
     SELECT a.id, a.npub FROM flightdeck_pg_actors a
     JOIN flightdeck_pg_workspace_memberships m ON m.workspace_id = ${workspaceId} AND m.actor_id = a.id
     WHERE (a.id = ANY(${ids}::uuid[]) OR a.npub = ANY(${npubs}::text[]))
-      AND (a.kind = 'agent' OR EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = a.id))`;
+      AND (a.kind = 'agent' OR EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = a.id AND p.workspace_id = ${workspaceId}))`;
   const byNpub = new Map(actors.map((a) => [a.npub, a.id]));
   const known = new Set(actors.map((a) => a.id));
   const aclKey = `channel:${source.channelId}:${source.aclFamily}`;

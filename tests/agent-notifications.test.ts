@@ -504,6 +504,34 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     expect((await legacy(path, 'PUT', H, { agent_npubs: [npubs[A]], legacy_broad_feed_consent: true })).body.audience_npubs).toEqual([npubs[A]]);
   });
 
+  test('a W1 classification never affects W2: W2 legacy audience (existing + consented) and W2 human inbox stay intact; W1 rejects', async () => {
+    const w2path = `/api/v4/flightdeck-pg/workspaces/${w2}/event-subscription-agents`;
+    await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,permission) VALUES(${w2},'actor',${actors[H2]!},'workspace','event_subscription.manage')`;
+    await db`INSERT INTO flightdeck_pg_event_subscription_agents (workspace_id, manager_actor_id, agent_actor_id, authorized_by_actor_id) VALUES (${w2}, ${actors[H2]!}, ${actors[A]!}, ${actors[H2]!})`;
+    await db`INSERT INTO flightdeck_pg_agent_access_profiles (workspace_id, actor_id, profile) VALUES (${w1}, ${actors[A]!}, 'notification_only')`;
+    try {
+      // W2: the existing registration survives the reconnect, the list keeps it, and /events still serves it.
+      expect((await legacy(w2path, 'GET', H2)).body.audience_npubs).toEqual([npubs[A]]);
+      expect((await legacy(w2path, 'PUT', H2, { agent_npubs: [npubs[A]] })).body.audience_npubs).toEqual([npubs[A]]);
+      const w2events = await legacy(`/api/v4/flightdeck-pg/workspaces/${w2}/events?audience_npub=${encodeURIComponent(npubs[A]!)}`, 'GET', H2);
+      expect([w2events.status, w2events.body.rejected_audience_npubs]).toEqual([200, []]);
+      // W2: a fresh consented registration also works.
+      await db`DELETE FROM flightdeck_pg_event_subscription_agents WHERE workspace_id = ${w2}`;
+      expect((await legacy(w2path, 'PUT', H2, { agent_npubs: [npubs[A]], legacy_broad_feed_consent: true })).body.audience_npubs).toEqual([npubs[A]]);
+      // W1: rejected even with consent.
+      const w1put = await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/event-subscription-agents`, 'PUT', H, { agent_npubs: [npubs[A]], legacy_broad_feed_consent: true });
+      expect(w1put.body.rejected_audience).toEqual([{ npub: npubs[A], code: 'notification_only_agent' }]);
+      // W2 human inbox projection still includes A (classified only in W1).
+      const before = Number((await db`SELECT COUNT(*)::int AS n FROM flightdeck_pg_notification_items WHERE recipient_actor_id = ${actors[A]!} AND workspace_id = ${w2}`)[0]!.n);
+      await post(w2ch, 'w2 human chatter', { actor: H2, workspace: w2, createThread: true });
+      for (let i = 0; i < 20; i++) if ((await processIntakeBatch({ sql: db, limit: 50 })).claimed === 0) break;
+      expect(Number((await db`SELECT COUNT(*)::int AS n FROM flightdeck_pg_notification_items WHERE recipient_actor_id = ${actors[A]!} AND workspace_id = ${w2}`)[0]!.n)).toBeGreaterThan(before);
+    } finally {
+      await db`DELETE FROM flightdeck_pg_agent_access_profiles WHERE workspace_id = ${w1} AND actor_id = ${actors[A]!}`;
+      await db`DELETE FROM flightdeck_pg_event_subscription_agents WHERE workspace_id = ${w2}`;
+    }
+  });
+
   // --------------------------------------------------------------------------------------------------- ceiling
   test('workspace-scoped ceiling: W1 classification binds only W1 resources; another tenant never affects W2; no global scope', async () => {
     const w1path = `${base()}/access-profile`;

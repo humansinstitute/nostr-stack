@@ -7306,7 +7306,7 @@ export async function listFlightDeckPgEventSubscriptionAgents(
     WHERE authz.workspace_id = ${input.workspaceId}
       AND authz.manager_actor_id = ${input.managerActorId}
       -- Notification-only agents (identity-wide ceiling) never join a visibility audience.
-      AND NOT EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = authz.agent_actor_id)
+      AND NOT EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = authz.agent_actor_id AND p.workspace_id = authz.workspace_id)
     ORDER BY actor.npub ASC
   `;
 }
@@ -7321,7 +7321,7 @@ export async function replaceFlightDeckPgEventSubscriptionAgents(
     `).map((row) => row.agent_actor_id));
     const members = input.agentNpubs.length === 0 ? [] : await tx<Array<{ actor_id: string; npub: string; notification_only: boolean }>>`
       SELECT actor.id AS actor_id, actor.npub,
-        EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = actor.id) AS notification_only
+        EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = actor.id AND p.workspace_id = ${input.workspaceId}) AS notification_only
       FROM flightdeck_pg_actors actor
       JOIN flightdeck_pg_workspace_memberships membership
         ON membership.actor_id = actor.id
