@@ -27,6 +27,14 @@ export type SSEClient = {
   connectedAt: number;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   lifetimeTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * Re-decides admission before each delivery (null = still admitted, otherwise the refusal code). Events queued
+   * while a check runs are covered by the next check; on refusal the client gets one error frame and is removed.
+   */
+  admission?: () => Promise<string | null>;
+  pending?: Uint8Array[];
+  draining?: boolean;
+  removed?: boolean;
 };
 
 export type SSEEvent = {
@@ -88,6 +96,8 @@ class SSEHub {
   }
 
   removeClient(client: SSEClient) {
+    client.removed = true;
+    client.pending = [];
     if (client.heartbeatTimer) {
       clearInterval(client.heartbeatTimer);
       client.heartbeatTimer = null;
@@ -135,7 +145,40 @@ class SSEHub {
       if (visibleToUserNpubs && !visibleToUserNpubs.includes(client.userNpub)) {
         continue;
       }
+      this.deliver(client, payloadBytes);
+    }
+  }
+
+  private deliver(client: SSEClient, payloadBytes: Uint8Array) {
+    if (!client.admission) {
       this.sendBytes(client, payloadBytes);
+      return;
+    }
+    (client.pending ??= []).push(payloadBytes);
+    if (!client.draining) void this.drain(client);
+  }
+
+  private async drain(client: SSEClient) {
+    client.draining = true;
+    try {
+      while (!client.removed && client.pending?.length) {
+        const batch = client.pending.splice(0);
+        let refusal: string | null;
+        try {
+          refusal = await client.admission!();
+        } catch {
+          refusal = 'authorization_unavailable';
+        }
+        if (client.removed) return;
+        if (refusal) {
+          this.sendRaw(client, `event: error\ndata: ${JSON.stringify({ error: refusal, code: refusal })}\n\n`);
+          this.removeClient(client);
+          return;
+        }
+        for (const bytes of batch) this.sendBytes(client, bytes);
+      }
+    } finally {
+      client.draining = false;
     }
   }
 

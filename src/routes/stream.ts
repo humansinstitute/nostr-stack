@@ -19,6 +19,8 @@
  * Auth: NIP-98 token passed as query param (signed by the actor's
  * workspace session key, or by the workspace owner directly). The token
  * is validated once on connect; the stream stays open without re-auth.
+ * The notification-only ceiling is re-decided for the original request
+ * before every delivery: a classification committed later ends it.
  *
  * See wingman-fd/docs/design/sse-updates.md for full design.
  */
@@ -27,6 +29,7 @@ import { Hono } from 'hono';
 import { jsonAgentChatError } from '../agent-chat-errors';
 import { verifyNip98AuthHeader } from '../auth';
 import { resolveStreamAccess } from '../services/stream-access';
+import { openReadRefusal } from '../services/agent-notifications';
 import { sseHub } from '../sse-hub';
 import type { SSEClient } from '../sse-hub';
 
@@ -105,6 +108,7 @@ streamRouter.get('/:ownerNpub/stream', async (c) => {
 
   // Hoist the client reference so cancel() can clean up on disconnect.
   let client: SSEClient | null = null;
+  const request = c.req.raw;
 
   const stream = new ReadableStream({
     start(controller) {
@@ -115,6 +119,8 @@ streamRouter.get('/:ownerNpub/stream', async (c) => {
         connectedAt: Date.now(),
         heartbeatTimer: null,
         lifetimeTimer: null,
+        // The notification-only ceiling admitted this request once; re-decide before every delivery.
+        admission: async () => (await openReadRefusal(request, { signerNpub, actingNpub: actorNpub }))?.code ?? null,
       };
 
       sseHub.addClient(client);

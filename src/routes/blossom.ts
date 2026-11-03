@@ -6,6 +6,7 @@ import { resolveWsKeyNpub } from '../services/user-workspace-keys';
 import { verifyStorageIdentity, openVerifiedStorageStream, hasActiveStorageReference, canAccessStorageObject, storageObjectsByHash } from '../services/storage';
 import { resolveReadableFlightDeckPgBlossomObject, hasFlightDeckPgStorageAuthority } from '../services/flightdeck-pg-storage-access';
 import { revocableStream } from '../services/revocable-stream';
+import { openReadRefusal } from '../services/agent-notifications';
 
 export const blossomRouter = new Hono();
 blossomRouter.use('/:blob', async (c, next) => {
@@ -54,8 +55,9 @@ blossomRouter.on(['GET', 'HEAD'], '/:blob', async (c, next) => {
   const hash = match[1];
   const candidates = await storageObjectsByHash(hash);
   let actor: string | null = null;
+  let signer: string | null = null;
   if (c.req.header('authorization')) {
-    const signer = verifyBlossomToken(c.req.raw, hash) ?? await verifyNip98Auth(c.req.raw);
+    signer = verifyBlossomToken(c.req.raw, hash) ?? await verifyNip98Auth(c.req.raw);
     if (!signer) return c.json({ error: 'invalid authorization' }, 401);
     actor = await resolveWsKeyNpub(signer) ?? signer;
   }
@@ -68,10 +70,11 @@ blossomRouter.on(['GET', 'HEAD'], '/:blob', async (c, next) => {
     if (!accessible || !await hasActiveStorageReference(row.id)) continue;
     const verified = await verifyStorageIdentity(row);
     if (!verified || verified.sha256_hex !== hash) continue;
+    // Each further chunk needs current ACL access AND the notification-only ceiling's admission of this request.
     const protectStream = (stream: ReadableStream<Uint8Array>) => actor && !row.is_public
       ? revocableStream(stream, async () => Boolean(await hasFlightDeckPgStorageAuthority(row.id)
         ? await resolveReadableFlightDeckPgBlossomObject({ actorNpub: actor!, storageObjectId: row.id })
-        : await canAccessStorageObject(row.id, actor)))
+        : await canAccessStorageObject(row.id, actor)) && !await openReadRefusal(c.req.raw, { signerNpub: signer!, actingNpub: actor! }))
       : stream;
     const size = Number(verified.size_bytes);
     const headers = new Headers({

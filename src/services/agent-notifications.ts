@@ -408,7 +408,13 @@ export async function enforceNotificationCeiling(request: Request, provider: Age
     console.error('[agent-notifications] ceiling classification unavailable; refusing request:', error instanceof Error ? error.message : error);
     return Response.json({ error: 'authorization_unavailable', code: 'authorization_unavailable', message: 'Authorization state is unavailable; retry later', retryable: true }, { status: 503 });
   }
+  return ceilingDecision(request, profile, signer, sql);
+}
+
+/** The ceiling decision once the identity's classification is known (shared by admission and open connections). */
+async function ceilingDecision(request: Request, profile: CeilingProfile | null, signer: string, sql: Sql): Promise<Response | null> {
   if (!profile) return null;
+  const method = request.method.toUpperCase();
   const path = new URL(request.url).pathname;
   if (!isCanonicalRequestPath(path)) return refuseCeiling();
   if (INBOX_ROUTE.test(path)) return null;
@@ -427,6 +433,65 @@ export async function enforceNotificationCeiling(request: Request, provider: Age
     && await bindingAllows(sql, profile.actorId, classifiedTargets[0]!, method, path, body)) return null;
   if (await ownUploadAllowed(sql, method, path, [signer])) return null;
   return refuseCeiling();
+}
+
+// ------------------------------------------------------------------------------------------------------------------
+// Long-lived reads (event streams, blob downloads): the ceiling decision must hold for the connection's lifetime.
+// ------------------------------------------------------------------------------------------------------------------
+const admittedBy = new WeakMap<Request, AgentCeilingProvider>();
+
+/** Called by the ceiling middleware: the provider that admitted this request re-decides for its open connection. */
+export function rememberCeilingAdmission(request: Request, provider: AgentCeilingProvider) {
+  admittedBy.set(request, provider);
+}
+
+export type OpenReadRefusal = { code: string; retryable: boolean; required_capability?: string };
+/** The identity a route authenticated at connect: the verified signer and the identity it acts as (its alias target). */
+export type OpenReadIdentity = { signerNpub: string; actingNpub: string };
+
+/**
+ * Re-run the ceiling for an open connection: the original request's route and workspace attribution, and the identity
+ * bound when the route authenticated it. NIP-98 is not re-verified. Both the signer and the acting identity are
+ * checked, so a workspace-key alias removed or rotated after connect can never turn a classified agent into an
+ * unrestricted one. Returns null while a new connection would still be admitted, otherwise its refusal (including
+ * `authorization_unavailable` when classification cannot be determined).
+ * Call before delivering each further batch or chunk. After a classification commits, a connection can still deliver
+ * at most the one batch/chunk whose check read state before that commit; nothing checked afterwards is sent.
+ */
+export async function openReadRefusal(request: Request, identity: OpenReadIdentity, sql?: Sql): Promise<OpenReadRefusal | null> {
+  const provider = admittedBy.get(request) ?? databaseCeilingProvider();
+  const unavailable = { code: 'authorization_unavailable', retryable: true };
+  let profile: CeilingProfile | null = null;
+  try {
+    const [acting, signer] = await Promise.all([
+      provider.profileFor(identity.actingNpub),
+      identity.signerNpub === identity.actingNpub ? null : provider.profileFor(identity.signerNpub),
+    ]);
+    if (acting || signer) {
+      profile = { actorId: (acting ?? signer)!.actorId, workspaces: new Set([...(acting?.workspaces ?? []), ...(signer?.workspaces ?? [])]) };
+    }
+  } catch {
+    return unavailable;
+  }
+  let refused: Response | null;
+  try {
+    refused = await ceilingDecision(request, profile, identity.signerNpub, sql ?? getDb());
+  } catch {
+    return unavailable;
+  }
+  if (!refused) return null;
+  const body = await refused.json().catch(() => null) as { code?: string; retryable?: boolean; required_capability?: string } | null;
+  return {
+    code: body?.code ?? 'agent_notification_upgrade_required',
+    retryable: Boolean(body?.retryable),
+    ...(body?.required_capability ? { required_capability: body.required_capability } : {}),
+  };
+}
+
+/** Whether `npub` is notification-only in `workspaceId`, from the provider that admitted `request` (fails by throwing). */
+export async function classifiedInWorkspace(request: Request, npub: string, workspaceId: string) {
+  const provider = admittedBy.get(request) ?? databaseCeilingProvider();
+  return Boolean((await provider.profileFor(npub))?.workspaces.has(workspaceId));
 }
 
 // ------------------------------------------------------------------------------------------------------------------

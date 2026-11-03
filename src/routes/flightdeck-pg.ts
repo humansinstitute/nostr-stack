@@ -12,7 +12,7 @@ import { lockDocumentEditAuthority, lockDocumentLeaseAuthority } from '../servic
 import { applyLegacyPreferencePatch } from '../services/notification-inbox';
 import { registerNotificationRoutes } from './notifications';
 import { inboxApiEnabled } from '../services/notification-core';
-import { agentNotificationApiEnabled } from '../services/agent-notifications';
+import { agentNotificationApiEnabled, classifiedInWorkspace, openReadRefusal, type OpenReadRefusal } from '../services/agent-notifications';
 import { taskRequestIdentity, taskRequestHash, hasTaskRelationships, validateTaskRelationships } from '../services/task-relationships';
 import { movePersonalPin } from '../services/personal-pin-order';
 import { readPrivatePreference, writePrivatePreference, PrivatePreferenceError } from '../services/private-preferences';
@@ -3668,11 +3668,25 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/events/stream', async (c) => {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
       };
       streamSignal.addEventListener('abort', close, { once: true });
+      // The notification-only ceiling ran once, at connect. A classification committed later must end this stream:
+      // re-run the same ceiling decision for the original request and the identity authenticated at connect (verified
+      // signer and the identity it resolved to) before polling and again before emitting.
+      const openReadIdentity = { signerNpub: auth.signerNpub, actingNpub: auth.userNpub };
+      const endRefused = (refusal: OpenReadRefusal) => {
+        controller.enqueue(encodeSseFrame({ event: 'flightdeck_pg.error', data: { error: refusal.code, ...refusal } }));
+        close();
+        controller.close();
+      };
 
       const poll = async () => {
         if (closed || inFlight) return;
         inFlight = true;
         try {
+          const refusal = await openReadRefusal(c.req.raw, openReadIdentity);
+          if (refusal) {
+            endRefused(refusal);
+            return;
+          }
           // A connection is not an authority snapshot. Group edges, membership
           // and login grants can change while this stream remains open.
           const currentContext = await resolveFlightDeckPgRequestContext({
@@ -3702,19 +3716,10 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/events/stream', async (c) => {
             : null;
           const nextActiveAudienceNpubs = currentAudience?.audience.map((member) => member.npub) ?? [];
           const nextRejectedAudienceNpubs = currentAudience?.rejectedNpubs ?? [];
-          if (initialAudience
+          // Emitted together with the batch, after the final authorization checks below.
+          const audienceChanged = Boolean(initialAudience
             && (nextActiveAudienceNpubs.join('\n') !== activeAudienceNpubs.join('\n')
-              || nextRejectedAudienceNpubs.join('\n') !== rejectedAudienceNpubs.join('\n'))) {
-            activeAudienceNpubs = nextActiveAudienceNpubs;
-            rejectedAudienceNpubs = nextRejectedAudienceNpubs;
-            controller.enqueue(encodeSseFrame({
-              event: 'flightdeck_pg.audience_changed',
-              data: {
-                subscription_audience_npubs: activeAudienceNpubs,
-                rejected_audience_npubs: rejectedAudienceNpubs,
-              },
-            }));
-          }
+              || nextRejectedAudienceNpubs.join('\n') !== rejectedAudienceNpubs.join('\n')));
           const unionPage = currentAudience
             ? await listVisibleFlightDeckPgEventsForAudience({ workspaceId: context.workspace.id, audience: currentAudience.audience, afterRowVersion, limit })
             : null;
@@ -3732,6 +3737,29 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/events/stream', async (c) => {
             close();
             controller.close();
             return;
+          }
+          // An audience member classified mid-load: drop the batch (and any audience change) without advancing; the
+          // next poll re-resolves the audience without it.
+          for (const npub of nextActiveAudienceNpubs) {
+            if (await classifiedInWorkspace(c.req.raw, npub, context.workspace.id)) return;
+          }
+          // The caller's ceiling, as the last read before emitting. Everything below is synchronous: a classification
+          // committed after this read can let through at most this one batch; nothing loaded later is sent.
+          const refusalAfterLoad = await openReadRefusal(c.req.raw, openReadIdentity);
+          if (refusalAfterLoad) {
+            endRefused(refusalAfterLoad);
+            return;
+          }
+          if (audienceChanged) {
+            activeAudienceNpubs = nextActiveAudienceNpubs;
+            rejectedAudienceNpubs = nextRejectedAudienceNpubs;
+            controller.enqueue(encodeSseFrame({
+              event: 'flightdeck_pg.audience_changed',
+              data: {
+                subscription_audience_npubs: activeAudienceNpubs,
+                rejected_audience_npubs: rejectedAudienceNpubs,
+              },
+            }));
           }
           for (const { event: row, visibleToAgentNpubs } of events) {
             if (closed) return;

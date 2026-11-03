@@ -174,6 +174,17 @@ A request is attributed to its workspace by:
 
 **Fail closed.** The ceiling reads classifications through an injected provider. The production provider (`databaseCeilingProvider`) refuses any authenticated request whose classification cannot be determined: a database error or a missing table returns `503 authorization_unavailable`. It never treats an error as "unclassified". There is no classification cache: every authenticated request reads the small, indexed classification rows, so a committed classification applies to the very next request on every Tower process. Workspace-key aliases resolve through the same resolver the routes use, so the ceiling and the handler always agree on the acting identity. Production constructs the app with this provider explicitly and serves traffic only after the runtime schema is ensured. Test fixtures without the runtime schema inject `unclassifiedFixtureCeiling` explicitly.
 
+**Open connections.** The ceiling also holds for the lifetime of a connection it admitted. Before delivering anything further, a long-lived read re-runs the same ceiling decision. It uses the original request's route and workspace attribution and the identity bound when the route authenticated the connection: the verified signer and the identity it resolved to. NIP-98 is not re-verified. Both identities are checked, so removing or rotating a workspace-key alias after connect never turns a classified agent into an unrestricted one. The check uses the same provider, so it also fails closed (`authorization_unavailable`). A connection stops exactly when a new one would be refused:
+
+| Connection | Re-decided | On refusal |
+|---|---|---|
+| `GET /api/v4/flightdeck-pg/workspaces/{id}/events/stream` | before each poll, and again as the last read before a loaded batch is emitted | one `flightdeck_pg.error` frame `{error, code, retryable, required_capability?}`, then close |
+| the same stream with `audience_npub` | additionally, an audience member classified while a batch loads drops that batch without advancing the cursor; the next poll re-resolves the audience without it. `flightdeck_pg.audience_changed` is emitted only together with a batch that passed the final check | `flightdeck_pg.audience_changed` on a later poll |
+| `GET /api/v4/workspaces/{owner}/stream` (advisory) | before each delivery; events queued during a check share the next check | one `event: error` frame `{error, code}`, then close |
+| Blossom `GET /{sha256}` (authenticated, private) | before each further chunk, together with the storage ACL | the body errors with `storage_access_revoked` |
+
+In-flight bound: emission after the final check is synchronous, but the check does not share a lock with the classification write. After a classification commits, a connection can therefore still deliver at most the one batch (event stream), queued batch (advisory stream) or chunk (Blossom) whose check read state before the commit. Nothing checked afterwards is sent, and bytes already handed to the client cannot be recalled. Unclassified identities (every human) see no new frames or behaviour. `/api/v4/storage/{id}/content` returns its whole body in one buffered response, so there is no later chunk to withhold.
+
 A bound request returns `403 agent_notification_upgrade_required` (`retryable:false`) before any handler runs, unless it is one of:
 
 - this inbox;

@@ -28,7 +28,7 @@ import { wappActivityFlightDeckRouter, wappActivityPublisherRouter } from './rou
 import { wappManagementRouter } from './routes/wapp-management';
 import { buildNstackServiceDiscovery } from './services/nstack-discovery';
 import { agentNotificationsRouter } from './routes/agent-notifications';
-import { databaseCeilingProvider, enforceNotificationCeiling, type AgentCeilingProvider } from './services/agent-notifications';
+import { databaseCeilingProvider, enforceNotificationCeiling, rememberCeilingAdmission, type AgentCeilingProvider } from './services/agent-notifications';
 
 export type CreateAppOptions = {
   /** Classification source for the notification-only ceiling (fail closed). Defaults to the database provider. */
@@ -51,6 +51,8 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('*', async (c, next) => {
     const refused = await enforceNotificationCeiling(c.req.raw, agentCeiling);
     if (refused) return refused;
+    // Long-lived reads re-run this same decision before delivering more (see openReadRefusal).
+    rememberCeilingAdmission(c.req.raw, agentCeiling);
     await next();
   });
 
