@@ -815,4 +815,47 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     // Humans keep the specific errors.
     expect((await audio(H, elsewhere.body.message.id)).body.code).toBe('audio_note_target_channel_mismatch');
   });
+
+  test('edit-lease protocol negotiation: bound or receipted docs only; a classified caller sees protocols and only its own lease', async () => {
+    const o = await origin('lease-inspect');
+    const inspect = (actor: number, entityId: string, type = 'document') => request(fd(w1, `/edit-leases?entity_type=${type}&entity_id=${entityId}`), 'GET', actor);
+    // Notification-bound: a human document mention of A.
+    const mentioned = await createDoc(H, 'Mentioned doc');
+    expect(mentioned.status).toBe(201);
+    // A mention is added by a human edit (document_mention_added).
+    const hl = await lease(H, mentioned.body.doc.id);
+    expect((await request(fd(w1, `/docs/${mentioned.body.doc.id}`), 'PATCH', H, {
+      row_version: Number(mentioned.body.doc.row_version), lease_token: hl.body.lease.lease_token, mentions: [{ type: 'agent', npub: npubs[A], label: 'Bot1' }],
+    })).status).toBe(200);
+    await request(fd(w1, `/edit-leases/${hl.body.lease.id}/release`), 'POST', H, { lease_token: hl.body.lease.lease_token });
+    await drain();
+    expect((await notifications(A)).some((n) => n.source?.doc_id === mentioned.body.doc.id && n.kind === 'document_mention')).toBe(true);
+    const bound = await inspect(A, mentioned.body.doc.id);
+    expect(bound.status).toBe(200);
+    expect(bound.body.document_edit_protocols).toEqual(expect.any(Array));
+    // Receipted: the full Autopilot flow (inspect, acquire, update).
+    const own = await createDoc(A, 'Negotiated doc', o.notificationId);
+    const inspected = await inspect(A, own.body.doc.id);
+    expect([inspected.status, inspected.body.lease]).toEqual([200, null]);
+    const held = await lease(A, own.body.doc.id);
+    expect(held.status).toBe(201);
+    expect((await inspect(A, own.body.doc.id)).body.lease?.id).toBe(held.body.lease.id); // its own lease is shown
+    const patched = await request(fd(w1, `/docs/${own.body.doc.id}`), 'PATCH', A, { title: 'Negotiated v2', row_version: Number(own.body.doc.row_version), lease_token: held.body.lease.lease_token });
+    expect(patched.status).toBe(200);
+    await request(fd(w1, `/edit-leases/${held.body.lease.id}/release`), 'POST', A, { lease_token: held.body.lease.lease_token });
+    // Another editor's lease is never shown to the classified caller; humans keep it.
+    const humanLease = await lease(H, mentioned.body.doc.id);
+    expect(humanLease.status).toBe(201);
+    const hidden = await inspect(A, mentioned.body.doc.id);
+    const { identity: _identity, ...rest } = hidden.body;
+    expect([hidden.status, rest.lease]).toEqual([200, null]);
+    expect(JSON.stringify(rest)).not.toContain(npubs[H]!);
+    expect(JSON.stringify(rest)).not.toContain(humanLease.body.lease.id);
+    expect((await inspect(C, mentioned.body.doc.id)).body.lease?.holder_actor_npub).toBe(npubs[H]);
+    // Unbound docs and task inspection stay refused.
+    const unbound = await createDoc(H, 'Unbound doc');
+    expect((await inspect(A, unbound.body.doc.id)).status).toBe(403);
+    const task = await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', A, { title: 'Inspect task', origin_notification_id: o.notificationId });
+    expect((await inspect(A, task.body.task.id, 'task')).status).toBe(403);
+  });
 });

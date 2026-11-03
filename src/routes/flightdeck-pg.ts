@@ -6821,7 +6821,9 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/edit-leases', async (c) => {
     entityType: entityType!,
     entityId,
   });
-  return c.json({ identity, ...(entityType === 'document' ? { document_edit_protocol: DOCUMENT_EDIT_PROTOCOL, document_edit_protocols: DOCUMENT_EDIT_PROTOCOLS } : {}), lease: lease ? serializeFlightDeckPgEditLease(lease) : null });
+  // A notification-only caller sees the protocols and only its own lease (never another editor's presence or expiry).
+  const shownLease = lease && isClassifiedRequest(c.req.raw) && lease.holder_actor_id !== context.actor.id ? null : lease;
+  return c.json({ identity, ...(entityType === 'document' ? { document_edit_protocol: DOCUMENT_EDIT_PROTOCOL, document_edit_protocols: DOCUMENT_EDIT_PROTOCOLS } : {}), lease: shownLease ? serializeFlightDeckPgEditLease(shownLease) : null });
 });
 
 flightDeckPgRouter.post('/workspaces/:workspaceId/edit-leases/acquire', async (c) => {

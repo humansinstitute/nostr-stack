@@ -390,6 +390,15 @@ async function bindingAllows(sql: Sql, request: Request, actorId: string, worksp
   }
   // Document/task work: body edits under an edit lease on the notified record only.
   if (method === 'PATCH' && (m = new RegExp(`^/docs/${UUID_SEG}$`).exec(rest))) return await bound('doc_id', m[1]!) || receipted('doc', m[1]!);
+  // Edit-protocol negotiation before acquire (document only): same predicate as acquire; the route shows a classified
+  // caller only the protocols and its own lease.
+  if (method === 'GET' && rest === '/edit-leases') {
+    const q = new URL(request.url).searchParams;
+    const type = String(q.get('entity_type') ?? '').toLowerCase();
+    const entity = id(q.get('entity_id'));
+    if (!entity || (type !== 'doc' && type !== 'document')) return false;
+    return await bound('doc_id', entity) || receipted('doc', entity);
+  }
   if (method === 'POST' && rest === '/edit-leases/acquire') {
     const b = await body();
     const entity = id(b?.entity_id);

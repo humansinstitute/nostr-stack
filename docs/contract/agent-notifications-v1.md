@@ -202,6 +202,7 @@ Bound writes (each still subject to its normal route ACL):
 | `POST tasks/{id}/comments`, `POST tasks/{id}/state` | The task is bound. |
 | `POST docs/{id}/comments`, `PATCH docs/{id}` | The doc is bound. |
 | `POST edit-leases/acquire`, `POST edit-leases/{id}/renew\|release` | The bound task/doc, and the bot's own lease. |
+| `GET edit-leases?entity_type=document&entity_id={id}` (protocol negotiation) | The doc is bound or receipted. The response shows the edit protocols and only the bot's own lease (`lease: null` while another editor holds one). |
 | `POST channels/{ch}/(docs\|tasks\|files\|audio-notes)` | Requested work products, created only in a channel where the bot holds a live notification. With `origin_notification_id`, that exact origin must be live in this channel (the create then mints a work receipt). A file create carrying `metadata.text_attachment_lineage` is refused (it could adopt and return another creator's canonical file); the refusal is the generic one, before any lineage lookup. |
 | Receipted reads/updates (see Work receipts) | The bot holds a receipt for that entity whose origin is live. |
 | `POST storage/prepare` | Only while the bot holds a live notification in the workspace. |
