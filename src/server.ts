@@ -28,7 +28,7 @@ import { wappActivityFlightDeckRouter, wappActivityPublisherRouter } from './rou
 import { wappManagementRouter } from './routes/wapp-management';
 import { buildNstackServiceDiscovery } from './services/nstack-discovery';
 import { agentNotificationsRouter } from './routes/agent-notifications';
-import { databaseCeilingProvider, enforceNotificationCeiling, rememberCeilingAdmission, type AgentCeilingProvider } from './services/agent-notifications';
+import { databaseCeilingProvider, enforceNotificationCeiling, isRestrictedWrite, rememberCeilingAdmission, restrictedWriteResponseBody, type AgentCeilingProvider } from './services/agent-notifications';
 
 export type CreateAppOptions = {
   /** Classification source for the notification-only ceiling (fail closed). Defaults to the database provider. */
@@ -54,6 +54,14 @@ export function createApp(options: CreateAppOptions = {}) {
     // Long-lived reads re-run this same decision before delivering more (see openReadRefusal).
     rememberCeilingAdmission(c.req.raw, agentCeiling);
     await next();
+    // Restricted (classified-workspace) writes get minimal JSON bodies; everything else is returned as produced.
+    if (!isRestrictedWrite(c.req.raw) || !c.res.headers.get('content-type')?.includes('application/json')) return;
+    const original = await c.res.clone().json().catch(() => undefined);
+    const minimal = original === undefined ? undefined : restrictedWriteResponseBody(c.req.raw, original);
+    if (minimal === undefined) return;
+    const headers = new Headers(c.res.headers);
+    headers.delete('content-length');
+    c.res = new Response(JSON.stringify(minimal), { status: c.res.status, headers });
   });
 
   app.get('/health', (c) => {

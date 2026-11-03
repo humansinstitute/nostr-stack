@@ -218,7 +218,7 @@ Other effects of classification:
 - Classified identities receive no human inbox items in that workspace.
 - Every classification change is audited in `flightdeck_pg_agent_notification_audit`.
 
-Residual: an allowed write's response echoes the bound record written (for example, the created message and its thread descriptor).
+Write responses are minimal for a classified identity in that workspace. Every admitted write's JSON body omits the workspace-wide event-sequence echoes (`outbox`, `mention_outbox`, `view_state_outbox`, `thread_outbox`, `trigger_outbox`) and mutable activity metadata (`attention`, `activity_version`) wherever they appear. A message create returns its own message (with its channel/thread routing ids) but not the current thread descriptor. Reads, including notification context, are not changed by this rule. Humans, and the same identity in workspaces where it is not classified, get full responses.
 
 Error bodies for classified callers:
 

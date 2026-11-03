@@ -858,4 +858,51 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     const task = await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', A, { title: 'Inspect task', origin_notification_id: o.notificationId });
     expect((await inspect(A, task.body.task.id, 'task')).status).toBe(403);
   });
+
+  test('classified write responses are minimal: no event sequence, activity metadata or thread descriptor; humans and W2 unchanged', async () => {
+    const o = await origin('minimal-writes');
+    const bookkeeping = ['outbox', 'mention_outbox', 'view_state_outbox', 'thread_outbox', 'trigger_outbox', 'attention', 'activity_version'];
+    const deepKeys = (value: unknown, out = new Set<string>()): Set<string> => {
+      if (Array.isArray(value)) value.forEach((v) => deepKeys(v, out));
+      else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) { out.add(k); deepKeys(v, out); }
+      return out;
+    };
+    const minimal = (res: { status: number; body: any }) => {
+      const keys = deepKeys(res.body);
+      for (const k of bookkeeping) expect([k, keys.has(k)]).toEqual([k, false]);
+    };
+    // A reply: its own message and routing ids, no thread descriptor.
+    const body = 'bot reply, minimal response';
+    const reply = await request(fd(w1, `/channels/${ch1}/messages`), 'POST', A, { body, thread_id: o.threadId, message_signature: signature(body, A, w1, ch1, o.threadId, [], 'none') });
+    expect(reply.status).toBe(201);
+    minimal(reply);
+    expect(reply.body.thread).toBeUndefined();
+    expect([reply.body.message.id, reply.body.message.thread_id]).toEqual([expect.any(String), o.threadId]);
+    // A notification-free create in a bound channel, a receipt-minting create and an agent activity.
+    for (const res of [
+      await createDoc(A, 'Minimal doc'),
+      await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', A, { title: 'Minimal task', origin_notification_id: o.notificationId }),
+      await request(fd(w1, `/agent-activities/${randomUUID()}`), 'PUT', A, { channel_id: ch1, thread_id: o.threadId, trigger_message_id: o.messageId, turn_id: 'turn-min', session_id: 'session-min', agent_npub: npubs[A], state: 'working', visibility: 'user_visible', sequence: 1 }),
+    ]) {
+      expect(res.status).toBeLessThan(300);
+      minimal(res);
+    }
+    // A notification-bound task comment (assignment notification).
+    const assigned = await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', H, { title: 'Assigned to A', assigned_to_npub: npubs[A] });
+    expect(assigned.status).toBe(201);
+    await drain();
+    const comment = await request(fd(w1, `/tasks/${assigned.body.task.id}/comments`), 'POST', A, { body: 'on it' });
+    expect(comment.status).toBe(201);
+    minimal(comment);
+    // Humans keep the full response.
+    const hb = 'human message, full response';
+    const human = await request(fd(w1, `/channels/${ch1}/messages`), 'POST', H, { body: hb, thread_id: o.threadId, message_signature: signature(hb, H, w1, ch1, o.threadId, [], 'none') });
+    expect(Object.keys(human.body)).toEqual(expect.arrayContaining(['thread', 'outbox']));
+    // The same bot where it is not classified (W2) keeps the full response too.
+    const w2root = await post(w2ch, 'w2 root for A', { actor: H2, workspace: w2, createThread: true });
+    const w2body = 'A in W2';
+    const w2reply = await request(fd(w2, `/channels/${w2ch}/messages`), 'POST', A, { body: w2body, thread_id: w2root.body.message.thread_id, message_signature: signature(w2body, A, w2, w2ch, w2root.body.message.thread_id, [], 'none') });
+    expect(w2reply.status).toBe(201);
+    expect(Object.keys(w2reply.body)).toEqual(expect.arrayContaining(['thread', 'outbox']));
+  });
 });

@@ -544,6 +544,37 @@ export async function enforceNotificationCeiling(request: Request, provider: Age
   return ceilingDecision(request, profile, signer, sql);
 }
 
+// Requests admitted under a classified workspace's restrictions (bound writes/receipted reads there).
+const restrictedRequests = new WeakSet<Request>();
+
+const WRITE_BOOKKEEPING_KEYS = new Set(['outbox', 'mention_outbox', 'view_state_outbox', 'thread_outbox', 'trigger_outbox', 'attention', 'activity_version']);
+
+/**
+ * Minimal write responses for a restricted (classified-workspace) write: no workspace-wide event sequence (outbox
+ * echoes) and no mutable activity metadata anywhere in the body, and a message create returns its own message (with
+ * its routing ids) but not the current thread descriptor. Reads, including notification context, are unaffected.
+ */
+/** Cheap synchronous check: only these responses are parsed and minimized. */
+export function isRestrictedWrite(request: Request) {
+  const method = request.method.toUpperCase();
+  return restrictedRequests.has(request) && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS'
+    && !INBOX_ROUTE.test(new URL(request.url).pathname);
+}
+
+export function restrictedWriteResponseBody(request: Request, body: unknown): unknown | undefined {
+  if (!isRestrictedWrite(request)) return undefined;
+  const method = request.method.toUpperCase();
+  const path = new URL(request.url).pathname;
+  const strip = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(strip);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([k]) => !WRITE_BOOKKEEPING_KEYS.has(k)).map(([k, v]) => [k, strip(v)]));
+  };
+  const stripped = strip(body) as Record<string, unknown>;
+  if (method === 'POST' && /\/channels\/[^/]+\/messages$/.test(path) && stripped && typeof stripped === 'object') delete stripped.thread;
+  return stripped;
+}
+
 // Requests whose signer is notification-only somewhere: handlers use this only to make error bodies less specific.
 const classifiedRequests = new WeakSet<Request>();
 export function isClassifiedRequest(request: Request) {
@@ -580,7 +611,10 @@ async function ceilingDecision(request: Request, profile: CeilingProfile | null,
   const classifiedTargets = targets.filter((ws) => profile!.workspaces.has(ws));
   if (!classifiedTargets.length) return null; // only workspaces where this identity is unrestricted
   if (classifiedTargets.length === 1 && FD_WS.exec(path)?.[1]?.toLowerCase() === classifiedTargets[0]
-    && await bindingAllows(sql, request, profile.actorId, classifiedTargets[0]!, method, path, body)) return null;
+    && await bindingAllows(sql, request, profile.actorId, classifiedTargets[0]!, method, path, body)) {
+    restrictedRequests.add(request);
+    return null;
+  }
   if (await ownUploadAllowed(sql, method, path, [signer])) return null;
   return refuseCeiling();
 }
