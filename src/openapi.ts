@@ -5,6 +5,7 @@ import { hostingPaths, hostingSchemas } from './hosting-openapi';
 import { orgDataPaths, orgDataSchemas } from './org-data-openapi';
 import { contextTreePaths, contextTreeSchemas } from './context-tree-openapi';
 import { notificationPaths, notificationSchemas } from './notifications-openapi';
+import { agentNotificationPaths, agentNotificationSchemas } from './agent-notifications-openapi';
 import { feedReaderPaths, feedReaderSchemas, FEED_READER_SOURCE_BUILD } from './feed-reader-openapi';
 import { drivePaths } from './drive-openapi';
 import { learningPaths, learningSchemas } from './learning/openapi';
@@ -2493,6 +2494,7 @@ export function buildOpenApiDocument(origin: string) {
         ...feedReaderSchemas,
         ...contextTreeSchemas,
         ...notificationSchemas,
+        ...agentNotificationSchemas,
         ...orgDataSchemas,
         ...learningSchemas,
         WappPublishingDestination: {
@@ -4405,6 +4407,7 @@ export function buildOpenApiDocument(origin: string) {
       },
       ...contextTreePaths,
       ...notificationPaths,
+      ...agentNotificationPaths,
       ...orgDataPaths,
       ...drivePaths,
       ...learningPaths,

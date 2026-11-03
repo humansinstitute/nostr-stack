@@ -4331,6 +4331,8 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
   await sql.unsafe(readFileSync(new URL('./unread-mentions-v1.sql', import.meta.url), 'utf8'));
   // Push delivery: installation/transport registry and the durable alert queue (additive; no backfill, so upgrades enqueue nothing).
   await sql.unsafe(readFileSync(new URL('./notification-push-v1.sql', import.meta.url), 'utf8'));
+  // Strict agent notification inbox: addressed-only bot rows, subscriptions, replay ledger, access ceiling (additive).
+  await sql.unsafe(readFileSync(new URL('./agent-notifications-v1.sql', import.meta.url), 'utf8'));
 
   await sql.unsafe(readFileSync(new URL('./workspace-membership-admin-v1.sql', import.meta.url), 'utf8'));
 

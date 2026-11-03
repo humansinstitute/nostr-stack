@@ -262,6 +262,8 @@ async function runMigrations() {
   }
   // Legacy preference PATCH now mirrors into notification rules atomically (no swallowed errors), so the notification schema must exist.
   await sql.unsafe(readFileSync(join(__dirname, '../src/schema/notifications-v1.sql'), 'utf-8'));
+  // The notification-only ceiling and legacy audience checks read agent classifications (fail closed without them).
+  await sql.unsafe(readFileSync(join(__dirname, '../src/schema/agent-notifications-v1.sql'), 'utf-8'));
 }
 
 async function seedWorkspace(workspaceServiceNpub = 'npub1workspaceflightdeckpgapi') {
@@ -4790,7 +4792,10 @@ describe('Flight Deck PG API routes', () => {
     expect(unauthorized.json.required_permission).toBe('event_subscription.manage');
 
     const reconcilePath = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/event-subscription-agents`;
-    const reconciled = await requestJson(reconcilePath, 'PUT', dmOnlySecret, { audience_npubs: [AGENT_NPUB, INACCESSIBLE_AGENT_NPUB, UNKNOWN_AGENT_NPUB] });
+    // New legacy visibility-audience registrations now require explicit broad-feed consent.
+    const refusedWithoutConsent = await requestJson(reconcilePath, 'PUT', dmOnlySecret, { audience_npubs: [AGENT_NPUB] });
+    expect(refusedWithoutConsent.json.rejected_audience).toEqual([{ npub: AGENT_NPUB, code: 'legacy_consent_required' }]);
+    const reconciled = await requestJson(reconcilePath, 'PUT', dmOnlySecret, { audience_npubs: [AGENT_NPUB, INACCESSIBLE_AGENT_NPUB, UNKNOWN_AGENT_NPUB], legacy_broad_feed_consent: true });
     expect(reconciled.res.status).toBe(200);
     expect(reconciled.json.agent_npubs).toEqual([AGENT_NPUB, INACCESSIBLE_AGENT_NPUB].sort());
     expect(reconciled.json.audience_npubs).toEqual([AGENT_NPUB, INACCESSIBLE_AGENT_NPUB].sort());

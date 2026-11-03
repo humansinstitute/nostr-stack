@@ -27,9 +27,17 @@ import { workspacesRouter } from './routes/workspaces';
 import { wappActivityFlightDeckRouter, wappActivityPublisherRouter } from './routes/wapp-activity';
 import { wappManagementRouter } from './routes/wapp-management';
 import { buildNstackServiceDiscovery } from './services/nstack-discovery';
+import { agentNotificationsRouter } from './routes/agent-notifications';
+import { databaseCeilingProvider, enforceNotificationCeiling, type AgentCeilingProvider } from './services/agent-notifications';
 
-export function createApp() {
+export type CreateAppOptions = {
+  /** Classification source for the notification-only ceiling (fail closed). Defaults to the database provider. */
+  agentCeiling?: AgentCeilingProvider;
+};
+
+export function createApp(options: CreateAppOptions = {}) {
   const app = new Hono();
+  const agentCeiling = options.agentCeiling ?? databaseCeilingProvider();
 
   app.use('*', cors({
     origin: '*',
@@ -37,6 +45,14 @@ export function createApp() {
     exposeHeaders: ['x-wingman-stale-version', 'Content-Length', 'Content-Range', 'Accept-Ranges', 'ETag'],
     allowMethods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   }));
+
+  // Authorization ceiling for notification-only agent identities: refuses every route outside the agent inbox and the
+  // minimal responder writes, before any handler runs. Unclassified identities (all humans) are unaffected.
+  app.use('*', async (c, next) => {
+    const refused = await enforceNotificationCeiling(c.req.raw, agentCeiling);
+    if (refused) return refused;
+    await next();
+  });
 
   app.get('/health', (c) => {
     return c.json({
@@ -113,6 +129,7 @@ export function createApp() {
   app.route('/api/v4/learning', learningRouter);
   app.route('/api/v4/billing', billingRouter);
   app.route('/api/v4/flightdeck-pg', driveRouter);
+  app.route('/api/v4/flightdeck-pg', agentNotificationsRouter);
   app.route('/api/v4/flightdeck-pg', flightDeckPgRouter);
   app.route('/api/v4/flightdeck-pg', wappActivityFlightDeckRouter);
   app.route('/api/v4/flightdeck-pg', wappManagementRouter);

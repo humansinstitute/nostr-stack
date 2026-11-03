@@ -7284,7 +7284,7 @@ export type FlightDeckPgEventSubscriptionAudience = {
 
 export type FlightDeckPgEventSubscriptionRejection = {
   npub: string;
-  code: 'inactive_or_unknown_workspace_member';
+  code: 'inactive_or_unknown_workspace_member' | 'notification_only_agent' | 'legacy_consent_required';
 };
 
 export type FlightDeckPgEventSubscriptionReconciliation = {
@@ -7305,17 +7305,23 @@ export async function listFlightDeckPgEventSubscriptionAgents(
      AND membership.actor_id = authz.agent_actor_id
     WHERE authz.workspace_id = ${input.workspaceId}
       AND authz.manager_actor_id = ${input.managerActorId}
+      -- Notification-only agents (identity-wide ceiling) never join a visibility audience.
+      AND NOT EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = authz.agent_actor_id)
     ORDER BY actor.npub ASC
   `;
 }
 
 export async function replaceFlightDeckPgEventSubscriptionAgents(
-  input: { workspaceId: string; managerActorId: string; authorizedByActorId: string; agentNpubs: string[] },
+  input: { workspaceId: string; managerActorId: string; authorizedByActorId: string; agentNpubs: string[]; allowNewRegistrations?: boolean },
   sql: DbClient = getDb(),
 ): Promise<FlightDeckPgEventSubscriptionReconciliation> {
   return sql.begin(async (tx) => {
-    const audience = input.agentNpubs.length === 0 ? [] : await tx<Array<{ actor_id: string; npub: string }>>`
-      SELECT actor.id AS actor_id, actor.npub
+    const existing = new Set((await tx<{ agent_actor_id: string }[]>`
+      SELECT agent_actor_id FROM flightdeck_pg_event_subscription_agents WHERE workspace_id = ${input.workspaceId} AND manager_actor_id = ${input.managerActorId}
+    `).map((row) => row.agent_actor_id));
+    const members = input.agentNpubs.length === 0 ? [] : await tx<Array<{ actor_id: string; npub: string; notification_only: boolean }>>`
+      SELECT actor.id AS actor_id, actor.npub,
+        EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = actor.id) AS notification_only
       FROM flightdeck_pg_actors actor
       JOIN flightdeck_pg_workspace_memberships membership
         ON membership.actor_id = actor.id
@@ -7323,10 +7329,15 @@ export async function replaceFlightDeckPgEventSubscriptionAgents(
       WHERE actor.npub IN ${tx(input.agentNpubs)}
       ORDER BY actor.npub ASC
     `;
+    // Notification-only agents use their own self-signed inbox; they are never fanned into a visibility audience.
+    // Unsafe new onboarding is refused unless explicitly consented: only already-registered members are kept.
+    const consentMissing = new Set(members.filter((member) => !member.notification_only && input.allowNewRegistrations === false && !existing.has(member.actor_id)).map((member) => member.npub));
+    const audience = members.filter((member) => !member.notification_only && !consentMissing.has(member.npub)).map(({ actor_id, npub }) => ({ actor_id, npub }));
+    const notificationOnly = new Set(members.filter((member) => member.notification_only).map((member) => member.npub));
     const acceptedNpubs = new Set(audience.map((member) => member.npub));
     const rejectedAudience: FlightDeckPgEventSubscriptionRejection[] = input.agentNpubs
       .filter((npub) => !acceptedNpubs.has(npub))
-      .map((npub) => ({ npub, code: 'inactive_or_unknown_workspace_member' }));
+      .map((npub) => ({ npub, code: notificationOnly.has(npub) ? 'notification_only_agent' : consentMissing.has(npub) ? 'legacy_consent_required' : 'inactive_or_unknown_workspace_member' }));
     await tx`
       DELETE FROM flightdeck_pg_event_subscription_agents
       WHERE workspace_id = ${input.workspaceId}

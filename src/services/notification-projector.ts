@@ -320,6 +320,14 @@ async function resolveRuleRecipients(tx: Sql, event: EventRow, snap: Snapshot): 
   for (const actor of snap.mention_actor_ids) add(actor, mentionReason);
 
   reasons.delete(snap.trigger_actor_id ?? '');
+  // Notification-only agents never receive human inbox items (titles/previews); they use the strict agent inbox.
+  const [profiles] = reasons.size ? await tx<{ t: string | null }[]>`SELECT to_regclass('flightdeck_pg_agent_access_profiles')::text AS t` : [];
+  if (reasons.size && profiles?.t) {
+    const classified = await tx<{ actor_id: string }[]>`
+      SELECT actor_id FROM flightdeck_pg_agent_access_profiles
+      WHERE actor_id = ANY(${[...reasons.keys()]}::uuid[]) AND workspace_id = ${w}`;
+    for (const row of classified) reasons.delete(row.actor_id);
+  }
   const readable = await aclFilter(tx, w, [...reasons.keys()], aclKey(snap.channel_id));
   for (const actor of [...reasons.keys()]) if (!readable.has(actor)) reasons.delete(actor);
   return reasons;

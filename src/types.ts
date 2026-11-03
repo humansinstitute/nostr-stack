@@ -3556,3 +3556,60 @@ export interface WorkspaceMemberAccessInspection {
     channels: { id: string; name: string; scope_id: string; permissions: WorkspaceMemberPermission[] }[];
   };
 }
+
+// --- Strict agent notification inbox (docs/contract/agent-notifications-v1.md) -----------------------------------
+export type AgentNotificationKind =
+  | 'chat_mention' | 'direct_message' | 'agent_direct_recipient' | 'task_assigned' | 'task_mention' | 'task_comment_mention'
+  | 'document_mention' | 'document_comment_mention' | 'invocation' | 'document_review';
+export type AgentNotificationSourceType = 'message' | 'task' | 'task_comment' | 'doc' | 'doc_comment' | 'invocation';
+/** Content-free envelope: the exact key set is part of the contract. */
+export interface AgentNotificationEnvelope {
+  id: string;
+  seq: number;
+  kind: AgentNotificationKind;
+  reason: string;
+  state: 'active';
+  source: {
+    type: AgentNotificationSourceType;
+    id: string;
+    version: number | null;
+    channel_id: string | null;
+    thread_id: string | null;
+    task_id: string | null;
+    doc_id: string | null;
+  };
+  author_npub: string | null;
+  occurred_at: string;
+}
+/** Minimal tombstone when access or the canonical relationship is gone: no routing metadata. */
+export interface AgentNotificationTombstone {
+  id: string;
+  seq: number;
+  state: 'revoked';
+}
+export interface AgentNotificationPage {
+  subscription_id: string;
+  notifications: Array<AgentNotificationEnvelope | AgentNotificationTombstone>;
+  next_cursor: string;
+  has_more: boolean;
+}
+export interface AgentNotificationSubscriptionResponse {
+  recipient_npub: string;
+  created: boolean;
+  subscription: { id: string; consumer_id: string; floor_at: string; policy_version: number; acked_through_seq: number; created_at: string };
+  cursor: string;
+  gap?: { code: 'cursor_gap'; from_seq: number; through_seq: number; recovery_seq: number };
+}
+export type AgentNotificationAckOutcome = 'handled' | 'suppressed' | 'source_gone' | 'failed_permanent';
+export interface AgentNotificationAckRequest {
+  subscription_id: string;
+  outcome: AgentNotificationAckOutcome;
+  code?: string;
+}
+export type AgentNotificationErrorCode =
+  | 'nip98_auth_required' | 'nip98_header_required' | 'nip98_invalid_encoding' | 'nip98_invalid_event' | 'nip98_url_mismatch'
+  | 'nip98_method_mismatch' | 'nip98_stale_event' | 'nip98_payload_mismatch' | 'nip98_nonce_required' | 'nip98_replayed'
+  | 'workspace_not_found' | 'workspace_membership_required' | 'agent_identity_required' | 'identity_rotated' | 'subscription_revoked'
+  | 'invalid_cursor' | 'cursor_gap' | 'validation_error' | 'notification_not_found' | 'access_revoked' | 'source_gone' | 'source_present'
+  | 'attachment_not_found' | 'ceiling_lift_forbidden' | 'permission_denied' | 'agent_notification_upgrade_required'
+  | 'relationship_removed' | 'authorization_contention' | 'authorization_unavailable';

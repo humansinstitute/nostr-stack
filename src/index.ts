@@ -12,7 +12,9 @@ const [{ createApp }, { config }, { getDb }, { ensureRuntimeSchema }, { startHos
   import('./services/notification-worker'),
 ]);
 
-const app = createApp();
+// The notification-only ceiling uses the database provider (fail closed); traffic is served only after the schema below.
+const { databaseCeilingProvider } = await import('./services/agent-notifications');
+const app = createApp({ agentCeiling: databaseCeilingProvider() });
 
 // Verify DB connection on startup
 try {
@@ -28,6 +30,9 @@ try {
 startHostingBillingRunner();
 // Durable notification projection runs in this process (NOTIF_PROJECTOR=off disables it).
 startNotificationWorker();
+// Strict agent notification inbox projection (AGENT_NOTIF_PROJECTOR=off disables only this path).
+const { startAgentNotificationWorker } = await import('./services/agent-notification-projector');
+startAgentNotificationWorker();
 // Durable push alert delivery (NOTIF_ALERTS=off disables); idle unless APNs is fully configured.
 const { startAlertWorker } = await import('./services/notification-alerts');
 startAlertWorker();

@@ -12,6 +12,7 @@ import { lockDocumentEditAuthority, lockDocumentLeaseAuthority } from '../servic
 import { applyLegacyPreferencePatch } from '../services/notification-inbox';
 import { registerNotificationRoutes } from './notifications';
 import { inboxApiEnabled } from '../services/notification-core';
+import { agentNotificationApiEnabled } from '../services/agent-notifications';
 import { taskRequestIdentity, taskRequestHash, hasTaskRelationships, validateTaskRelationships } from '../services/task-relationships';
 import { movePersonalPin } from '../services/personal-pin-order';
 import { readPrivatePreference, writePrivatePreference, PrivatePreferenceError } from '../services/private-preferences';
@@ -1701,7 +1702,7 @@ flightDeckPgRouter.get('/service', async (c) => {
       version: getTowerBuildInfo().version,
       schema_version: 1,
     },
-    capabilities: inboxApiEnabled() ? [...flightDeckPgCapabilities, 'notifications_inbox_v1'] : flightDeckPgCapabilities,
+    capabilities: [...flightDeckPgCapabilities, ...(inboxApiEnabled() ? ['notifications_inbox_v1'] : []), ...(agentNotificationApiEnabled() ? ['agent_notifications_v1'] : [])],
     record_sync: {...recordSyncDiscovery,...prioritySyncDiscovery,cache_adoption:recordAdoptionDiscovery},
     links: {
       workspace_descriptor_template: '/api/v4/flightdeck-pg/workspaces/{workspaceId}/descriptor',
@@ -3131,7 +3132,12 @@ flightDeckPgRouter.put('/workspaces/:workspaceId/event-subscription-agents', asy
     return validationError(c, identity, [{ path: 'agent_npubs', code: 'invalid', message: `agent_npubs must contain at most ${FLIGHT_DECK_PG_EVENT_AUDIENCE_MAX} distinct non-empty npubs` }]);
   }
   try {
-    const reconciliation = await replaceFlightDeckPgEventSubscriptionAgents({ workspaceId: context.workspace.id, managerActorId: context.actor.id, authorizedByActorId: context.actor.id, agentNpubs });
+    // New legacy visibility-audience registrations need explicit consent to the broad feed (existing rows are kept).
+    const legacyConsentRequired = (Bun.env.AGENT_LEGACY_AUDIENCE_CONSENT ?? 'required').toLowerCase() !== 'off';
+    const reconciliation = await replaceFlightDeckPgEventSubscriptionAgents({
+      workspaceId: context.workspace.id, managerActorId: context.actor.id, authorizedByActorId: context.actor.id, agentNpubs,
+      allowNewRegistrations: !legacyConsentRequired || body.legacy_broad_feed_consent === true,
+    });
     const audienceNpubs = reconciliation.audience.map((member) => member.npub);
     return c.json({
       identity,

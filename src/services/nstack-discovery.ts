@@ -1,4 +1,5 @@
 import { inboxApiEnabled } from './notification-core';
+import { agentNotificationApiEnabled } from './agent-notifications';
 import { config } from '../config';
 import { getTowerBuildInfo } from '../build-info';
 import type { NstackServiceAvailability, NstackServiceDescriptor, NstackServiceDiscoveryV1 } from '../types';
@@ -94,7 +95,7 @@ export async function buildNstackServiceDiscovery(
       endpoint: towerOrigin,
       version: getTowerBuildInfo().version || 'unknown',
       protocols: ['https', 'nip-98'],
-      capabilities: ['workspace.authenticated_discovery', 'records.sync', 'storage.private', 'flightdeck.pg', ...(inboxApiEnabled() ? ['notifications.inbox.v1'] : [])],
+      capabilities: ['workspace.authenticated_discovery', 'records.sync', 'storage.private', 'flightdeck.pg', ...(inboxApiEnabled() ? ['notifications.inbox.v1'] : []), ...(agentNotificationApiEnabled() ? ['agent_notifications.v1'] : [])],
       features: { nips: [98] },
       availability: { status: 'available', checked_at: now().toISOString() },
     });
