@@ -219,6 +219,14 @@ Other effects of classification:
 
 Residual: an allowed write's response echoes the bound record written (for example, the created message and its thread descriptor).
 
+Idempotent writes never grant reads of changed existing output. For a classified caller:
+
+- a task-create replay (`client_request_id`) returns the existing task only while the caller's own live receipt covers exactly its current `row_version` (without `attention`/`activity_version`, with `work_receipt`);
+- a message replay returns the caller's own message only while nobody else has edited it, and without the current thread descriptor;
+- an agent-activity id collision answers 409 without the existing row (`current`).
+
+Otherwise the replay gets the generic `403 agent_notification_upgrade_required` with no content. Human replay semantics are unchanged.
+
 Notifications with `reason: "self_mention"` never bind a write. An `origin_notification_id` named on a message must be live in that exact thread.
 
 ## Learning for notification-only identities

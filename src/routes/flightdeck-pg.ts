@@ -14,7 +14,7 @@ import { registerNotificationRoutes } from './notifications';
 import { inboxApiEnabled } from '../services/notification-core';
 import { agentNotificationApiEnabled, classifiedInWorkspace, openReadRefusal, openReadRefusalResponse, type OpenReadRefusal } from '../services/agent-notifications';
 import {
-  ORIGIN_INVALID, WORK_OUTPUT_CHANGED, WorkReceiptRefusal, advanceWorkReceipt, activeWorkReceipt, assertReceiptedVersion, liveOrigin, lockReceiptForUpdate, matchingOwnReceipt, mintWorkReceipt,
+  ORIGIN_INVALID, RECEIPT_NOT_LIVE, WORK_OUTPUT_CHANGED, WorkReceiptRefusal, advanceWorkReceipt, activeWorkReceipt, assertReceiptedVersion, liveOrigin, lockReceiptForUpdate, matchingOwnReceipt, mintWorkReceipt,
   originValidationError, parseOriginNotificationId, receiptAdmission, serializeWorkReceipt, type ReceiptEntityType,
 } from '../services/agent-work-receipts';
 import type { Sql as NotificationSql } from '../services/notification-core';
@@ -1050,6 +1050,12 @@ function receiptView<T extends object>(c: Context, entityType: ReceiptEntityType
  */
 function receiptBookkeeping(c: Context, entityType: ReceiptEntityType, entityId: string, fields: Record<string, unknown>) {
   return receiptAdmission(c.req.raw, entityType, entityId) ? {} : fields;
+}
+
+/** Whether the authenticated caller (signer or the identity it resolved to) is notification-only in this workspace. */
+async function callerClassified(c: Context, auth: { signerNpub: string; userNpub: string }, workspaceId: string) {
+  if (await classifiedInWorkspace(c.req.raw, auth.userNpub, workspaceId)) return true;
+  return auth.signerNpub !== auth.userNpub && classifiedInWorkspace(c.req.raw, auth.signerNpub, workspaceId);
 }
 
 /** Mint the receipt for a just-created entity when the request named an origin (inside the create transaction). */
@@ -6228,6 +6234,12 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/messages',
   }
   if ('conflict' in payload) return jsonError(c, 409, 'idempotency_conflict', 'client_request_id was already used for a materially different message', identity);
   if (payload.replayed) {
+    // For a notification-only caller a replay returns only its own message exactly as it wrote it (nobody else has
+    // edited it since), and no current thread descriptor. Otherwise the generic refusal.
+    if (await callerClassified(c, auth, context.workspace.id)) {
+      if (payload.message.updated_by_actor_id !== context.actor.id) return c.json({ identity, ...RECEIPT_NOT_LIVE }, 403);
+      return c.json({ identity, message: serializeFlightDeckPgMessage(payload.message), created: false, replayed: true });
+    }
     return c.json({
       identity,
       message: serializeFlightDeckPgMessage(payload.message),
@@ -9825,7 +9837,8 @@ flightDeckPgRouter.put('/workspaces/:workspaceId/agent-activities/:activityId', 
       code: identityMismatch ? 'agent_activity_turn_identity_mismatch' : payload.outcome === 'terminal' ? 'agent_activity_terminal' : 'stale_agent_activity_sequence',
       message: identityMismatch ? 'Agent activity turn_id is immutable' : payload.outcome === 'terminal' ? 'Terminal agent activity cannot be changed' : 'Agent activity sequence must increase',
       identity,
-      current: serializeFlightDeckPgAgentActivity(payload.activity),
+      // A notification-only caller never sees the existing row (it may be another publisher's, anywhere).
+      ...(await callerClassified(c, auth, context.workspace.id) ? {} : { current: serializeFlightDeckPgAgentActivity(payload.activity) }),
     }, 409);
   }
   return c.json({
@@ -12266,6 +12279,14 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/tasks', as
   if (payload.replay) {
     const access = await authorizeFlightDeckPgOperation({actorNpub:auth.userNpub,appNpub:context.workspace.app_npub,workspaceId:context.workspace.id,permission:'task.read',resource:{type:'channel',channelId:payload.replay.channel_id}});
     if (!access.allowed || payload.replay.deleted_at) return jsonError(c,404,'task_unavailable','Task unavailable',identity);
+    // A replay is a write acknowledgement, not a read: a notification-only caller gets the existing task only while its
+    // own live receipt covers exactly this version, without mutable enrichment. Otherwise the generic refusal.
+    if (await callerClassified(c, auth, context.workspace.id)) {
+      const own = await activeWorkReceipt(receiptSql(), { workspaceId: context.workspace.id, actorId: context.actor.id, entityType: 'task', entityId: payload.replay.id });
+      if (!own || Number(own.receipt_row_version) !== Number(payload.replay.row_version)) return c.json({ identity, ...RECEIPT_NOT_LIVE }, 403);
+      const { attention: _attention, activity_version: _activityVersion, ...task } = serializeFlightDeckPgTask(payload.replay) as Record<string, unknown>;
+      return c.json({ identity, task, replayed: true, work_receipt: serializeWorkReceipt(own) }, 200);
+    }
     // An idempotent replay returns the receipt minted by the original create (same actor), if any.
     const replayReceipt = originNotificationId
       ? await activeWorkReceipt(receiptSql(), { workspaceId: context.workspace.id, actorId: context.actor.id, entityType: 'task', entityId: payload.replay.id })

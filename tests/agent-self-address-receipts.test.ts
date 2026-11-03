@@ -615,4 +615,67 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     const human = await request(fd(w1, `/tasks/${task.body.task.id}`), 'GET', H);
     expect(Object.keys(human.body.task)).toEqual(expect.arrayContaining(['attention', 'activity_version']));
   });
+
+  // ------------------------------------------------------------------------------------------------ idempotent replays
+  test('a classified task-create replay returns only its own unchanged receipted version; after a human edit nothing leaks', async () => {
+    const o = await origin('replay-task');
+    const create = { title: 'Replay task', client_request_id: `replay-${randomUUID()}`, origin_notification_id: o.notificationId };
+    const first = await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', A, create);
+    expect(first.status).toBe(201);
+    const again = await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', A, create);
+    expect([again.status, again.body.replayed, again.body.task.id, again.body.work_receipt?.entity_id]).toEqual([200, true, first.body.task.id, first.body.task.id]);
+    expect(Object.keys(again.body.task)).not.toContain('attention');
+    const v = Number((await db<{ row_version: number }[]>`SELECT row_version FROM flightdeck_pg_tasks WHERE id = ${first.body.task.id}`)[0]!.row_version);
+    expect((await request(fd(w1, `/tasks/${first.body.task.id}`), 'PATCH', H, { title: 'SENTINEL-HUMAN-REPLAY-TASK', description: 'SENTINEL-HUMAN-REPLAY-DESC', row_version: v })).status).toBe(200);
+    const leaked = await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', A, create);
+    expect([leaked.status, leaked.body.code]).toEqual([403, 'agent_notification_upgrade_required']);
+    expect(leaked.text).not.toContain('SENTINEL-HUMAN-REPLAY');
+    // A replay without any receipt (no origin) never reads the existing task either.
+    const plain = { title: 'Plain replay task', client_request_id: `plain-${randomUUID()}` };
+    expect((await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', A, plain)).status).toBe(201);
+    expect((await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', A, plain)).status).toBe(403);
+    // Ordinary (human) replay semantics are unchanged.
+    const human = { title: 'Human replay task', client_request_id: `human-${randomUUID()}` };
+    expect((await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', H, human)).status).toBe(201);
+    const humanAgain = await request(fd(w1, `/channels/${ch1}/tasks`), 'POST', H, human);
+    expect([humanAgain.status, humanAgain.body.replayed]).toEqual([200, true]);
+  });
+
+  test('a classified message replay returns only its own unedited message and no current thread descriptor', async () => {
+    const o = await origin('replay-message');
+    const body = 'bot reply with idempotency';
+    const send = (requestId: string) => request(fd(w1, `/channels/${ch1}/messages`), 'POST', A, {
+      body, thread_id: o.threadId, client_request_id: requestId, message_signature: signature(body, A, w1, ch1, o.threadId, [], 'none'),
+    });
+    const requestId = `msg-${randomUUID()}`;
+    const first = await send(requestId);
+    expect(first.status).toBe(201);
+    // The human renames the thread: the bot's replay of its unchanged message carries no thread descriptor.
+    await db`UPDATE flightdeck_pg_threads SET title = 'SENTINEL-HUMAN-THREAD-TITLE' WHERE id = ${o.threadId}`;
+    const again = await send(requestId);
+    expect([again.status, again.body.replayed, again.body.message.id]).toEqual([200, true, first.body.message.id]);
+    expect(again.text).not.toContain('SENTINEL-HUMAN-THREAD-TITLE');
+    // A human edit of the bot's message: the replay no longer returns it.
+    await db`UPDATE flightdeck_pg_messages SET body = 'SENTINEL-HUMAN-EDITED-BOT-REPLY', updated_by_actor_id = ${actors[H]!}, row_version = row_version + 1 WHERE id = ${first.body.message.id}`;
+    const leaked = await send(requestId);
+    expect([leaked.status, leaked.body.code]).toEqual([403, 'agent_notification_upgrade_required']);
+    expect(leaked.text).not.toContain('SENTINEL-HUMAN-EDITED-BOT-REPLY');
+  });
+
+  test('an agent-activity id collision never echoes another publisher activity to a classified bot', async () => {
+    const o = await origin('activity-collision');
+    const other = await origin('activity-collision-b'); // another thread; B publishes there
+    const forB = await post(ch1, 'B, status please', { threadId: other.threadId, mentions: [B] });
+    const activityId = randomUUID();
+    const activity = (actor: number, threadId: string, trigger: string, summary: string) => ({
+      channel_id: ch1, thread_id: threadId, trigger_message_id: trigger, turn_id: `turn-${actor}`, session_id: `session-${actor}`, agent_npub: npubs[actor],
+      state: 'working', visibility: 'user_visible', sequence: 1, summary,
+    });
+    const b = await request(fd(w1, `/agent-activities/${activityId}`), 'PUT', B, activity(B, other.threadId, forB.body.message.id, 'SENTINEL-OTHER-PUBLISHER-ACTIVITY'));
+    expect([200, 201]).toContain(b.status);
+    const collide = await request(fd(w1, `/agent-activities/${activityId}`), 'PUT', A, activity(A, o.threadId, o.messageId, 'mine'));
+    expect([collide.status, collide.body.code]).toEqual([409, 'agent_activity_turn_identity_mismatch']);
+    expect(collide.body.current).toBeUndefined();
+    expect(collide.text).not.toContain('SENTINEL-OTHER-PUBLISHER-ACTIVITY');
+  });
 });
