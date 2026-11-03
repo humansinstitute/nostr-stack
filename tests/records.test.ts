@@ -5,6 +5,8 @@ import { splitSqlStatements } from '../src/schema/sql-statements';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { setRecordCheckoutPolicyOverridesForTests } from '../src/services/record-checkout-policy';
 
 const TEST_DB = process.env.TEST_DB_NAME || 'coworker_v4_test_records';
@@ -51,7 +53,7 @@ beforeAll(async () => {
     await sql.unsafe(stmt);
   }
 
-  app = createApp();
+  app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
 });
 
 afterAll(async () => {

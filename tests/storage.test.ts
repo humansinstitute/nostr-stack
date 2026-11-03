@@ -142,7 +142,9 @@ beforeAll(async () => {
   `;
 
   const serverModule = await import('../src/server');
-  app = serverModule.createApp();
+  // Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+  const { unclassifiedFixtureCeiling } = await import('../src/services/agent-notifications');
+  app = serverModule.createApp({ agentCeiling: unclassifiedFixtureCeiling });
 });
 
 afterAll(async () => {

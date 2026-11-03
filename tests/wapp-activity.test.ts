@@ -8,6 +8,8 @@ import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { config } from '../src/config';
 import { closeDb, setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { cleanupWappActivity, listVisibleWappActivity, resolveVisibleWappActivity } from '../src/services/wapp-activity';
 import { createWappDelegation } from '../src/services/wapp-management';
 
@@ -110,7 +112,7 @@ beforeAll(async () => {
   const migration = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/schema/001_init.sql'), 'utf8');
   for (const statement of splitSqlStatements(migration)) await sql.unsafe(statement);
   setDb(sql);
-  app = createApp();
+  app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
 
   [ownerActorId] = (await sql<{ id: string }[]>`INSERT INTO flightdeck_pg_actors (npub, kind, display_name) VALUES (${ownerNpub}, 'human', 'Owner') RETURNING id`).map((row) => row.id);
   [memberActorId] = (await sql<{ id: string }[]>`INSERT INTO flightdeck_pg_actors (npub, kind, display_name) VALUES (${memberNpub}, 'human', 'Member') RETURNING id`).map((row) => row.id);

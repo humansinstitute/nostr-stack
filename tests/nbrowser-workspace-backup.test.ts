@@ -7,6 +7,8 @@ import postgres from 'postgres';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { closeDb, setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { enableInMemoryStorageForTest, resetInMemoryStorageForTest } from '../src/services/storage';
 
@@ -204,7 +206,7 @@ beforeAll(async () => {
   workspaceAId = await seedWorkspace({ workspaceOwnerNpub: WORKSPACE_A_OWNER, name: 'Workspace A', includeNamespace: true });
   workspaceBId = await seedWorkspace({ workspaceOwnerNpub: WORKSPACE_B_OWNER, name: 'Workspace B', includeNamespace: false });
   enableInMemoryStorageForTest();
-  app = createApp();
+  app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
 });
 
 afterAll(async () => {

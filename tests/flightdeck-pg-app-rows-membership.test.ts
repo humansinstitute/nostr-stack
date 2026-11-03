@@ -7,6 +7,8 @@ import postgres from 'postgres';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { closeDb, setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { AppDbError, createWorkspaceAppRow } from '../src/services/app-db';
 
@@ -186,7 +188,7 @@ beforeAll(async () => {
     VALUES (${legacyGroupId}, ${LEGACY_MEMBER})
   `;
 
-  app = createApp();
+  app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
 });
 
 afterAll(async () => {

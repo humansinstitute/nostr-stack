@@ -8,12 +8,14 @@ import { setDb } from '../src/db';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { enableInMemoryStorageForTest, resetInMemoryStorageForTest, prepareStorageObjectForAuthorizedOwner, writeStorageObject, completeStorageObject } from '../src/services/storage';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { buildOpenApiDocument } from '../src/openapi';
 
 const keys = [91,92,93].map(n => new Uint8Array(32).fill(n));
 const npubs = keys.map(key => nip19.npubEncode(getPublicKey(key)));
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
-const app = createApp();
+const app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
 let sql: ReturnType<typeof postgres>;
 let database: string;
 const createdPaths: string[] = [];

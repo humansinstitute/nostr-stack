@@ -5,6 +5,8 @@ import postgres from 'postgres';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { closeDb, setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { authorizeFlightDeckPgOperation } from '../src/services/flightdeck-pg-authorization';
 
@@ -108,7 +110,7 @@ beforeAll(async () => {
     actors.set(npub, a.id);
   }
   await sql`INSERT INTO user_profiles(user_npub,display_name) VALUES(${retiredNpub},'Rick'),(${stableNpub},'OLD RICK')`;
-  app = createApp();
+  app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
 }, 30000);
 
 afterAll(async () => { await closeDb(); });

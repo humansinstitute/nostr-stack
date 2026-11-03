@@ -8,6 +8,8 @@ import { splitSqlStatements } from '../src/schema/sql-statements';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { closeDb, setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { enableInMemoryStorageForTest, resetInMemoryStorageForTest } from '../src/services/storage';
 
 const TEST_DB = process.env.TEST_DB_NAME || 'coworker_v4_test_flightdeck_pg_smoke';
@@ -144,7 +146,7 @@ beforeAll(async () => {
   setDb(sql);
   await runMigrations();
   enableInMemoryStorageForTest();
-  app = createApp();
+  app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
 });
 
 afterAll(async () => {

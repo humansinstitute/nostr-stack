@@ -2,9 +2,11 @@ import { describe, expect, test } from 'bun:test';
 import { createHash } from 'crypto';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 
 describe('Admin table viewer', () => {
-  const app = createApp();
+  const app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
   const outsiderSecret = new Uint8Array(32).fill(7);
   const OUTSIDER = nip19.npubEncode(getPublicKey(outsiderSecret));
 

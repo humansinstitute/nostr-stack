@@ -5,6 +5,8 @@ import postgres from 'postgres';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { closeDb, setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { readFlightDeckRecordPage } from '../src/services/flightdeck-record-delta';
 
@@ -80,7 +82,7 @@ describe.skipIf(!port || port === 5432)('Flight Deck Agent Space disposable-Post
     `;
     otherWorkspaceId = other.id;
     await sql`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role,created_by_actor_id) VALUES(${otherWorkspaceId},${managerId},'owner',${managerId})`;
-    app = createApp();
+    app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
   });
 
   afterAll(async () => { await closeDb(); });

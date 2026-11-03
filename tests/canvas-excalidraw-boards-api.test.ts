@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { ensureRuntimeSchema } from '../src/schema/ensure-runtime-schema';
 import { enableInMemoryStorageForTest, resetInMemoryStorageForTest, writeStorageObject } from '../src/services/storage';
@@ -84,7 +86,7 @@ describe.skipIf(!port || port === 5432)('Excalidraw board naplets signed API aga
     await grant(actors[3]!, channelA, 'channel.write');
     canvas = (await db`INSERT INTO flightdeck_pg_canvases(workspace_id,title,position,created_by_actor_id,updated_by_actor_id) VALUES(${workspace},'Boards',1,${actors[0]!},${actors[0]!}) RETURNING id`)[0]!.id;
     canvas2 = (await db`INSERT INTO flightdeck_pg_canvases(workspace_id,title,position,created_by_actor_id,updated_by_actor_id) VALUES(${workspace},'Second',2,${actors[0]!},${actors[0]!}) RETURNING id`)[0]!.id;
-    setDb(db); app = createApp();
+    setDb(db); app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
   });
   afterAll(async () => {
     resetInMemoryStorageForTest();

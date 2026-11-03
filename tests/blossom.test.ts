@@ -8,12 +8,14 @@ import { splitSqlStatements } from '../src/schema/sql-statements';
 import { enableInMemoryStorageForTest, resetInMemoryStorageForTest, prepareStorageObjectForAuthorizedOwner, writeStorageObject, completeStorageObject, storageBlossomMetadata, backfillStorageHashes } from '../src/services/storage';
 import { parseBlobRange } from '../src/routes/blossom';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { buildOpenApiDocument } from '../src/openapi';
 const secret = new Uint8Array(32).fill(81);
 const owner = nip19.npubEncode(getPublicKey(secret));
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 let sql: ReturnType<typeof postgres>;
-const app = createApp();
+const app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
 function token(sha: string, overrides: { tags?: string[][]; expiry?: number; kind?: number; secret?: Uint8Array } = {}) {
   const event = finalizeEvent({ kind: overrides.kind || 24242, created_at: Math.floor(Date.now()/1000)-1, content: 'Read Tower file', tags: overrides.tags || [['t','get'], ['x',sha], ['expiration', String(overrides.expiry || Math.floor(Date.now()/1000)+120)]] }, overrides.secret || secret);
   return `Nostr ${Buffer.from(JSON.stringify(event)).toString('base64url')}`;

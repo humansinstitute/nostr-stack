@@ -8,6 +8,8 @@ import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { config } from '../src/config';
 import { closeDb, setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { authorizeFlightDeckPgOperation, resolveOrCreateFlightDeckPgActor } from '../src/services/flightdeck-pg-authorization';
 import { createFlightDeckPgWorkspaceMember, listVisibleFlightDeckPgChannels, listVisibleFlightDeckPgScopes } from '../src/services/flightdeck-pg-api';
 import { expandFlightDeckPgAccessLevel, setupFlightDeckPgDevWorkspace } from '../src/services/flightdeck-pg-setup';
@@ -161,7 +163,7 @@ beforeAll(async () => {
   setDb(sql);
   await runMigrations();
   config.adminNpub = ADMIN_NPUB;
-  app = createApp();
+  app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
 });
 
 afterAll(async () => {

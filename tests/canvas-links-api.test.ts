@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 
 const port = Number(process.env.RECORD_TEST_PORT);
@@ -40,7 +42,7 @@ describe.skipIf(!port || port === 5432)('Canvas links signed API against disposa
     await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission) VALUES(${workspace},'actor',${actors[1]!},'channel',${channel!.id},'task.read')`;
     const [item] = await db`INSERT INTO flightdeck_pg_canvas_naplets(workspace_id,canvas_id,source_type,source_id,layout,created_by_actor_id,updated_by_actor_id) VALUES(${workspace},${canvas},'task_list',${channel!.id},'{"x":100,"y":50,"width":300,"height":200,"z":1}',${actors[0]!},${actors[0]!}) RETURNING id`;
     naplet = item!.id;
-    setDb(db); app = createApp();
+    setDb(db); app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
   });
   afterAll(async () => {
     await db?.end();

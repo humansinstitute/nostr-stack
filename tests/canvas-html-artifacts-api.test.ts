@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { setDb } from '../src/db';
 import { createApp } from '../src/server';
+// Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
+import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { enableInMemoryStorageForTest, resetInMemoryStorageForTest, writeStorageObject } from '../src/services/storage';
 import { HTML_ARTIFACT_MAX_ASSET_BYTES } from '../src/services/flightdeck-pg-html-artifacts';
@@ -81,7 +83,7 @@ describe.skipIf(!port || port === 5432)('Private HTML artifact naplets signed AP
     await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission) VALUES(${workspace},'actor',${actors[1]!},'channel',${channelA},'file.read')`;
     const [c] = await db`INSERT INTO flightdeck_pg_canvases(workspace_id,title,position,created_by_actor_id,updated_by_actor_id) VALUES(${workspace},'Artifacts',1,${actors[0]!},${actors[0]!}) RETURNING id`;
     canvas = c!.id;
-    setDb(db); app = createApp();
+    setDb(db); app = createApp({ agentCeiling: unclassifiedFixtureCeiling });
   });
   afterAll(async () => {
     resetInMemoryStorageForTest();
