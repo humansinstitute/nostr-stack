@@ -540,7 +540,6 @@ export async function enforceNotificationCeiling(request: Request, provider: Age
     console.error('[agent-notifications] ceiling classification unavailable; refusing request:', error instanceof Error ? error.message : error);
     return Response.json({ error: 'authorization_unavailable', code: 'authorization_unavailable', message: 'Authorization state is unavailable; retry later', retryable: true }, { status: 503 });
   }
-  if (profile) classifiedRequests.add(request);
   return ceilingDecision(request, profile, signer, sql);
 }
 
@@ -575,10 +574,12 @@ export function restrictedWriteResponseBody(request: Request, body: unknown): un
   return stripped;
 }
 
-// Requests whose signer is notification-only somewhere: handlers use this only to make error bodies less specific.
-const classifiedRequests = new WeakSet<Request>();
-export function isClassifiedRequest(request: Request) {
-  return classifiedRequests.has(request);
+/**
+ * Whether the ceiling admitted this request under the restrictions of its (classified) target workspace. Handlers use
+ * this to make responses less specific; a bot classified elsewhere but unrestricted here is never affected.
+ */
+export function isRestrictedRequest(request: Request) {
+  return restrictedRequests.has(request);
 }
 
 /** The ceiling decision once the identity's classification is known (shared by admission and open connections). */

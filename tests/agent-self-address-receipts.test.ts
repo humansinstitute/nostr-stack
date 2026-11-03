@@ -71,10 +71,10 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
   }
   const classify = (target: number) => db`INSERT INTO flightdeck_pg_agent_access_profiles (workspace_id, actor_id, profile) VALUES (${w1}, ${actors[target]!}, 'notification_only') ON CONFLICT DO NOTHING`;
   // A completed private storage object uploaded by `actor`.
-  async function blob(actor: number, content: string, type = 'text/markdown') {
+  async function blob(actor: number, content: string, type = 'text/markdown', owner = H) {
     const [row] = await db<{ id: string }[]>`
       INSERT INTO v4_storage_objects (owner_npub, created_by_npub, storage_path, content_type, is_public)
-      VALUES (${npubs[H]!}, ${npubs[actor]!}, ${`receipts-${randomUUID()}`}, ${type}, false) RETURNING id`;
+      VALUES (${npubs[owner]!}, ${npubs[actor]!}, ${`receipts-${randomUUID()}`}, ${type}, false) RETURNING id`;
     expect(await writeStorageObject(row!.id, new TextEncoder().encode(content), npubs[actor]!)).toBeTruthy();
     expect(await completeStorageObject(row!.id, {}, npubs[actor]!)).toBeTruthy();
     return row!.id;
@@ -904,5 +904,26 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     const w2reply = await request(fd(w2, `/channels/${w2ch}/messages`), 'POST', A, { body: w2body, thread_id: w2root.body.message.thread_id, message_signature: signature(w2body, A, w2, w2ch, w2root.body.message.thread_id, [], 'none') });
     expect(w2reply.status).toBe(201);
     expect(Object.keys(w2reply.body)).toEqual(expect.arrayContaining(['thread', 'outbox']));
+  });
+
+  test('a bot classified in W1 keeps unrestricted behaviour in W2 (audio targets, lease inspection, mention errors)', async () => {
+    const root = await post(w2ch, 'w2 threaded root', { actor: H2, workspace: w2, createThread: true });
+    expect(root.status).toBe(201);
+    // Audio note targeting a threaded W2 message without naming the thread: allowed as for anyone unrestricted.
+    const note = await request(fd(w2, `/channels/${w2ch}/audio-notes`), 'POST', A, { storage_object_id: await blob(A, 'w2 audio', 'audio/webm', H2), mime_type: 'audio/webm', target_type: 'message', target_id: root.body.message.id });
+    expect(note.status).toBe(201);
+    expect(note.body.audio_note.thread_id).toBe(root.body.message.thread_id);
+    // Lease inspection shows another editor's lease, as for any unrestricted caller.
+    const doc = await request(fd(w2, `/channels/${w2ch}/docs`), 'POST', H2, { title: 'W2 doc', storage_object_id: await blob(H2, 'w2 doc', 'text/markdown', H2) });
+    expect(doc.status).toBe(201);
+    const held = await request(fd(w2, '/edit-leases/acquire'), 'POST', H2, { entity_type: 'document', entity_id: doc.body.doc.id, ttl_seconds: 60 });
+    expect(held.status).toBe(201);
+    const inspected = await request(fd(w2, `/edit-leases?entity_type=document&entity_id=${doc.body.doc.id}`), 'GET', A);
+    expect([inspected.status, inspected.body.lease?.holder_actor_npub]).toEqual([200, npubs[H2]]);
+    // Mention errors keep their specific codes.
+    const body = 'mention in w2';
+    const mentions = [{ type: 'agent', npub: nip19.npubEncode(getPublicKey(new Uint8Array(32).fill(251))) }];
+    const mention = await request(fd(w2, `/channels/${w2ch}/messages`), 'POST', A, { body, thread_id: root.body.message.thread_id, mentions, message_signature: signature(body, A, w2, w2ch, root.body.message.thread_id, mentions, 'none') });
+    expect([mention.status, mention.body.details?.fields?.[0]?.code]).toEqual([400, 'unknown_actor']);
   });
 });

@@ -12,7 +12,7 @@ import { lockDocumentEditAuthority, lockDocumentLeaseAuthority } from '../servic
 import { applyLegacyPreferencePatch } from '../services/notification-inbox';
 import { registerNotificationRoutes } from './notifications';
 import { inboxApiEnabled } from '../services/notification-core';
-import { agentNotificationApiEnabled, classifiedInWorkspace, isClassifiedRequest, openReadRefusal, openReadRefusalResponse, type OpenReadRefusal } from '../services/agent-notifications';
+import { agentNotificationApiEnabled, classifiedInWorkspace, isRestrictedRequest, openReadRefusal, openReadRefusalResponse, type OpenReadRefusal } from '../services/agent-notifications';
 import {
   ORIGIN_INVALID, RECEIPT_NOT_LIVE, WORK_OUTPUT_CHANGED, WorkReceiptRefusal, advanceWorkReceipt, activeWorkReceipt, assertReceiptedVersion, liveOrigin, lockReceiptForUpdate, matchingOwnReceipt, mintWorkReceipt,
   originValidationError, parseOriginNotificationId, receiptAdmission, serializeWorkReceipt, type ReceiptEntityType,
@@ -1075,7 +1075,7 @@ function validationError(
 ) {
   // A notification-only signer learns nothing about other identities from mention errors: unknown and inaccessible
   // mentioned identities answer the same. Human error details are unchanged.
-  const shown = isClassifiedRequest(c.req.raw)
+  const shown = isRestrictedRequest(c.req.raw)
     ? fields.map((f) => (f.code === 'unknown_actor' || f.code === 'inaccessible_actor' ? { path: f.path, code: 'mention_unavailable', message: 'mentioned identity is not available here' } : f))
     : fields;
   return jsonError(c, 400, 'validation_error', 'Request body failed validation', identity, {
@@ -6822,7 +6822,7 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/edit-leases', async (c) => {
     entityId,
   });
   // A notification-only caller sees the protocols and only its own lease (never another editor's presence or expiry).
-  const shownLease = lease && isClassifiedRequest(c.req.raw) && lease.holder_actor_id !== context.actor.id ? null : lease;
+  const shownLease = lease && isRestrictedRequest(c.req.raw) && lease.holder_actor_id !== context.actor.id ? null : lease;
   return c.json({ identity, ...(entityType === 'document' ? { document_edit_protocol: DOCUMENT_EDIT_PROTOCOL, document_edit_protocols: DOCUMENT_EDIT_PROTOCOLS } : {}), lease: shownLease ? serializeFlightDeckPgEditLease(shownLease) : null });
 });
 
@@ -9328,7 +9328,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/audio-note
     : null;
   // A notification-only signer gets one answer for any unusable target, and must name the target's thread itself, so
   // the created note never discloses where an existing record lives.
-  if (isClassifiedRequest(c.req.raw) && targetType && targetId
+  if (isRestrictedRequest(c.req.raw) && targetType && targetId
     && (!target || target.channelId !== channel.id || (target.threadId ?? null) !== (requestedThreadId ?? null))) {
     return jsonError(c, 404, 'audio_note_target_not_found', 'Flight Deck PG audio note target was not found', identity);
   }
@@ -9340,7 +9340,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/audio-note
   }
   const requestedThread = requestedThreadId ? await resolveFlightDeckPgThread(context.workspace.id, requestedThreadId) : null;
   // Same for a named thread: unknown and other-channel threads answer identically for a notification-only signer.
-  if (requestedThreadId && (!requestedThread || (isClassifiedRequest(c.req.raw) && requestedThread.channel_id !== channel.id))) {
+  if (requestedThreadId && (!requestedThread || (isRestrictedRequest(c.req.raw) && requestedThread.channel_id !== channel.id))) {
     return jsonError(c, 404, 'audio_note_thread_not_found', 'Flight Deck PG audio note thread was not found', identity);
   }
   if (requestedThread && requestedThread.channel_id !== channel.id) {
