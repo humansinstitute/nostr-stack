@@ -650,11 +650,15 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     const requestId = `msg-${randomUUID()}`;
     const first = await send(requestId);
     expect(first.status).toBe(201);
-    // The human renames the thread: the bot's replay of its unchanged message carries no thread descriptor.
+    // The human renames the thread and posts a later unmentioned message: the bot's replay of its unchanged message
+    // carries no thread descriptor (title, latest message, attention) and no later human content.
     await db`UPDATE flightdeck_pg_threads SET title = 'SENTINEL-HUMAN-THREAD-TITLE' WHERE id = ${o.threadId}`;
+    expect((await post(ch1, 'SENTINEL-LATER-UNMENTIONED-HUMAN-MESSAGE', { threadId: o.threadId })).status).toBe(201);
     const again = await send(requestId);
     expect([again.status, again.body.replayed, again.body.message.id]).toEqual([200, true, first.body.message.id]);
     expect(again.text).not.toContain('SENTINEL-HUMAN-THREAD-TITLE');
+    expect(again.text).not.toContain('SENTINEL-LATER-UNMENTIONED-HUMAN-MESSAGE');
+    expect(again.body.thread).toBeUndefined();
     // A human edit of the bot's message: the replay no longer returns it.
     await db`UPDATE flightdeck_pg_messages SET body = 'SENTINEL-HUMAN-EDITED-BOT-REPLY', updated_by_actor_id = ${actors[H]!}, row_version = row_version + 1 WHERE id = ${first.body.message.id}`;
     const leaked = await send(requestId);
