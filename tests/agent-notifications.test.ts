@@ -138,7 +138,7 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
 
   // --------------------------------------------------------------------------------------------------- derivation
   let mentionMessageId: string, threadId: string, siblingThreadId: string, aNotificationId: string, boundTaskId: string, otherTaskId: string;
-  const envelopeKeys = ['author_npub', 'id', 'kind', 'occurred_at', 'reason', 'seq', 'source', 'state'];
+  const envelopeKeys = ['author_npub', 'id', 'kind', 'occurred_at', 'origin_notification_id', 'reason', 'seq', 'source', 'state'];
   test('addressed-only: canonical mention reaches only the mentioned bot; plain text and unaddressed traffic reach nobody', async () => {
     await post(ch1, `${SENTINEL.unrelated} general chatter`);
     await post(ch1, `@Bot1 ${SENTINEL.unrelated} plain-text name only`);

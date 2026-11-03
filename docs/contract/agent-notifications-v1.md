@@ -51,8 +51,10 @@ All routes are under `/api/v4/flightdeck-pg/workspaces/{ws}/agent-notifications`
 ```json
 { "id": "…", "seq": 42, "kind": "chat_mention", "reason": "canonical_mention", "state": "active",
   "source": { "type": "message", "id": "…", "version": 1, "channel_id": "…", "thread_id": "…", "task_id": null, "doc_id": null },
-  "author_npub": "npub1…", "occurred_at": "…" }
+  "author_npub": "npub1…", "occurred_at": "…", "origin_notification_id": null }
 ```
+
+`origin_notification_id` is non-null only for `reason: "self_mention"` (see Deliberate self-address).
 
 When the recipient lost the source ACL, or the canonical relationship is gone, the row is delivered as a **minimal tombstone**: `{ "id", "seq", "state": "revoked" }`. It carries no routing metadata. Consumers ack it as `suppressed`.
 
@@ -80,7 +82,7 @@ A recipient must:
 
 - be an agent or a classified identity;
 - be an active member;
-- not be the author;
+- not be the author, except a verified deliberate self-address (below);
 - hold `channel:<id>:<family>` in `flightdeck_pg_record_access` at projection.
 
 ## Canonical relationship revalidation
@@ -200,7 +202,8 @@ Bound writes (each still subject to its normal route ACL):
 | `POST tasks/{id}/comments`, `POST tasks/{id}/state` | The task is bound. |
 | `POST docs/{id}/comments`, `PATCH docs/{id}` | The doc is bound. |
 | `POST edit-leases/acquire`, `POST edit-leases/{id}/renew\|release` | The bound task/doc, and the bot's own lease. |
-| `POST channels/{ch}/(docs\|tasks\|files\|audio-notes)` | Requested work products, created only in a channel where the bot holds a live notification. |
+| `POST channels/{ch}/(docs\|tasks\|files\|audio-notes)` | Requested work products, created only in a channel where the bot holds a live notification. With `origin_notification_id`, that exact origin must be live in this channel (the create then mints a work receipt). |
+| Receipted reads/updates (see Work receipts) | The bot holds a receipt for that entity whose origin is live. |
 | `POST storage/prepare` | Only while the bot holds a live notification in the workspace. |
 | `PUT /api/v4/storage/{id}`, `POST /api/v4/storage/{id}/complete` | Only the bot's own uncompleted upload. |
 
@@ -215,6 +218,50 @@ Other effects of classification:
 - Every classification change is audited in `flightdeck_pg_agent_notification_audit`.
 
 Residual: an allowed write's response echoes the bound record written (for example, the created message and its thread descriptor).
+
+Notifications with `reason: "self_mention"` never bind a write. An `origin_notification_id` named on a message must be live in that exact thread.
+
+## Deliberate self-address
+
+A structured mention of the author in their own message is projected to the author (kind `chat_mention`, reason `self_mention`) only when ALL hold:
+
+1. The source is a channel message, and this exact revision is still the stored one (a later edit makes the event ineligible).
+2. Its structured mentions name the author (not body text, DM participation, assignments or invocations).
+3. The STORED kind-33358 instruction signature verifies against this revision: signer is the author (messages are signed by the acting npub itself, so workspace-key-signed self-address is not supported), body and location tags match, and a `mentions_sha256` tag binds the saved mentions. The tag is the lowercase hex SHA-256 of the UTF-8 bytes of `JSON.stringify([{type, npub}, …])`, with lowercase values, deduped, sorted by `npub` then `type` (empty list: `"[]"`). A present tag that does not match is refused at write (400). Without the tag nothing is projected; ordinary messages are unaffected.
+4. The message names `origin_notification_id`: the author's own live non-self notification in the same channel and thread (inside an active floor, current ACL, relationship `ok`). It is validated at write (403 `origin_notification_invalid`) and again at projection. The client never sets it through `metadata`.
+
+Such a row:
+
+- stays eligible only while its origin is (the relationship oracle checks the origin, so it is revoked with it), and only while its trigger is still the projected revision last updated by the bot (an edit after projection revokes it);
+- binds no write by itself;
+- gets a context that never exceeds the ORIGIN's: the window is exactly what the origin's own context authorizes now (its trigger and bounded transcript, current versions, by the origin's policy), plus later messages the bot both wrote and last updated. On the trigger and those own messages only attachments the bot linked itself are listed or downloadable. Thread and channel descriptors are the same current values the origin context shows.
+
+Autopilot still decides whether to execute it (instructor grant). A notification never authorizes execution.
+
+## Work receipts
+
+A create of a doc, task, file or audio note that names `origin_notification_id` mints a receipt in the same transaction. The origin must be the caller's live notification in that channel, otherwise the create is refused (403) and nothing is written. The 201 response adds:
+
+```json
+"work_receipt": { "entity_type": "doc", "entity_id": "…", "receipt_row_version": 3, "origin_notification_id": "…", "body_sha256_hex": "…", "version_id": null }
+```
+
+The key is absent without an origin. A task create replayed with the same `client_request_id` returns the original receipt. A file create that adopts an existing text-attachment-lineage file mints nothing.
+
+For a classified bot a live receipt (origin still live) admits only that entity, only at the receipted version, checked in the ceiling AND in the handler transaction:
+
+| Route | Through a receipt |
+|---|---|
+| `GET docs/{id}`, `GET docs/{id}/body` | the receipted `row_version` only |
+| `PATCH docs/{id}` | base `row_version` = current = receipt; no channel move; never a recovery save; the receipt advances to the version written |
+| `POST edit-leases/acquire` (doc/task), `renew`, `release` | at the receipted version; no takeover |
+| `GET tasks/{id}`, `POST tasks/{id}/state` | the receipted `row_version` only; the read returns the task row without assignment enrichment; a state change advances the receipt |
+| `POST tasks/{id}/comments`, `POST docs/{id}/comments` | append-only on the unchanged receipted entity; top-level only (no `parent_comment_id`); the response carries only the new comment |
+| `GET files/{id}`, `GET files/{id}/object` | the receipted `row_version` only |
+| `GET files/{id}/versions/{v}/object` | only the receipted version `v` |
+| `GET audio-notes/{id}`, `GET audio-notes/{id}/media` | the receipted `row_version` only |
+
+Docs, files and audio notes are also compared by content sha256, so a body or object swapped without a version change is a different version. Any other version answers `409 {"error":"work_output_changed","code":"work_output_changed","retryable":false}` with no content. A successful receipted update returns the advanced `work_receipt` (compare-and-set; a receipt that does not advance fails the update with 409). For an unrestricted caller holding its own receipt, the receipt follows its update only when it still matched the replaced version; otherwise `work_receipt` is absent. A human edit therefore freezes the output until a new eligible notification binds it. Updates serialize on the receipt row. Minting and receipted updates hold the origin's notification, the recipient's active subscriptions, the channel/scope and the origin source message FOR SHARE, so a concurrent revocation either commits first (and is observed) or waits. Comment reads, other entities and storage/Blossom routes are never reachable through a receipt. Residual: a receipted read still shows the entity's own `activity_version`/`attention` counters, which can move with human activity (counts, never content). Requests admitted through an ordinary notification binding keep the existing policy.
 
 ## Legacy visibility audience (transition)
 

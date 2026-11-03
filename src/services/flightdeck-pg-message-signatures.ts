@@ -2,6 +2,8 @@ import { createHash } from 'crypto';
 import { nip19, verifyEvent, type Event } from 'nostr-tools';
 
 export const AGENT_INSTRUCTION_SIGNATURE_METADATA_KEY = 'agent_instruction_signature';
+/** Server-owned message metadata: the validated origin notification named for a deliberate self-address. */
+export const AGENT_ORIGIN_METADATA_KEY = 'agent_origin_notification_id';
 export const AGENT_INSTRUCTION_SIGNATURE_PROTOCOL = 'flightdeck_pg_message_instruction';
 export const AGENT_INSTRUCTION_SIGNATURE_KIND = 33358;
 
@@ -10,6 +12,25 @@ export type FlightDeckPgMessageSignatureValidationError = {
   code: string;
   message: string;
 };
+
+/**
+ * Canonical hash of a message's structured mentions for the optional `mentions_sha256` tag: lowercase hex SHA-256 of
+ * the UTF-8 bytes of JSON.stringify([{type, npub}, ...]) with lowercase values, deduped, sorted by npub then type.
+ * An empty list hashes "[]".
+ */
+export function canonicalMentionsSha256(mentions: unknown): string {
+  const list = Array.isArray(mentions) ? mentions : [];
+  const seen = new Map<string, { type: string; npub: string }>();
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object') continue;
+    const type = String((entry as Record<string, unknown>).type ?? '').toLowerCase();
+    const npub = String((entry as Record<string, unknown>).npub ?? '').toLowerCase();
+    if (!type || !npub) continue;
+    seen.set(`${npub}\u0000${type}`, { type, npub });
+  }
+  const sorted = [...seen.values()].sort((a, b) => (a.npub < b.npub ? -1 : a.npub > b.npub ? 1 : a.type < b.type ? -1 : a.type > b.type ? 1 : 0));
+  return sha256Hex(JSON.stringify(sorted.map(({ type, npub }) => ({ type, npub }))));
+}
 
 export type FlightDeckPgMessageInstructionSignature = {
   version: 1;
@@ -20,6 +41,7 @@ export type FlightDeckPgMessageInstructionSignature = {
   nostr_event: Event;
   message_id?: string;
   revision?: number;
+  mentions_sha256?: string;
 };
 
 function sha256Hex(value: string): string {
@@ -52,6 +74,8 @@ export function validateFlightDeckPgMessageInstructionSignature(input: {
   threadId?: string | null;
   messageId?: string;
   revision?: number;
+  /** The canonical mentions being saved. When the event carries `mentions_sha256` it must match them. */
+  mentions?: unknown;
 }): { signature: FlightDeckPgMessageInstructionSignature | null; errors: FlightDeckPgMessageSignatureValidationError[] } {
   const errors: FlightDeckPgMessageSignatureValidationError[] = [];
   const wrapper = input.value && typeof input.value === 'object' && !Array.isArray(input.value)
@@ -85,6 +109,7 @@ export function validateFlightDeckPgMessageInstructionSignature(input: {
   const threadTag = eventTagValue(event, 'thread_id');
   const messageTag = eventTagValue(event, 'message_id');
   const revisionTag = eventTagValue(event, 'revision');
+  const mentionsTag = eventTagValue(event, 'mentions_sha256');
 
   if (event.kind !== AGENT_INSTRUCTION_SIGNATURE_KIND) {
     errors.push({ path: 'message_signature.nostr_event.kind', code: 'invalid', message: `nostr_event kind must be ${AGENT_INSTRUCTION_SIGNATURE_KIND}` });
@@ -116,6 +141,9 @@ export function validateFlightDeckPgMessageInstructionSignature(input: {
   if (input.messageId && messageTag !== input.messageId) {
     errors.push({ path: 'message_signature.nostr_event.tags.message_id', code: 'invalid', message: 'message_id tag must match the edited message' });
   }
+  if (mentionsTag !== null && mentionsTag !== canonicalMentionsSha256(input.mentions)) {
+    errors.push({ path: 'message_signature.nostr_event.tags.mentions_sha256', code: 'invalid', message: 'mentions_sha256 tag must match the canonical structured mentions' });
+  }
   if (input.revision !== undefined && revisionTag !== String(input.revision)) {
     errors.push({ path: 'message_signature.nostr_event.tags.revision', code: 'invalid', message: 'revision tag must match the saved message revision' });
   }
@@ -131,7 +159,36 @@ export function validateFlightDeckPgMessageInstructionSignature(input: {
       nostr_event: event,
       ...(input.messageId ? { message_id: input.messageId } : {}),
       ...(input.revision !== undefined ? { revision: input.revision } : {}),
+      ...(mentionsTag !== null ? { mentions_sha256: mentionsTag } : {}),
     },
     errors: [],
   };
+}
+
+/**
+ * Re-verify a STORED instruction signature against the exact message revision being projected. Used only for
+ * deliberate self-address: the signer must be the author and `mentions_sha256` must bind the projected mentions.
+ */
+export function storedSignatureBindsRevision(input: {
+  signature: unknown;
+  body: string;
+  mentions: unknown;
+  authorNpub: string;
+  workspaceId: string;
+  channelId: string;
+  threadId: string | null;
+  messageId: string;
+  revision: number;
+  revised: boolean;
+}): boolean {
+  const wrapper = input.signature && typeof input.signature === 'object' ? input.signature as Record<string, unknown> : null;
+  const event = wrapper && isEventLike(wrapper.nostr_event) ? wrapper.nostr_event : null;
+  if (!event || event.kind !== AGENT_INSTRUCTION_SIGNATURE_KIND || !verifyEvent(event)) return false;
+  if (eventTagValue(event, 'protocol') !== AGENT_INSTRUCTION_SIGNATURE_PROTOCOL) return false;
+  if (nip19.npubEncode(event.pubkey) !== input.authorNpub || event.content !== input.body) return false;
+  if (eventTagValue(event, 'body_sha256') !== sha256Hex(input.body)) return false;
+  if (eventTagValue(event, 'workspace_id') !== input.workspaceId || eventTagValue(event, 'channel_id') !== input.channelId) return false;
+  if ((eventTagValue(event, 'thread_id') ?? null) !== input.threadId) return false;
+  if (input.revised && (eventTagValue(event, 'message_id') !== input.messageId || eventTagValue(event, 'revision') !== String(input.revision))) return false;
+  return eventTagValue(event, 'mentions_sha256') === canonicalMentionsSha256(input.mentions);
 }

@@ -5131,7 +5131,7 @@ export function buildOpenApiDocument(origin: string) {
         post: {
           tags: ['Flight Deck PG'],
           summary: 'Create an ordinary human- or agent-authored message idempotently',
-          description: 'The authenticated NIP-98 actor is always the authoritative author. Canonical agent mentions are resolved and authorized. A first client_request_id returns 201 with created=true; an exact replay returns 200 with replayed=true and no duplicate event; a materially different reuse returns 409. Autopilot provenance in metadata is descriptive only.',
+          description: 'The authenticated NIP-98 actor is always the authoritative author. Canonical agent mentions are resolved and authorized. A first client_request_id returns 201 with created=true; an exact replay returns 200 with replayed=true and no duplicate event; a materially different reuse returns 409. Autopilot provenance in metadata is descriptive only. Optional origin_notification_id (UUID) names the caller\'s live non-self notification in this exact thread, for a deliberate self-address: a structured mention of the author is projected as reason self_mention only when the kind-33358 signature carries a mentions_sha256 tag (lowercase hex SHA-256 of JSON.stringify of the mentions as [{type,npub}], lowercase, deduped, sorted by npub then type). A present mentions_sha256 that does not match the saved mentions is a 400; an origin that is not live is a 403 origin_notification_invalid.',
           'x-flightdeck-pg-contract-fixture': flightDeckPgContractFixturePaths['flightdeck_pg.channel_messages.create'],
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
@@ -6547,7 +6547,7 @@ export function buildOpenApiDocument(origin: string) {
           tags: ['Flight Deck PG'],
           security: [{ nip98: [] }],
           summary: 'Create a Flight Deck PG channel File from a completed storage object',
-          description: 'Creates the File and its immutable version 1 (current_version_id). Requires file.write or channel.write on the channel. summary is stored on version 1 and returned by the versions list.',
+          description: 'Creates the File and its immutable version 1 (current_version_id). Requires file.write or channel.write on the channel. summary is stored on version 1 and returned by the versions list. Optional origin_notification_id (UUID): a live notification of the caller in this channel (strict agent inbox). When valid, the 201 response adds work_receipt (AgentWorkReceipt): the bot may read and update only the version it wrote; any other version answers 409 {error,code:work_output_changed,retryable:false} with no content. An origin that is not live answers 403 origin_notification_invalid (or the notification-only ceiling\'s 403).',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
             { name: 'channelId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
@@ -6847,7 +6847,7 @@ export function buildOpenApiDocument(origin: string) {
           tags: ['Flight Deck PG'],
           security: [{ nip98: [] }],
           summary: 'Create a channel task',
-          description: 'Optional client_request_id (1–240 characters) provides actor/workspace-scoped idempotency: exact replay returns 200, conflicting reuse 409. Relationships in metadata.parent_task_id and metadata.predecessor_task_ids are saved atomically and validated for reference read access, self/duplicate edges and cycles. Creates a task transactionally. Canonical description agent mentions may be supplied as top-level mentions or metadata.mentions and are stored as metadata.mentions entries containing actor_id and npub after task.read validation. The outbox event includes the canonical task, mentions, author identity, entity row version, stable event ID, and cursor.',
+          description: 'Optional client_request_id (1–240 characters) provides actor/workspace-scoped idempotency: exact replay returns 200, conflicting reuse 409. Relationships in metadata.parent_task_id and metadata.predecessor_task_ids are saved atomically and validated for reference read access, self/duplicate edges and cycles. Creates a task transactionally. Canonical description agent mentions may be supplied as top-level mentions or metadata.mentions and are stored as metadata.mentions entries containing actor_id and npub after task.read validation. The outbox event includes the canonical task, mentions, author identity, entity row version, stable event ID, and cursor. Optional origin_notification_id (UUID): a live notification of the caller in this channel (strict agent inbox). When valid, the 201 response adds work_receipt (AgentWorkReceipt): the bot may read and update only the version it wrote; any other version answers 409 {error,code:work_output_changed,retryable:false} with no content. An origin that is not live answers 403 origin_notification_invalid (or the notification-only ceiling\'s 403).',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
             { name: 'channelId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },

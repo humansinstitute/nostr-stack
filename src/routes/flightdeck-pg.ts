@@ -13,6 +13,11 @@ import { applyLegacyPreferencePatch } from '../services/notification-inbox';
 import { registerNotificationRoutes } from './notifications';
 import { inboxApiEnabled } from '../services/notification-core';
 import { agentNotificationApiEnabled, classifiedInWorkspace, openReadRefusal, openReadRefusalResponse, type OpenReadRefusal } from '../services/agent-notifications';
+import {
+  ORIGIN_INVALID, WORK_OUTPUT_CHANGED, WorkReceiptRefusal, advanceWorkReceipt, activeWorkReceipt, assertReceiptedVersion, liveOrigin, lockReceiptForUpdate, matchingOwnReceipt, mintWorkReceipt,
+  originValidationError, parseOriginNotificationId, receiptAdmission, serializeWorkReceipt, type ReceiptEntityType,
+} from '../services/agent-work-receipts';
+import type { Sql as NotificationSql } from '../services/notification-core';
 import { taskRequestIdentity, taskRequestHash, hasTaskRelationships, validateTaskRelationships } from '../services/task-relationships';
 import { movePersonalPin } from '../services/personal-pin-order';
 import { readPrivatePreference, writePrivatePreference, PrivatePreferenceError } from '../services/private-preferences';
@@ -108,6 +113,7 @@ import {
 import { htmlArtifactDigestMatches, resolveFlightDeckPgFileVersionObject, resolveFlightDeckPgHtmlArtifact } from '../services/flightdeck-pg-html-artifacts';
 import {
   AGENT_INSTRUCTION_SIGNATURE_METADATA_KEY,
+  AGENT_ORIGIN_METADATA_KEY,
   validateFlightDeckPgMessageInstructionSignature,
 } from '../services/flightdeck-pg-message-signatures';
 import {
@@ -975,6 +981,67 @@ function jsonError(
   extra: Record<string, unknown> = {},
 ) {
   return c.json({ error, code, status, identity, ...extra }, status);
+}
+
+/** A work-receipt refusal as the route response: status and minimal body only, never entity content. */
+function workReceiptResponse(c: Context, identity: FlightDeckPgIdentity, error: unknown): Response | null {
+  return error instanceof WorkReceiptRefusal ? c.json({ identity, ...error.body }, error.status) : null;
+}
+
+const receiptSql = (sql: DbClient = getDb()) => sql as unknown as NotificationSql;
+
+/**
+ * Read guard for a request the ceiling admitted through a work receipt: the LOADED version must be the receipted one.
+ * Returns the refusal response, or null when the handler may serve what it loaded.
+ */
+async function receiptReadGuard(c: Context, identity: FlightDeckPgIdentity, entityType: ReceiptEntityType, entityId: string, loaded: { rowVersion?: number; versionId?: string | null }) {
+  const admitted = receiptAdmission(c.req.raw, entityType, entityId);
+  if (!admitted) return null;
+  try {
+    await assertReceiptedVersion(receiptSql(), admitted, loaded);
+    return null;
+  } catch (error) {
+    const refusal = workReceiptResponse(c, identity, error);
+    if (refusal) return refusal;
+    throw error;
+  }
+}
+
+/** Current row_version of a receiptable entity, read inside the caller's transaction (FOR UPDATE when locking). */
+async function receiptEntityRowVersion(sql: DbClient, entityType: ReceiptEntityType, workspaceId: string, entityId: string, lock = false): Promise<number | null> {
+  const rows = entityType === 'doc'
+    ? lock ? await sql<{ row_version: number }[]>`SELECT row_version FROM flightdeck_pg_docs WHERE workspace_id = ${workspaceId} AND id = ${entityId} FOR UPDATE`
+      : await sql<{ row_version: number }[]>`SELECT row_version FROM flightdeck_pg_docs WHERE workspace_id = ${workspaceId} AND id = ${entityId}`
+    : entityType === 'task'
+      ? lock ? await sql<{ row_version: number }[]>`SELECT row_version FROM flightdeck_pg_tasks WHERE workspace_id = ${workspaceId} AND id = ${entityId} FOR UPDATE`
+        : await sql<{ row_version: number }[]>`SELECT row_version FROM flightdeck_pg_tasks WHERE workspace_id = ${workspaceId} AND id = ${entityId}`
+      : entityType === 'file'
+        ? await sql<{ row_version: number }[]>`SELECT row_version FROM flightdeck_pg_files WHERE workspace_id = ${workspaceId} AND id = ${entityId}`
+        : await sql<{ row_version: number }[]>`SELECT row_version FROM flightdeck_pg_audio_notes WHERE workspace_id = ${workspaceId} AND id = ${entityId}`;
+  return rows[0] ? Number(rows[0].row_version) : null;
+}
+
+/**
+ * The receipt an update follows, inside the update transaction: the admitting receipt (strict: current, base and body
+ * must be the receipted version, else 409), or for an unrestricted caller its own receipt when it still matches.
+ */
+async function receiptForUpdate(c: Context, sql: DbClient, input: { workspaceId: string; actorId: string; actorKind: string | null; entityType: ReceiptEntityType; entityId: string },
+  current: { rowVersion: number; baseRowVersion?: number | null; bodySha256Hex?: string | null }) {
+  const admitted = receiptAdmission(c.req.raw, input.entityType, input.entityId);
+  if (admitted) return lockReceiptForUpdate(receiptSql(sql), admitted, current);
+  // Receipts are minted only from agent notifications: the human update path never reads them.
+  if (input.actorKind !== 'agent') return null;
+  return matchingOwnReceipt(receiptSql(sql), { workspaceId: input.workspaceId, actorId: input.actorId, entityType: input.entityType, entityId: input.entityId }, current);
+}
+
+/** Mint the receipt for a just-created entity when the request named an origin (inside the create transaction). */
+async function mintNamedReceipt(sql: DbClient, input: {
+  originNotificationId: string | undefined; workspaceId: string; actorId: string; channelId: string; entityType: ReceiptEntityType; entityId: string;
+  versionId?: string | null; bodySha256Hex?: string | null;
+}) {
+  if (!input.originNotificationId) return null;
+  const rowVersion = await receiptEntityRowVersion(sql, input.entityType, input.workspaceId, input.entityId);
+  return mintWorkReceipt(receiptSql(sql), { ...input, originNotificationId: input.originNotificationId, rowVersion: rowVersion ?? 0 });
 }
 
 function validationError(
@@ -5916,6 +5983,8 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/messages',
   const mentionSource = body.mentions !== undefined ? body.mentions : metadata?.mentions;
   const parsedMentions = parseAgentMentionInputs(mentionSource, body.mentions !== undefined ? 'mentions' : 'metadata.mentions');
   fields.push(...parsedMentions.errors);
+  const originNotificationId = parseOriginNotificationId(body);
+  if (originNotificationId === null) fields.push(originValidationError);
   if (fields.length) return validationError(c, identity, fields);
 
   const decision = await authorizeFlightDeckPgOperation({
@@ -5926,6 +5995,10 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/messages',
     resource: { type: 'channel', channelId },
   });
   if (!decision.allowed) return authorizationError(c, decision, identity, 'channel.write');
+  // A named origin (deliberate self-address) must be this identity's live non-self notification in this exact thread.
+  if (originNotificationId && (createThread || !await liveOrigin(getDb(), {
+    workspaceId: context.workspace.id, actorId: context.actor.id, notificationId: originNotificationId, channelId, threadId: requestedThreadId,
+  }))) return c.json({ identity, ...ORIGIN_INVALID }, 403);
 
   const channel = await resolveFlightDeckPgChannel(context.workspace.id, channelId);
   if (!channel) return jsonError(c, 404, 'channel_not_found', 'Flight Deck PG channel not found', identity);
@@ -5972,14 +6045,17 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/messages',
     workspaceId: context.workspace.id,
     channelId,
     threadId: requestedThreadId,
+    mentions: canonicalMentions,
   });
   if (signatureValidation.errors.length || !signatureValidation.signature) {
     return validationError(c, identity, signatureValidation.errors);
   }
+  const { [AGENT_ORIGIN_METADATA_KEY]: _clientOrigin, ...clientMetadata } = metadata ?? {};
   const messageMetadata = {
-    ...(metadata ?? {}),
+    ...clientMetadata,
     ...(mentionSource !== undefined ? { mentions: canonicalMentions } : {}),
     [AGENT_INSTRUCTION_SIGNATURE_METADATA_KEY]: signatureValidation.signature,
+    ...(originNotificationId ? { [AGENT_ORIGIN_METADATA_KEY]: originNotificationId } : {}),
   };
 
   const clientRequestHash = clientRequestId
@@ -6229,7 +6305,10 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/messages/:messageId', async (
   const effectiveMentionSource = mentionSource === undefined ? previousMentions : mentionSource;
   const parsedMentions = parseAgentMentionInputs(effectiveMentionSource, body.mentions !== undefined ? 'mentions' : 'metadata.mentions');
   fields.push(...parsedMentions.errors);
-  const mergedMetadata = { ...message.metadata, ...(metadata ?? {}) };
+  // The origin is per revision and server-owned: never carried over from an earlier revision or set via metadata.
+  const { [AGENT_ORIGIN_METADATA_KEY]: _previousOrigin, ...mergedMetadata } = { ...message.metadata, ...(metadata ?? {}) };
+  const originNotificationId = parseOriginNotificationId(body);
+  if (originNotificationId === null) fields.push(originValidationError);
   const parsedAttachments = parseFlightDeckPgMessageAttachmentStorageObjectIds(mergedMetadata.attachments);
   fields.push(...parsedAttachments.errors);
   const hasAttachments = parsedAttachments.storageObjectIds.length > 0;
@@ -6244,6 +6323,9 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/messages/:messageId', async (
     resource: { type: 'channel', channelId: message.channel_id },
   });
   if (!decision.allowed) return authorizationError(c, decision, identity, 'channel.write');
+  if (originNotificationId && !await liveOrigin(getDb(), {
+    workspaceId: context.workspace.id, actorId: context.actor.id, notificationId: originNotificationId, channelId: message.channel_id, threadId: message.thread_id,
+  })) return c.json({ identity, ...ORIGIN_INVALID }, 403);
 
   const attachmentValidation = await validateFlightDeckPgMessageAttachmentObjects({
     actorNpub: auth.userNpub,
@@ -6284,6 +6366,7 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/messages/:messageId', async (
     threadId: message.thread_id,
     messageId,
     revision,
+    mentions: canonicalMentions,
   });
   if (signatureValidation.errors.length || !signatureValidation.signature) {
     return validationError(c, identity, signatureValidation.errors);
@@ -6300,6 +6383,7 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/messages/:messageId', async (
     ...mergedMetadata,
     mentions: canonicalMentions,
     [AGENT_INSTRUCTION_SIGNATURE_METADATA_KEY]: signatureValidation.signature,
+    ...(originNotificationId ? { [AGENT_ORIGIN_METADATA_KEY]: originNotificationId } : {}),
   };
 
   const payload = await getDb().begin(async (tx) => {
@@ -6588,6 +6672,8 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/docs', asy
   if (!title) fields.push({ path: 'title', code: 'required', message: 'title must be a non-empty string' });
   if (!storageObjectId) fields.push({ path: 'storage_object_id', code: 'required', message: 'storage_object_id must be a storage object UUID' });
   if (metadata === null) fields.push({ path: 'metadata', code: 'invalid', message: 'metadata must be an object when provided' });
+  const originNotificationId = parseOriginNotificationId(body);
+  if (originNotificationId === null) fields.push(originValidationError);
   if (fields.length) return validationError(c, identity, fields);
 
   const access = await authorizeFlightDeckPgStorageAttach({
@@ -6654,7 +6740,11 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/docs', asy
         entityRowVersion: doc.row_version,
         payload: { doc_id: doc.id, storage_object_id: storageObjectId },
       }, sql);
-      return { doc, link, auditId, outbox };
+      const workReceipt = await mintNamedReceipt(sql, {
+        originNotificationId, workspaceId: context.workspace.id, actorId: context.actor.id, channelId: channel.id, entityType: 'doc', entityId: doc.id,
+        bodySha256Hex: (await documentBodyVersionInfo(storageObjectId)).sha256_hex ?? null,
+      });
+      return { doc, link, auditId, outbox, workReceipt };
     });
 
     return c.json({
@@ -6663,8 +6753,11 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/docs', asy
       storage_link: { id: payload.link.id, storage_object_id: payload.link.storage_object_id },
       audit: { event_id: payload.auditId, operation: 'doc.create', actor_npub: auth.userNpub },
       outbox: payload.outbox,
+      ...(payload.workReceipt ? { work_receipt: payload.workReceipt } : {}),
     }, 201);
   } catch (error) {
+    const refusal = workReceiptResponse(c, identity, error);
+    if (refusal) return refusal;
     const sqlCode = (error as { code?: string }).code;
     if (sqlCode === '23505') {
       return jsonError(c, 409, 'doc_storage_object_conflict', 'Storage object is already attached to an active Flight Deck PG doc', identity);
@@ -6740,6 +6833,8 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/edit-leases/acquire', async (c
       resource: { type: 'channel', channelId: task.channel_id },
     });
     if (!decision.allowed) return authorizationError(c, decision, identity, 'task.update');
+    const receiptRefusal = await receiptReadGuard(c, identity, 'task', task.id, { rowVersion: task.row_version });
+    if (receiptRefusal) return receiptRefusal;
   } else {
     const doc = await resolveFlightDeckPgDoc(context.workspace.id, entityId);
     if (!doc) return jsonError(c, 404, 'doc_not_found', 'Flight Deck PG doc not found', identity);
@@ -6751,6 +6846,10 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/edit-leases/acquire', async (c
       channelId: doc.channel_id,
     });
     if (!access.allowed) return storageAuthorizationError(c, access, identity, 'doc.write or channel.write');
+    // Through a receipt: only at the receipted version, and never by taking over another editor's lease.
+    if (receiptAdmission(c.req.raw, 'doc', doc.id) && body.takeover === true) return c.json({ identity, ...ORIGIN_INVALID }, 403);
+    const receiptRefusal = await receiptReadGuard(c, identity, 'doc', doc.id, { rowVersion: doc.row_version });
+    if (receiptRefusal) return receiptRefusal;
   }
 
   const acquire = await getDb().begin(async (tx) => acquireFlightDeckPgEditLease({
@@ -6779,6 +6878,11 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/edit-leases/acquire', async (c
       } : undefined);
   }
 
+  // The response carries the current document: through a receipt it must still be the receipted version.
+  if ('doc' in acquire) {
+    const receiptRefusal = await receiptReadGuard(c, identity, 'doc', entityId, { rowVersion: acquire.doc.row_version });
+    if (receiptRefusal) return receiptRefusal;
+  }
   return c.json({ identity, lease: acquire.lease,
     ...('document_edit_protocol' in acquire ? { document_edit_protocol: acquire.document_edit_protocol } : {}),
     ...('doc' in acquire ? { doc: serializeFlightDeckPgDoc(acquire.doc), canonical_version: serializeFlightDeckPgDocVersionIdentity(acquire.canonical_version), taken_over: acquire.taken_over } : {}),
@@ -6868,6 +6972,8 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/docs/:docId', async (c) => {
   if (readable.link.entity_type !== 'doc' || readable.link.entity_id !== doc.id || readable.link.channel_id !== doc.channel_id) {
     return jsonError(c, 404, 'doc_body_not_found', 'Flight Deck PG doc body storage link was not found', identity);
   }
+  const receiptRefusal = await receiptReadGuard(c, identity, 'doc', doc.id, { rowVersion: doc.row_version, bodySha256Hex: readable.storageObject.sha256_hex ?? null });
+  if (receiptRefusal) return receiptRefusal;
 
   return c.json({
     identity,
@@ -7224,10 +7330,21 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/docs/:docId', async (c) => {
     {path: !rowVersion ? 'row_version' : 'lease_token',code:'required',message:'row_version and lease_token are required for PG edit saves'},
   ]);
 
+  const admittedReceipt = receiptAdmission(c.req.raw, 'doc', docId);
+  // A receipt covers the bot's own output where it was written: no move to another channel through it.
+  if (admittedReceipt && targetChannel) return c.json({ identity, ...ORIGIN_INVALID }, 403);
   try {
     const payload = await getDb().begin(async (tx) => {
       const sql = asDbClient(tx);
       if (!await lockDocumentEditAuthority(context.workspace.id, docId, sql)) return {kind:'not_found' as const};
+      // Through a receipt the save must be based on, and replace, exactly the version the bot wrote; otherwise a
+      // recovery or stale-base response could disclose a human revision.
+      const [locked] = await sql<{ row_version: number; storage_object_id: string | null }[]>`
+        SELECT row_version, storage_object_id FROM flightdeck_pg_docs WHERE workspace_id = ${context.workspace.id} AND id = ${docId}`;
+      const receipt = locked ? await receiptForUpdate(c, sql, { workspaceId: context.workspace.id, actorId: context.actor.id, actorKind: context.actor.kind, entityType: 'doc', entityId: docId }, {
+        rowVersion: Number(locked.row_version), baseRowVersion: admittedReceipt ? rowVersion ?? -1 : rowVersion,
+        bodySha256Hex: (await documentBodyVersionInfo(locked.storage_object_id)).sha256_hex ?? null,
+      }) : null;
       if (!archiveOnly && !bodySave) {
         const lease = await validateFlightDeckPgEditLease({workspaceId:context.workspace.id,entityType:'document',entityId:docId,actorId:context.actor.id,leaseToken},sql);
         if (!lease.ok) return {kind:'lease_error' as const,reason:lease.reason};
@@ -7253,6 +7370,7 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/docs/:docId', async (c) => {
           }, sql)
         : null;
       if (storageObjectId && !saveDecision) return { kind: 'not_found' as const };
+      if (receipt && saveDecision?.outcome === 'recovery') throw new WorkReceiptRefusal(409, WORK_OUTPUT_CHANGED);
       if (saveDecision?.outcome === 'recovery') {
         const linked = await ensureFlightDeckPgDocStorageLink({
           workspaceId: context.workspace.id,
@@ -7399,7 +7517,10 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/docs/:docId', async (c) => {
         body_sha256_hex: currentBodyVersion.sha256_hex,
         size_bytes: currentBodyVersion.size_bytes,
       };
-      return { kind: 'canonical' as const, doc, link, auditId, outbox, mentionOutbox, viewStateOutbox, canonicalVersion };
+      const workReceipt = receipt ? await advanceWorkReceipt(receiptSql(sql), receipt, {
+        rowVersion: await receiptEntityRowVersion(sql, 'doc', context.workspace.id, docId) ?? doc.row_version, bodySha256Hex: currentBodyVersion.sha256_hex ?? null,
+      }) : null;
+      return { kind: 'canonical' as const, doc, link, auditId, outbox, mentionOutbox, viewStateOutbox, canonicalVersion, workReceipt };
     });
     if (!payload || payload.kind === 'not_found') return jsonError(c, 409, 'stale_row_version', 'Doc row_version is stale', identity);
     if (payload.kind === 'lease_error') return jsonError(c, 409, payload.reason, 'A valid PG edit lease is required to advance the canonical document', identity);
@@ -7427,8 +7548,11 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/docs/:docId', async (c) => {
       outbox: payload.outbox,
       mention_outbox: payload.mentionOutbox,
       ...(payload.viewStateOutbox ? { view_state_outbox: payload.viewStateOutbox } : {}),
+      ...(payload.workReceipt ? { work_receipt: payload.workReceipt } : {}),
     });
   } catch (error) {
+    const refusal = workReceiptResponse(c, identity, error);
+    if (refusal) return refusal;
     const message = error instanceof Error ? error.message : 'Flight Deck PG doc could not be updated';
     return jsonError(c, 400, 'validation_error', message, identity);
   }
@@ -7577,6 +7701,8 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/docs/:docId/body', async (c) =>
   if (readable.link.entity_type !== 'doc' || readable.link.entity_id !== doc.id || readable.link.channel_id !== doc.channel_id) {
     return jsonError(c, 404, 'doc_body_not_found', 'Flight Deck PG doc body storage link was not found', identity);
   }
+  const receiptRefusal = await receiptReadGuard(c, identity, 'doc', doc.id, { rowVersion: doc.row_version, bodySha256Hex: readable.storageObject.sha256_hex ?? null });
+  if (receiptRefusal) return receiptRefusal;
   if (!readable.storageObject.completed_at) {
     return jsonError(c, 409, 'doc_body_upload_incomplete', 'Flight Deck PG doc body storage object upload is not completed', identity, {
       doc: serializeFlightDeckPgDoc(doc, {
@@ -7672,6 +7798,14 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/docs/:docId/comments', async (
     channelId: doc.channel_id,
   });
   if (!access.allowed) return storageAuthorizationError(c, access, identity, 'doc.write or channel.write');
+  // Through a receipt: append-only top-level comments on the unchanged receipted doc (never a reply to another comment).
+  if (receiptAdmission(c.req.raw, 'doc', doc.id)) {
+    if (parentCommentId) return c.json({ identity, ...ORIGIN_INVALID }, 403);
+    const docReceiptRefusal = await receiptReadGuard(c, identity, 'doc', doc.id, {
+      rowVersion: doc.row_version, bodySha256Hex: (await documentBodyVersionInfo(doc.storage_object_id)).sha256_hex ?? null,
+    });
+    if (docReceiptRefusal) return docReceiptRefusal;
+  }
 
   const canonicalMentions = await canonicalCommentMentions({
     permission: 'doc.read',
@@ -8299,6 +8433,8 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/files', as
   const versionSummary = fileVersionSummaryField(body, fields);
   const rawLineage = metadata?.text_attachment_lineage;
   const lineage = rawLineage === undefined ? null : parseTextAttachmentLineage(rawLineage, fields);
+  const originNotificationId = parseOriginNotificationId(body);
+  if (originNotificationId === null) fields.push(originValidationError);
   if (fields.length) return validationError(c, identity, fields);
   const storedMetadata = lineage && metadata ? { ...metadata, text_attachment_lineage: lineage.stored } : metadata;
 
@@ -8391,7 +8527,13 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/files', as
         entityRowVersion: file.row_version,
         payload: { file_id: file.id, folder_id: file.folder_id, storage_object_id: storageObjectId },
       }, sql);
-      return { file, link, auditId, outbox };
+      // Receipts cover only a file THIS request created (never an adopted lineage file): its exact first version.
+      const workReceipt = await mintNamedReceipt(sql, {
+        originNotificationId, workspaceId: context.workspace.id, actorId: context.actor.id, channelId: channel.id, entityType: 'file', entityId: file.id,
+        versionId: (await sql<{ current_version_id: string | null }[]>`SELECT current_version_id FROM flightdeck_pg_files WHERE workspace_id = ${context.workspace.id} AND id = ${file.id}`)[0]?.current_version_id ?? null,
+        bodySha256Hex: (await getStorageObject(storageObjectId))?.sha256_hex ?? null,
+      });
+      return { file, link, auditId, outbox, workReceipt };
     });
 
     if ('lineageCanonical' in payload) {
@@ -8431,8 +8573,11 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/files', as
       storage_link: { id: payload.link.id, storage_object_id: payload.link.storage_object_id },
       audit: { event_id: payload.auditId, operation: 'file.create', actor_npub: auth.userNpub },
       outbox: payload.outbox,
+      ...(payload.workReceipt ? { work_receipt: payload.workReceipt } : {}),
     }, 201);
   } catch (error) {
+    const refusal = workReceiptResponse(c, identity, error);
+    if (refusal) return refusal;
     const sqlCode = (error as { code?: string }).code;
     if (sqlCode === '23505') {
       return jsonError(c, 409, 'file_storage_object_conflict', 'Storage object is already attached to an active Flight Deck PG file', identity);
@@ -8467,6 +8612,8 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/files/:fileId', async (c) => {
   if (readable.link.entity_type !== 'file' || readable.link.entity_id !== file.id || readable.link.channel_id !== file.channel_id) {
     return jsonError(c, 404, 'file_object_not_found', 'Flight Deck PG file storage link was not found', identity);
   }
+  const receiptRefusal = await receiptReadGuard(c, identity, 'file', file.id, { rowVersion: file.row_version, bodySha256Hex: readable.storageObject.sha256_hex ?? null });
+  if (receiptRefusal) return receiptRefusal;
 
   return c.json({
     identity,
@@ -8937,6 +9084,9 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/files/:fileId/versions/:version
   if (!access.allowed) return notFound();
   const resolved = await resolveFlightDeckPgFileVersionObject({ workspaceId: context.workspace.id, fileId: file.id, versionId });
   if (!resolved) return notFound();
+  // Through a receipt only the receipted version's (immutable) bytes are served.
+  const receiptRefusal = await receiptReadGuard(c, identity, 'file', file.id, { versionId: resolved.version.id });
+  if (receiptRefusal) return receiptRefusal;
   const content = await getStorageObjectContent(resolved.object.id);
   const digest = String(resolved.object.sha256_hex || '').toLowerCase();
   if (!content || !htmlArtifactDigestMatches(content.bytes, digest)) {
@@ -8984,6 +9134,8 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/files/:fileId/object', async (c
   if (readable.link.entity_type !== 'file' || readable.link.entity_id !== file.id || readable.link.channel_id !== file.channel_id) {
     return jsonError(c, 404, 'file_object_not_found', 'Flight Deck PG file storage link was not found', identity);
   }
+  const receiptRefusal = await receiptReadGuard(c, identity, 'file', file.id, { rowVersion: file.row_version, bodySha256Hex: readable.storageObject.sha256_hex ?? null });
+  if (receiptRefusal) return receiptRefusal;
   if (!readable.storageObject.completed_at) {
     return jsonError(c, 409, 'file_object_upload_incomplete', 'Flight Deck PG file storage object upload is not completed', identity, {
       file: serializeFlightDeckPgFile(file, {
@@ -9117,6 +9269,8 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/audio-note
   if (body.transcript_preview !== undefined && typeof body.transcript_preview !== 'string') fields.push({ path: 'transcript_preview', code: 'invalid', message: 'transcript_preview must be a string when provided' });
   if (metadata === null) fields.push({ path: 'metadata', code: 'invalid', message: 'metadata must be an object when provided' });
   if (!['active', 'archived'].includes(recordState)) fields.push({ path: 'record_state', code: 'invalid', message: 'record_state must be active or archived' });
+  const originNotificationId = parseOriginNotificationId(body);
+  if (originNotificationId === null) fields.push(originValidationError);
   if (fields.length) return validationError(c, identity, fields);
 
   const access = await authorizeFlightDeckPgStorageAttach({
@@ -9204,7 +9358,11 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/audio-note
         entityRowVersion: audioNote.row_version,
         payload: { audio_note_id: audioNote.id, storage_object_id: storageObjectId, target_type: targetType, target_id: targetId },
       }, sql);
-      return { audioNote, link, auditId, outbox };
+      const workReceipt = await mintNamedReceipt(sql, {
+        originNotificationId, workspaceId: context.workspace.id, actorId: context.actor.id, channelId: audioNote.channel_id, entityType: 'audio_note', entityId: audioNote.id,
+        bodySha256Hex: (await getStorageObject(storageObjectId))?.sha256_hex ?? null,
+      });
+      return { audioNote, link, auditId, outbox, workReceipt };
     });
 
     return c.json({
@@ -9213,8 +9371,11 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/audio-note
       storage_link: { id: payload.link.id, storage_object_id: payload.link.storage_object_id },
       audit: { event_id: payload.auditId, operation: 'audio_note.create', actor_npub: auth.userNpub },
       outbox: payload.outbox,
+      ...(payload.workReceipt ? { work_receipt: payload.workReceipt } : {}),
     }, 201);
   } catch (error) {
+    const refusal = workReceiptResponse(c, identity, error);
+    if (refusal) return refusal;
     const sqlCode = (error as { code?: string }).code;
     if (sqlCode === '23505') {
       return jsonError(c, 409, 'audio_note_storage_object_conflict', 'Storage object is already attached to an active Flight Deck PG audio note', identity);
@@ -9249,6 +9410,8 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/audio-notes/:audioNoteId', asyn
   if (readable.link.entity_type !== 'audio_note' || readable.link.entity_id !== audioNote.id || readable.link.channel_id !== audioNote.channel_id) {
     return jsonError(c, 404, 'audio_note_media_not_found', 'Flight Deck PG audio note media storage link was not found', identity);
   }
+  const receiptRefusal = await receiptReadGuard(c, identity, 'audio_note', audioNote.id, { rowVersion: audioNote.row_version, bodySha256Hex: readable.storageObject.sha256_hex ?? null });
+  if (receiptRefusal) return receiptRefusal;
 
   return c.json({
     identity,
@@ -9283,6 +9446,8 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/audio-notes/:audioNoteId/media'
   if (readable.link.entity_type !== 'audio_note' || readable.link.entity_id !== audioNote.id || readable.link.channel_id !== audioNote.channel_id) {
     return jsonError(c, 404, 'audio_note_media_not_found', 'Flight Deck PG audio note media storage link was not found', identity);
   }
+  const receiptRefusal = await receiptReadGuard(c, identity, 'audio_note', audioNote.id, { rowVersion: audioNote.row_version, bodySha256Hex: readable.storageObject.sha256_hex ?? null });
+  if (receiptRefusal) return receiptRefusal;
   if (!readable.storageObject.completed_at) {
     return jsonError(c, 409, 'audio_note_media_upload_incomplete', 'Flight Deck PG audio note media storage object upload is not completed', identity, {
       audio_note: serializeFlightDeckPgAudioNote(audioNote, {
@@ -12002,6 +12167,8 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/tasks', as
   if (!taskPriorities.has(priority)) fields.push({ path: 'priority', code: 'invalid', message: 'priority is not a valid task priority' });
   if (metadata === null) fields.push({ path: 'metadata', code: 'invalid', message: 'metadata must be an object when provided' });
   fields.push(...await taskAssigneeErrors(body, taskMetadata, context.workspace.id));
+  const originNotificationId = parseOriginNotificationId(body);
+  if (originNotificationId === null) fields.push(originValidationError);
   if (fields.length) return validationError(c, identity, fields);
 
   const decision = await authorizeFlightDeckPgOperation({
@@ -12021,7 +12188,8 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/tasks', as
   if (canonicalMentions.errors.length) return validationError(c, identity, canonicalMentions.errors);
   const canonicalTaskMetadata: Record<string, unknown> = { ...(taskMetadata ?? {}), ...(mentionSource !== undefined ? { mentions: canonicalMentions.mentions } : {}) };
 
-  const payload = await getDb().begin(async (tx) => {
+  let payload;
+  try { payload = await getDb().begin(async (tx) => {
     const sql = asDbClient(tx);
     await sql`SELECT pg_advisory_xact_lock(hashtextextended(${context.workspace.id + ':task-relationships'},0))`;
     const [prior] = await sql<FlightDeckPgTask[]>`SELECT * FROM flightdeck_pg_tasks WHERE workspace_id=${context.workspace.id} AND id=${creationId}`;
@@ -12068,21 +12236,34 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/tasks', as
       entityRowVersion: task.row_version,
       payload: { task_id: task.id, task: serializeFlightDeckPgTask(task), mentions: canonicalMentions.mentions, author: { actor_id: context.actor.id, actor_npub: auth.userNpub, signer_npub: auth.signerNpub } },
     }, sql);
-    return { task, auditId, outbox };
-  });
+    const workReceipt = await mintNamedReceipt(sql, {
+      originNotificationId, workspaceId: context.workspace.id, actorId: context.actor.id, channelId: channel.id, entityType: 'task', entityId: task.id,
+    });
+    return { task, auditId, outbox, workReceipt };
+  }); } catch (error) {
+    const refusal = workReceiptResponse(c, identity, error);
+    if (refusal) return refusal;
+    throw error;
+  }
 
   if (payload.invalid) return validationError(c, identity, payload.invalid);
   if ('conflict' in payload) return jsonError(c,409,'idempotency_conflict','client_request_id was reused with different input',identity);
   if (payload.replay) {
     const access = await authorizeFlightDeckPgOperation({actorNpub:auth.userNpub,appNpub:context.workspace.app_npub,workspaceId:context.workspace.id,permission:'task.read',resource:{type:'channel',channelId:payload.replay.channel_id}});
     if (!access.allowed || payload.replay.deleted_at) return jsonError(c,404,'task_unavailable','Task unavailable',identity);
-    return c.json({identity,task:serializeFlightDeckPgTask((await withFlightDeckPgTaskAssignments(context.workspace.id,[payload.replay]))[0]),replayed:true},200);
+    // An idempotent replay returns the receipt minted by the original create (same actor), if any.
+    const replayReceipt = originNotificationId
+      ? await activeWorkReceipt(receiptSql(), { workspaceId: context.workspace.id, actorId: context.actor.id, entityType: 'task', entityId: payload.replay.id })
+      : null;
+    return c.json({identity,task:serializeFlightDeckPgTask((await withFlightDeckPgTaskAssignments(context.workspace.id,[payload.replay]))[0]),replayed:true,
+      ...(replayReceipt ? { work_receipt: serializeWorkReceipt(replayReceipt) } : {})},200);
   }
   return c.json({
     identity,
     task: serializeFlightDeckPgTask(payload.task),
     audit: { event_id: payload.auditId, operation: 'task.create', actor_npub: auth.userNpub },
     outbox: payload.outbox,
+    ...(payload.workReceipt ? { work_receipt: payload.workReceipt } : {}),
   }, 201);
 });
 
@@ -12162,6 +12343,10 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/tasks/:taskId', async (c) => {
     resource: { type: 'channel', channelId: task.channel_id },
   });
   if (!decision.allowed) return authorizationError(c, decision, identity, 'task.read');
+  const receiptRefusal = await receiptReadGuard(c, identity, 'task', task.id, { rowVersion: task.row_version });
+  if (receiptRefusal) return receiptRefusal;
+  // Through a receipt only the receipted row itself: assignment rows can change without a task version change.
+  if (receiptAdmission(c.req.raw, 'task', task.id)) return c.json({ identity, task: serializeFlightDeckPgTask(task) });
 
   const [taskWithAssignments] = await withFlightDeckPgTaskAssignments(context.workspace.id, [task]);
   return c.json({ identity, task: serializeFlightDeckPgTask(taskWithAssignments) });
@@ -12354,9 +12539,15 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/tasks/:taskId/state', async (c
     resource: { type: 'channel', channelId: existing.channel_id },
   });
   if (!decision.allowed) return authorizationError(c, decision, identity, 'task.update');
+  const admittedReceipt = receiptAdmission(c.req.raw, 'task', taskId);
 
-  const payload = await getDb().begin(async (tx) => {
+  let payload;
+  try { payload = await getDb().begin(async (tx) => {
     const sql = asDbClient(tx);
+    // Through a receipt: only the version the bot wrote may be advanced (concurrent updates serialize on the receipt).
+    const lockedVersion = await receiptEntityRowVersion(sql, 'task', context.workspace.id, taskId, true);
+    const receipt = lockedVersion === null ? null
+      : await receiptForUpdate(c, sql, { workspaceId: context.workspace.id, actorId: context.actor.id, actorKind: context.actor.kind, entityType: 'task', entityId: taskId }, { rowVersion: lockedVersion, baseRowVersion: rowVersion });
     const task = await updateFlightDeckPgTaskState({
       workspaceId: context.workspace.id,
       taskId,
@@ -12388,8 +12579,13 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/tasks/:taskId/state', async (c
       entityRowVersion: task.row_version,
       payload: { task_id: task.id, state, activity_version: Number(task.activity_version) },
     }, sql);
-    return { task, auditId, outbox, viewStateOutbox };
-  });
+    const workReceipt = receipt ? await advanceWorkReceipt(receiptSql(sql), receipt, { rowVersion: await receiptEntityRowVersion(sql, 'task', context.workspace.id, taskId) ?? task.row_version }) : null;
+    return { task, auditId, outbox, viewStateOutbox, workReceipt };
+  }); } catch (error) {
+    const refusal = workReceiptResponse(c, identity, error);
+    if (refusal) return refusal;
+    throw error;
+  }
   if (!payload) return jsonError(c, 409, 'stale_row_version', 'Task row_version is stale', identity);
 
   return c.json({
@@ -12398,6 +12594,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/tasks/:taskId/state', async (c
     audit: { event_id: payload.auditId, operation: 'task.state', actor_npub: auth.userNpub },
     outbox: payload.outbox,
     view_state_outbox: payload.viewStateOutbox,
+    ...(payload.workReceipt ? { work_receipt: payload.workReceipt } : {}),
   });
 });
 
@@ -12528,6 +12725,9 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/tasks/:taskId/comments', async
     resource: { type: 'channel', channelId: task.channel_id },
   });
   if (!decision.allowed) return authorizationError(c, decision, identity, 'task.comment');
+  // Through a receipt: append-only, on the unchanged receipted task; the response carries only the new comment.
+  const taskReceiptRefusal = await receiptReadGuard(c, identity, 'task', task.id, { rowVersion: task.row_version });
+  if (taskReceiptRefusal) return taskReceiptRefusal;
 
   const mentionSource = body.mentions !== undefined ? body.mentions : metadata?.mentions;
   const canonicalMentions = await canonicalCommentMentions({ permission: 'task.read', value: mentionSource, path: body.mentions !== undefined ? 'mentions' : 'metadata.mentions', workspaceId: context.workspace.id, appNpub: context.workspace.app_npub, channelId: task.channel_id });

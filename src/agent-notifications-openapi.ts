@@ -31,12 +31,12 @@ export const agentNotificationSchemas = {
     properties: { id: uuid, seq: { type: 'integer' }, state: { const: 'revoked' } },
   },
   AgentNotificationEnvelope: {
-    type: 'object', additionalProperties: false, required: ['id', 'seq', 'kind', 'reason', 'state', 'source', 'author_npub', 'occurred_at'],
+    type: 'object', additionalProperties: false, required: ['id', 'seq', 'kind', 'reason', 'state', 'source', 'author_npub', 'occurred_at', 'origin_notification_id'],
     description: 'Content-free envelope. Never carries bodies, titles, prompts, attachment names, URLs or other recipients.',
     properties: {
       id: uuid, seq: { type: 'integer', description: 'Recipient-local, commit-ordered sequence' },
       kind: { enum: ['chat_mention', 'direct_message', 'agent_direct_recipient', 'task_assigned', 'task_mention', 'task_comment_mention', 'document_mention', 'document_comment_mention', 'invocation', 'document_review'] },
-      reason: { type: 'string' },
+      reason: { type: 'string', description: "Addressing rule, e.g. canonical_mention. 'self_mention' (kind chat_mention) is a verified deliberate self-address: it binds no write and its context stops at its origin" },
       state: { const: 'active' },
       source: {
         type: 'object', additionalProperties: false, required: ['type', 'id', 'version', 'channel_id', 'thread_id', 'task_id', 'doc_id'],
@@ -46,6 +46,16 @@ export const agentNotificationSchemas = {
         },
       },
       author_npub: { type: ['string', 'null'] }, occurred_at: { type: 'string', format: 'date-time' },
+      origin_notification_id: { ...uuid, nullable: true, description: "Non-null only for reason 'self_mention': the live non-self notification it depends on" },
+    },
+  },
+  AgentWorkReceipt: {
+    type: 'object', additionalProperties: false,
+    required: ['entity_type', 'entity_id', 'receipt_row_version', 'origin_notification_id', 'body_sha256_hex', 'version_id'],
+    description: 'Returned as work_receipt by a docs/tasks/files/audio-notes create that named a live origin_notification_id. Grants the bot only the version it wrote; any other version answers 409 work_output_changed with no content.',
+    properties: {
+      entity_type: { enum: ['doc', 'task', 'file', 'audio_note'] }, entity_id: uuid, receipt_row_version: { type: 'integer' }, origin_notification_id: uuid,
+      body_sha256_hex: { type: ['string', 'null'] }, version_id: { ...uuid, nullable: true, description: 'Files: the exact receipted version' },
     },
   },
   AgentNotificationSubscription: {

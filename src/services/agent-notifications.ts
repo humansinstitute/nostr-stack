@@ -7,6 +7,7 @@ import { resolveWsKeyNpub } from './user-workspace-keys';
 import { normalizeFlightDeckPgChannelMetadata } from './flightdeck-pg-agent-direct';
 import { flightDeckPgCanonicalDocVersionId, listEffectiveFlightDeckPgThreadMessages, serializeFlightDeckPgDocVersionIdentity } from './flightdeck-pg-api';
 import { getStorageObjectContent } from './storage';
+import { activeWorkReceipt, liveOrigin, parseOriginNotificationId, rememberReceiptAdmission, type ReceiptEntityType } from './agent-work-receipts';
 
 /**
  * Strict agent notification inbox (contract: docs/contract/agent-notifications-v1.md).
@@ -277,7 +278,7 @@ async function targetWorkspaces(sql: Sql, request: Request, path: string, body: 
 }
 
 /** Notification-bound writes for a classified agent. Anything else is refused before any handler runs. */
-async function bindingAllows(sql: Sql, actorId: string, workspaceId: string, method: string, path: string, body: () => Promise<any>): Promise<boolean> {
+async function bindingAllows(sql: Sql, request: Request, actorId: string, workspaceId: string, method: string, path: string, body: () => Promise<any>): Promise<boolean> {
   const rest = path.slice(`/api/v4/flightdeck-pg/workspaces/${workspaceId}`.length);
   if (/^\/agent-notifications(\/|$)/.test(rest)) return true; // routes self-enforce strict recipient auth
   const bound = async (column: 'thread' | 'task_id' | 'doc_id' | 'any', value: string | null, channelId?: string) => {
@@ -286,6 +287,7 @@ async function bindingAllows(sql: Sql, actorId: string, workspaceId: string, met
         SELECT 1 FROM flightdeck_pg_agent_notifications n
         WHERE n.workspace_id = ${workspaceId} AND n.recipient_actor_id = ${actorId}
           AND ${ACTIVE_FLOOR}
+          AND n.reason <> 'self_mention'
           AND flightdeck_pg_record_access(n.workspace_id, n.recipient_actor_id) @> to_jsonb(n.acl_key)
           AND flightdeck_pg_agent_notification_relation(n.id) = 'ok'
           AND CASE ${column}
@@ -304,22 +306,47 @@ async function bindingAllows(sql: Sql, actorId: string, workspaceId: string, met
     const [row] = await sql<{ ok: boolean }[]>`
       SELECT EXISTS (SELECT 1 FROM flightdeck_pg_agent_notifications n WHERE n.workspace_id = ${workspaceId} AND n.recipient_actor_id = ${actorId}
         AND ${ACTIVE_FLOOR}
+        AND n.reason <> 'self_mention'
         AND (${channelId}::uuid IS NULL OR n.channel_id = ${channelId}::uuid)
         AND flightdeck_pg_record_access(n.workspace_id, n.recipient_actor_id) @> to_jsonb(n.acl_key)
         AND flightdeck_pg_agent_notification_relation(n.id) = 'ok') AS ok`;
     return Boolean(row?.ok);
   };
   const id = (value: unknown) => (typeof value === 'string' && isUuid(value) ? value : null);
+  // A receipt admits only the receipted entity, and only while its origin is live; the handler then version-guards it.
+  const receipted = async (entityType: ReceiptEntityType, entityId: string) => {
+    const receipt = await activeWorkReceipt(sql, { workspaceId, actorId, entityType, entityId });
+    if (!receipt) return false;
+    rememberReceiptAdmission(request, receipt);
+    return true;
+  };
+  // A named origin must itself be live at the written location (absent: no requirement; malformed: refused).
+  const originAt = async (b: any, channelId: string, threadId?: string | null) => {
+    const origin = parseOriginNotificationId(b);
+    if (origin === undefined) return true;
+    return origin !== null && liveOrigin(sql, { workspaceId, actorId, notificationId: origin, channelId, ...(threadId !== undefined ? { threadId } : {}) });
+  };
   let m: RegExpExecArray | null;
   if (method === 'POST' && (m = new RegExp(`^/channels/${UUID_SEG}/messages$`).exec(rest))) {
     const b = await body();
     if (!b || b.create_thread) return false;
     const threadId = b.thread_id == null ? null : id(b.thread_id);
     if (b.thread_id != null && !threadId) return false;
-    return bound('thread', threadId, m[1]!);
+    return await bound('thread', threadId, m[1]!) && await originAt(b, m[1]!, threadId);
   }
-  if (method === 'POST' && (m = new RegExp(`^/tasks/${UUID_SEG}/(comments|state)$`).exec(rest))) return bound('task_id', m[1]!);
-  if (method === 'POST' && (m = new RegExp(`^/docs/${UUID_SEG}/comments$`).exec(rest))) return bound('doc_id', m[1]!);
+  // Comments through a receipt are append-only own output; the handler requires the receipted version (no reads).
+  if (method === 'POST' && (m = new RegExp(`^/tasks/${UUID_SEG}/comments$`).exec(rest))) return await bound('task_id', m[1]!) || receipted('task', m[1]!);
+  if (method === 'POST' && (m = new RegExp(`^/tasks/${UUID_SEG}/state$`).exec(rest))) return await bound('task_id', m[1]!) || receipted('task', m[1]!);
+  if (method === 'POST' && (m = new RegExp(`^/docs/${UUID_SEG}/comments$`).exec(rest))) {
+    if (await bound('doc_id', m[1]!)) return true;
+    const b = await body();
+    return b?.parent_comment_id == null && receipted('doc', m[1]!);
+  }
+  // Receipted reads: the bot's own work output at the version it wrote (comments are never receipted).
+  if (method === 'GET' && (m = new RegExp(`^/docs/${UUID_SEG}(?:/body)?$`).exec(rest))) return receipted('doc', m[1]!);
+  if (method === 'GET' && (m = new RegExp(`^/tasks/${UUID_SEG}$`).exec(rest))) return receipted('task', m[1]!);
+  if (method === 'GET' && (m = new RegExp(`^/files/${UUID_SEG}(?:/object|/versions/${UUID_SEG}/object)?$`).exec(rest))) return receipted('file', m[1]!);
+  if (method === 'GET' && (m = new RegExp(`^/audio-notes/${UUID_SEG}(?:/media)?$`).exec(rest))) return receipted('audio_note', m[1]!);
   if (method === 'PUT' && new RegExp(`^/agent-activities/${UUID_SEG}$`).test(rest)) {
     const b = await body();
     const channelId = id(b?.channel_id);
@@ -333,25 +360,31 @@ async function bindingAllows(sql: Sql, actorId: string, workspaceId: string, met
     return target ? bound('any', target) : false;
   }
   // Document/task work: body edits under an edit lease on the notified record only.
-  if (method === 'PATCH' && (m = new RegExp(`^/docs/${UUID_SEG}$`).exec(rest))) return bound('doc_id', m[1]!);
+  if (method === 'PATCH' && (m = new RegExp(`^/docs/${UUID_SEG}$`).exec(rest))) return await bound('doc_id', m[1]!) || receipted('doc', m[1]!);
   if (method === 'POST' && rest === '/edit-leases/acquire') {
     const b = await body();
     const entity = id(b?.entity_id);
     const type = String(b?.entity_type ?? '').toLowerCase();
     if (!entity) return false;
-    if (type === 'doc' || type === 'document') return bound('doc_id', entity);
-    if (type === 'task') return bound('task_id', entity);
+    if (type === 'doc' || type === 'document') return await bound('doc_id', entity) || receipted('doc', entity);
+    if (type === 'task') return await bound('task_id', entity) || receipted('task', entity);
     return false;
   }
   if (method === 'POST' && (m = new RegExp(`^/edit-leases/${UUID_SEG}/(renew|release)$`).exec(rest))) {
     const [lease] = await sql<{ entity_type: string; entity_id: string }[]>`
       SELECT entity_type, entity_id FROM flightdeck_pg_edit_leases WHERE workspace_id = ${workspaceId} AND id = ${m[1]!} AND holder_actor_id = ${actorId}`;
     if (!lease) return false;
-    return lease.entity_type === 'task' ? bound('task_id', lease.entity_id) : bound('doc_id', lease.entity_id);
+    return lease.entity_type === 'task'
+      ? await bound('task_id', lease.entity_id) || receipted('task', lease.entity_id)
+      : await bound('doc_id', lease.entity_id) || receipted('doc', lease.entity_id);
   }
   // Requested work products (documents, tasks, files, audio) may be created only in a channel where the bot holds a
   // live notification (current access and canonical relationship). The created record is the bot's own output.
-  if (method === 'POST' && (m = new RegExp(`^/channels/${UUID_SEG}/(docs|tasks|files|audio-notes)$`).exec(rest))) return liveIn(m[1]!);
+  // With an explicit origin (minting a receipt) that exact origin must be live in this channel.
+  if (method === 'POST' && (m = new RegExp(`^/channels/${UUID_SEG}/(docs|tasks|files|audio-notes)$`).exec(rest))) {
+    const b = await body();
+    return parseOriginNotificationId(b) === undefined ? liveIn(m[1]!) : originAt(b, m[1]!);
+  }
   // Uploads (attachments, file bytes, document bodies) only while the bot holds a live notification in this workspace;
   // the bytes become visible only by linking them to a bound write above or to a bound reply.
   if (method === 'POST' && rest === '/storage/prepare') return liveIn(null);
@@ -430,7 +463,7 @@ async function ceilingDecision(request: Request, profile: CeilingProfile | null,
   const classifiedTargets = targets.filter((ws) => profile!.workspaces.has(ws));
   if (!classifiedTargets.length) return null; // only workspaces where this identity is unrestricted
   if (classifiedTargets.length === 1 && FD_WS.exec(path)?.[1]?.toLowerCase() === classifiedTargets[0]
-    && await bindingAllows(sql, profile.actorId, classifiedTargets[0]!, method, path, body)) return null;
+    && await bindingAllows(sql, request, profile.actorId, classifiedTargets[0]!, method, path, body)) return null;
   if (await ownUploadAllowed(sql, method, path, [signer])) return null;
   return refuseCeiling();
 }
@@ -581,7 +614,7 @@ async function decodeAgentCursor(sql: Sql, r: Recipient, raw: unknown) {
 type NotificationRow = {
   id: string; seq: string; kind: string; reason: string; source_type: string; source_id: string; source_version: string | null;
   source_created_at: Date; channel_id: string | null; thread_id: string | null; task_id: string | null; doc_id: string | null;
-  acl_key: string; author_npub: string | null; created_at: Date;
+  acl_key: string; author_npub: string | null; created_at: Date; origin_notification_id: string | null;
 };
 
 function serializeEnvelope(row: NotificationRow) {
@@ -597,6 +630,8 @@ function serializeEnvelope(row: NotificationRow) {
     },
     author_npub: row.author_npub,
     occurred_at: new Date(row.source_created_at).toISOString(),
+    // Non-null only for reason 'self_mention': the live non-self notification this self-address depends on.
+    origin_notification_id: row.origin_notification_id ?? null,
   };
 }
 /** Minimal tombstone: no routing metadata once access or the canonical relationship is gone. */
@@ -615,7 +650,7 @@ export async function listInboxPage(sql: Sql, r: Recipient, rawCursor: unknown, 
     }
     const rows = await t<(NotificationRow & { readable: boolean; relation: string })[]>`
       SELECT n.id, n.seq, n.kind, n.reason, n.source_type, n.source_id, n.source_version, n.source_created_at, n.channel_id, n.thread_id,
-        n.task_id, n.doc_id, n.acl_key, author.npub AS author_npub, n.created_at,
+        n.task_id, n.doc_id, n.acl_key, author.npub AS author_npub, n.created_at, n.origin_notification_id,
         (access.keys @> to_jsonb(n.acl_key)) AS readable,
         flightdeck_pg_agent_notification_relation(n.id) AS relation
       FROM flightdeck_pg_agent_notifications n
@@ -673,15 +708,17 @@ type MessageRow = {
   thread_source_message_id?: string | null; inherited?: boolean; owning_thread_id?: string | null; effective_thread_id?: string | null;
 };
 
-async function attachmentDescriptors(tx: Sql, workspaceId: string, entityType: string, entityIds: string[]) {
+async function attachmentDescriptors(tx: Sql, workspaceId: string, entityType: string, entityIds: string[], linkedBy?: { actorId: string; entityIds: Set<string> }) {
   if (!entityIds.length) return new Map<string, any[]>();
-  const rows = await tx<{ entity_id: string; storage_object_id: string; file_name: string | null; content_type: string | null; size_bytes: string | null }[]>`
-    SELECT l.entity_id, l.storage_object_id, o.file_name, o.content_type, o.size_bytes
+  const rows = await tx<{ entity_id: string; storage_object_id: string; file_name: string | null; content_type: string | null; size_bytes: string | null; created_by_actor_id: string | null }[]>`
+    SELECT l.entity_id, l.storage_object_id, o.file_name, o.content_type, o.size_bytes, l.created_by_actor_id
     FROM flightdeck_pg_storage_links l JOIN v4_storage_objects o ON o.id = l.storage_object_id
     WHERE l.workspace_id = ${workspaceId} AND l.entity_type = ${entityType} AND l.entity_id = ANY(${entityIds}::uuid[]) AND l.deleted_at IS NULL
     ORDER BY l.created_at, l.storage_object_id`;
   const out = new Map<string, any[]>();
   for (const row of rows) {
+    // On restricted entities only attachments that `linkedBy.actorId` linked itself are disclosed.
+    if (linkedBy?.entityIds.has(row.entity_id) && row.created_by_actor_id !== linkedBy.actorId) continue;
     (out.get(row.entity_id) ?? out.set(row.entity_id, []).get(row.entity_id)!).push({
       storage_object_id: row.storage_object_id, file_name: row.file_name, content_type: row.content_type, size_bytes: row.size_bytes == null ? null : Number(row.size_bytes),
     });
@@ -798,6 +835,34 @@ async function docBody(tx: Sql, workspaceId: string, docId: string) {
   return { id: doc.id, title: doc.title, row_version: doc.row_version, channel_id: doc.channel_id, body, body_too_large: tooLarge, canonical_version: canonical };
 }
 
+/**
+ * Context of a deliberate self-address: never more than the ORIGIN's own context authorizes right now (its trigger and
+ * bounded transcript, built by the origin's policy), plus the bot's later messages that it both wrote and last
+ * updated. The trigger (verified bot revision) and those own messages expose only attachments the bot linked itself.
+ */
+async function selfAddressWindow(t: Sql, r: Recipient, n: FullNotification, trigger: MessageRow, policy: ContextPolicy) {
+  const ownIds = new Set<string>([trigger.id]);
+  const [origin] = await t<FullNotification[]>`
+    SELECT * FROM flightdeck_pg_agent_notifications WHERE id = ${n.origin_notification_id} AND workspace_id = ${r.workspaceId}
+      AND recipient_actor_id = ${r.actorId} AND source_type = 'message' AND reason <> 'self_mention'`;
+  const originMessage = origin ? await loadMessage(t, r.workspaceId, origin.source_id) : null;
+  if (!originMessage) return { rows: [] as MessageRow[], truncated: false, ownIds };
+  const originWindow = policy === 'bounded_transcript' && originMessage.thread_id
+    ? await boundedTranscript(t, r.workspaceId, originMessage)
+    : { rows: [] as MessageRow[], truncated: false };
+  const at = (row: { created_at: Date; id: string }) => [new Date(row.created_at).getTime(), row.id] as const;
+  const after = (row: MessageRow, pivot: MessageRow) => { const [a, ai] = at(row); const [b, bi] = at(pivot); return a > b || (a === b && ai > bi); };
+  const own = trigger.thread_id
+    ? (await boundedTranscript(t, r.workspaceId, trigger)).rows
+      .filter((row) => after(row, originMessage) && row.created_by_actor_id === r.actorId && row.updated_by_actor_id === r.actorId)
+    : [];
+  for (const row of own) ownIds.add(row.id);
+  const byId = new Map<string, MessageRow>();
+  for (const row of [...originWindow.rows, originMessage, ...own]) if (row.id !== trigger.id) byId.set(row.id, row);
+  const rows = [...byId.values()].sort((x, y) => { const [a, ai] = at(x); const [b, bi] = at(y); return a - b || (ai < bi ? -1 : ai > bi ? 1 : 0); });
+  return { rows, truncated: originWindow.truncated, ownIds };
+}
+
 export async function buildContext(sql: Sql, r: Recipient, notificationId: string) {
   return buildContextThen(sql, r, notificationId, async (context) => context);
 }
@@ -834,8 +899,10 @@ async function contextIn(t: Sql, r: Recipient, n: FullNotification, policy: Cont
         if (!row) throw gone();
         thread = row;
       }
-      const transcript = policy === 'bounded_transcript' && message.thread_id ? await boundedTranscript(t, w, message) : { rows: [] as MessageRow[], truncated: false };
-      const attachments = await attachmentDescriptors(t, w, 'message', [message.id, ...transcript.rows.map((m) => m.id)]);
+      const self = n.reason === 'self_mention' ? await selfAddressWindow(t, r, n, message, policy) : null;
+      const transcript = self ?? (policy === 'bounded_transcript' && message.thread_id ? await boundedTranscript(t, w, message) : { rows: [] as MessageRow[], truncated: false });
+      const attachments = await attachmentDescriptors(t, w, 'message', [message.id, ...transcript.rows.map((m) => m.id)],
+        self ? { actorId: r.actorId, entityIds: self.ownIds } : undefined);
       return {
         ...base, thread,
         trigger: { type: 'message', message: serializeMessage(message, attachments.get(message.id) ?? []) },

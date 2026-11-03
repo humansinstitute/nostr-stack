@@ -3580,6 +3580,8 @@ export interface AgentNotificationEnvelope {
   };
   author_npub: string | null;
   occurred_at: string;
+  /** Non-null only for reason 'self_mention': the live non-self notification this deliberate self-address depends on. */
+  origin_notification_id: string | null;
 }
 /** Minimal tombstone when access or the canonical relationship is gone: no routing metadata. */
 export interface AgentNotificationTombstone {
@@ -3612,4 +3614,19 @@ export type AgentNotificationErrorCode =
   | 'workspace_not_found' | 'workspace_membership_required' | 'agent_identity_required' | 'identity_rotated' | 'subscription_revoked'
   | 'invalid_cursor' | 'cursor_gap' | 'validation_error' | 'notification_not_found' | 'access_revoked' | 'source_gone' | 'source_present'
   | 'attachment_not_found' | 'ceiling_lift_forbidden' | 'permission_denied' | 'agent_notification_upgrade_required'
-  | 'relationship_removed' | 'authorization_contention' | 'authorization_unavailable';
+  | 'relationship_removed' | 'authorization_contention' | 'authorization_unavailable'
+  | 'origin_notification_invalid' | 'work_output_changed';
+
+/**
+ * Version-bound work-output receipt, returned as `work_receipt` by a create (docs, tasks, files, audio notes) that
+ * named a live `origin_notification_id`. Grants its bot access to the version it wrote only.
+ */
+export interface AgentWorkReceipt {
+  entity_type: 'doc' | 'task' | 'file' | 'audio_note';
+  entity_id: string;
+  receipt_row_version: number;
+  origin_notification_id: string;
+  body_sha256_hex: string | null;
+  /** Files: the exact receipted version. Null for other entity types. */
+  version_id: string | null;
+}

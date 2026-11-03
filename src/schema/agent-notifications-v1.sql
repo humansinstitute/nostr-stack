@@ -67,6 +67,27 @@ CREATE TABLE IF NOT EXISTS flightdeck_pg_agent_notifications (
   UNIQUE (workspace_id, recipient_actor_id, dedupe_key)
 );
 CREATE INDEX IF NOT EXISTS idx_fd_agent_notifications_created ON flightdeck_pg_agent_notifications (created_at);
+-- Deliberate self-address (reason 'self_mention'): the live non-self notification the author named as its origin.
+-- No foreign key: retention removes rows by per-recipient seq prefix; a missing origin makes the row ineligible.
+ALTER TABLE flightdeck_pg_agent_notifications ADD COLUMN IF NOT EXISTS origin_notification_id UUID;
+
+-- Version-bound work-output receipts: minted in the SAME transaction as a create that names a live origin
+-- notification of its author. They grant access only to the version the bot itself wrote.
+CREATE TABLE IF NOT EXISTS flightdeck_pg_agent_work_receipts (
+  workspace_id UUID NOT NULL REFERENCES flightdeck_pg_workspaces(id) ON DELETE CASCADE,
+  recipient_actor_id UUID NOT NULL REFERENCES flightdeck_pg_actors(id) ON DELETE CASCADE,
+  entity_type TEXT NOT NULL CHECK (entity_type IN ('doc', 'task', 'file', 'audio_note')),
+  entity_id UUID NOT NULL,
+  channel_id UUID NOT NULL,
+  origin_notification_id UUID NOT NULL,
+  receipt_row_version BIGINT NOT NULL,
+  -- Files: the exact receipted version (immutable bytes). NULL for other entity types.
+  receipt_version_id UUID,
+  body_sha256_hex TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (workspace_id, entity_type, entity_id, recipient_actor_id)
+);
 
 -- Consumer subscriptions. The floor is fixed by Tower at first creation and enforced on every selection.
 CREATE TABLE IF NOT EXISTS flightdeck_pg_agent_notification_subscriptions (
@@ -197,6 +218,16 @@ BEGIN
       RETURN 'source_gone';
     END IF;
     IF n.kind = 'chat_mention' THEN ok := flightdeck_pg_agent_mentions_contain(meta->'mentions', n.recipient_actor_id, rnpub);
+      -- A self-address is eligible only while its origin is: the recipient's own non-self notification in the same
+      -- channel and thread, inside an active subscription floor, with its canonical relationship intact.
+      IF ok AND n.reason = 'self_mention' THEN
+        ok := flightdeck_pg_agent_origin_live(n.origin_notification_id, n.workspace_id, n.recipient_actor_id, n.channel_id)
+          AND EXISTS (SELECT 1 FROM flightdeck_pg_agent_notifications o WHERE o.id = n.origin_notification_id
+            AND o.source_type = 'message' AND o.thread_id IS NOT DISTINCT FROM n.thread_id)
+          -- The trigger must still be the exact bot-signed revision that was projected (no later edit by anyone).
+          AND EXISTS (SELECT 1 FROM flightdeck_pg_messages m WHERE m.workspace_id = n.workspace_id AND m.id = n.source_id
+            AND m.row_version = n.source_version AND m.updated_by_actor_id = n.recipient_actor_id);
+      END IF;
     ELSIF n.kind = 'agent_direct_recipient' THEN ok := meta->>'agent_direct_recipient_npub' = rnpub;
     ELSIF n.kind = 'direct_message' THEN
       ok := EXISTS (SELECT 1 FROM flightdeck_pg_channels c WHERE c.workspace_id = n.workspace_id AND c.id = n.channel_id AND rnpub = ANY(c.participant_npubs));
@@ -230,6 +261,19 @@ BEGIN
   END IF;
   RETURN CASE WHEN ok THEN 'ok' ELSE 'relationship_removed' END;
 END $$;
+
+-- A live ORIGIN: the identity's own non-self notification at this channel, inside an active subscription floor, with
+-- current record access and its canonical relationship intact. Shared by self-address, receipts and the ceiling.
+CREATE OR REPLACE FUNCTION flightdeck_pg_agent_origin_live(oid UUID, w UUID, a UUID, ch UUID) RETURNS BOOLEAN
+LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM flightdeck_pg_agent_notifications o
+    WHERE o.id = oid AND o.workspace_id = w AND o.recipient_actor_id = a AND o.reason <> 'self_mention' AND o.channel_id = ch
+      AND EXISTS (SELECT 1 FROM flightdeck_pg_agent_notification_subscriptions s WHERE s.workspace_id = o.workspace_id
+        AND s.recipient_actor_id = o.recipient_actor_id AND s.revoked_at IS NULL AND s.floor_at <= o.source_created_at)
+      AND flightdeck_pg_record_access(o.workspace_id, o.recipient_actor_id) @> to_jsonb(o.acl_key)
+      AND flightdeck_pg_agent_notification_relation(o.id) = 'ok')
+$$;
 
 -- One-shot activation backfill: the previous 24 hours of addressing-bearing outbox events (idempotent via the intake
 -- UNIQUE). CREATE TRIGGER above takes a SHARE ROW EXCLUSIVE lock on the outbox, so every insert either committed

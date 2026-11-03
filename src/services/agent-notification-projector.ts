@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db';
 import { type Sql, MAX_INTAKE_ATTEMPTS, isUuid } from './notification-core';
+import { AGENT_ORIGIN_METADATA_KEY, storedSignatureBindsRevision } from './flightdeck-pg-message-signatures';
+import { liveOrigin } from './agent-work-receipts';
 
 /**
  * Strict agent notification projection (addressed-only).
@@ -8,7 +10,8 @@ import { type Sql, MAX_INTAKE_ATTEMPTS, isUuid } from './notification-core';
  * Addressing comes ONLY from the same-transaction outbox payload of the exact source revision (canonical structured
  * mentions, explicit recipients, DM participants, assignments). There is no channel-reader broadcast, no text-name
  * matching, and a later revision never re-addresses an older event. Recipients must be agent actors (or identities
- * classified notification-only), active members, not the author, and currently hold the record-access key.
+ * classified notification-only), active members, not the author (except a verified deliberate self-address, see
+ * selfAddress), and currently hold the record-access key.
  *
  * Sequencing: the per-recipient counter row lock is held until commit, so per-recipient seq order equals commit order.
  */
@@ -28,7 +31,7 @@ type OutboxRow = {
   payload: Record<string, any>; created_at: Date;
 };
 
-export type AgentAddress = { npub?: string | null; actorId?: string | null; kind: AgentNotificationKind; reason: string };
+export type AgentAddress = { npub?: string | null; actorId?: string | null; kind: AgentNotificationKind; reason: string; originNotificationId?: string | null };
 export type AgentSource = {
   type: AgentNotificationSourceType; id: string; version: number | null; scopeId: string | null; channelId: string;
   threadId: string | null; taskId: string | null; docId: string | null; authorActorId: string | null;
@@ -73,6 +76,8 @@ export async function deriveAgentNotifications(tx: Sql, ob: OutboxRow, snapshot:
     if (!channel || channel.archived_at) return { skip: 'channel_unavailable' };
     const revised = type === 'message.revised';
     const addresses: AgentAddress[] = mentionAddresses(revised ? payload.newly_added_mentions : payload.mentions, 'chat_mention', 'canonical_mention');
+    const self = await selfAddress(tx, w, ob, message, revised);
+    if (self) addresses.unshift(self);
     if (!revised) {
       // Explicit Agent Direct branch recipient and DM participants come from the snapshot taken in the source
       // transaction. Backfilled rows have no snapshot: the current row is used only while it is still at the event's
@@ -205,7 +210,34 @@ async function assignmentEpoch(tx: Sql, workspaceId: string, taskId: string, bef
   return row?.n ?? 0;
 }
 
-/** Resolve addresses to eligible recipients (agent or classified, member, not author, current ACL). */
+/**
+ * Deliberate self-address: the author's own structured mention in this revision, eligible only when the STORED
+ * instruction signature binds this exact revision (body, location and `mentions_sha256`) and the message names a live
+ * non-self origin notification of the author in the same channel and thread. Ordinary own output never qualifies.
+ */
+async function selfAddress(tx: Sql, w: string, ob: OutboxRow, message: { id: string; thread_id: string | null; channel_id: string; created_by_actor_id: string; row_version: number; metadata: any; body?: string }, revised: boolean): Promise<AgentAddress | null> {
+  const payload = ob.payload ?? {};
+  const [author] = await tx<{ npub: string }[]>`SELECT npub FROM flightdeck_pg_actors WHERE id = ${message.created_by_actor_id}`;
+  if (!author) return null;
+  const mentionsSelf = canonicalMentionRefs(revised ? payload.newly_added_mentions : payload.mentions)
+    .some((ref) => ref.actorId === message.created_by_actor_id || ref.npub === author.npub);
+  if (!mentionsSelf) return null;
+  // Only the revision this event was produced by; a later edit makes the event ineligible (fail closed).
+  if (Number(message.row_version) !== Number(ob.entity_row_version ?? -1)) return null;
+  const origin = message.metadata?.[AGENT_ORIGIN_METADATA_KEY];
+  if (typeof origin !== 'string' || !isUuid(origin)) return null;
+  const [row] = await tx<{ body: string }[]>`SELECT body FROM flightdeck_pg_messages WHERE workspace_id = ${w} AND id = ${message.id}`;
+  if (!row) return null;
+  const bound = storedSignatureBindsRevision({
+    signature: message.metadata?.agent_instruction_signature, body: row.body, mentions: message.metadata?.mentions, authorNpub: author.npub,
+    workspaceId: w, channelId: message.channel_id, threadId: message.thread_id, messageId: message.id, revision: Number(message.row_version), revised,
+  });
+  if (!bound) return null;
+  if (!await liveOrigin(tx, { workspaceId: w, actorId: message.created_by_actor_id, notificationId: origin, channelId: message.channel_id, threadId: message.thread_id })) return null;
+  return { actorId: message.created_by_actor_id, npub: author.npub, kind: 'chat_mention', reason: 'self_mention', originNotificationId: origin };
+}
+
+/** Resolve addresses to eligible recipients (agent or classified, member, not author unless self_mention, current ACL). */
 async function resolveRecipients(tx: Sql, workspaceId: string, source: AgentSource, addresses: AgentAddress[]) {
   const npubs = [...new Set(addresses.map((a) => a.npub).filter((v): v is string => Boolean(v)))];
   const ids = [...new Set(addresses.map((a) => a.actorId).filter((v): v is string => Boolean(v)))];
@@ -227,7 +259,7 @@ async function resolveRecipients(tx: Sql, workspaceId: string, source: AgentSour
   const out = new Map<string, AgentAddress>();
   for (const address of addresses) {
     const id = address.actorId && known.has(address.actorId) ? address.actorId : address.npub ? byNpub.get(address.npub) : undefined;
-    if (!id || id === source.authorActorId || !readable.has(id) || out.has(id)) continue;
+    if (!id || (id === source.authorActorId && address.reason !== 'self_mention') || !readable.has(id) || out.has(id)) continue;
     out.set(id, address);
   }
   return out;
@@ -265,12 +297,14 @@ export async function projectAgentIntakeRow(tx: Sql, row: IntakeRow): Promise<{ 
     await tx`
       INSERT INTO flightdeck_pg_agent_notifications (
         workspace_id, recipient_actor_id, seq, kind, reason, addressing, source_outbox_event_id, source_event_type, source_created_at,
-        source_type, source_id, source_version, scope_id, channel_id, thread_id, task_id, doc_id, author_actor_id, acl_key, dedupe_key
+        source_type, source_id, source_version, scope_id, channel_id, thread_id, task_id, doc_id, author_actor_id, acl_key, dedupe_key,
+        origin_notification_id
       ) VALUES (
         ${ob.workspace_id}, ${recipient}, ${Number(seqRow!.s)}, ${address.kind}, ${address.reason},
         ${tx.json({ rule: address.kind, via: address.reason, outbox_event_id: ob.id, source_version: source.version } as any)},
         ${ob.id}, ${ob.event_type}, ${ob.created_at}, ${source.type}, ${source.id}, ${source.version}, ${source.scopeId}, ${source.channelId},
-        ${source.threadId}, ${source.taskId}, ${source.docId}, ${source.authorActorId}, ${`channel:${source.channelId}:${source.aclFamily}`}, ${dedupeKey}
+        ${source.threadId}, ${source.taskId}, ${source.docId}, ${source.authorActorId}, ${`channel:${source.channelId}:${source.aclFamily}`}, ${dedupeKey},
+        ${address.originNotificationId ?? null}
       )`;
     projected += 1;
   }
