@@ -7,6 +7,7 @@ import { resolveWsKeyNpub } from './user-workspace-keys';
 import { normalizeFlightDeckPgChannelMetadata } from './flightdeck-pg-agent-direct';
 import { flightDeckPgCanonicalDocVersionId, listEffectiveFlightDeckPgThreadMessages, serializeFlightDeckPgDocVersionIdentity } from './flightdeck-pg-api';
 import { getStorageObjectContent } from './storage';
+import { explicitGrantAllows } from '../learning/authorization';
 import { activeWorkReceipt, liveOrigin, parseOriginNotificationId, rememberReceiptAdmission, type ReceiptEntityType } from './agent-work-receipts';
 
 /**
@@ -227,6 +228,21 @@ export function databaseCeilingProvider(sql: () => Sql = () => getDb()): AgentCe
 /** TEST FIXTURES ONLY: suites whose databases do not carry the runtime schema and contain no agent classification. */
 export const unclassifiedFixtureCeiling: AgentCeilingProvider = { profileFor: async () => null };
 
+/** A tag value of the claimed (not yet verified) NIP-98 event; the route's verification later covers it. */
+function claimedEventTag(request: Request, name: string): string | null {
+  const header = request.headers.get('authorization');
+  const queryToken = new URL(request.url).searchParams.get('token');
+  const token = header?.startsWith('Nostr ') ? header.slice(6).trim() : queryToken;
+  if (!token) return null;
+  try {
+    const event = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));
+    const values = Array.isArray(event?.tags) ? event.tags.filter((t: unknown) => Array.isArray(t) && t[0] === name) : [];
+    return values.length === 1 && typeof values[0][1] === 'string' ? values[0][1] : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Claimed signer of a NIP-98 (27235) or Blossom (24242) authorization, from the header or a `token` query parameter. */
 export function claimedSignerNpub(request: Request): string | null {
   const header = request.headers.get('authorization');
@@ -402,6 +418,34 @@ async function ownUploadAllowed(sql: Sql, method: string, path: string, npubs: s
 
 const INBOX_ROUTE = new RegExp(`^/api/v4/flightdeck-pg/workspaces/${UUID_SEG}/agent-notifications(?:/|$)`);
 
+// Learning has no workspace attribution. A classified identity may use only this reviewed route+method set, and only
+// with an explicitly selected grant it holds (never implicit learner selection, never notification/receipt-derived).
+const LEARNING_ROUTE = /^\/api\/v4\/learning(?:\/|$)/;
+const LEARNING_GRANT_ROUTES: Record<string, 'read' | 'write'> = {
+  'GET /api/v4/learning/curriculum': 'read',
+  'GET /api/v4/learning/curriculum/traverse': 'read',
+  'GET /api/v4/learning/mastery': 'read',
+  'GET /api/v4/learning/recall/due': 'read',
+  'POST /api/v4/learning/plans': 'write',
+  'POST /api/v4/learning/lessons': 'write',
+  'POST /api/v4/learning/assessments': 'write',
+  'POST /api/v4/learning/recall': 'write',
+};
+
+/**
+ * The grant is named by `x-learning-grant-id` AND by a signed `learning_grant_id` tag of the NIP-98 event (the header
+ * alone is outside the signature). It must be an active delegation of the acting identity (workspace-key aliases
+ * resolve as in the routes), with write access for POST. The route then applies the same grant in its RLS transaction.
+ */
+async function learningGrantAllows(request: Request, method: string, path: string, signer: string): Promise<boolean> {
+  const need = LEARNING_GRANT_ROUTES[`${method} ${path}`];
+  if (!need) return false;
+  const grantId = request.headers.get('x-learning-grant-id');
+  if (!grantId || claimedEventTag(request, 'learning_grant_id') !== grantId) return false;
+  const acting = (await resolveWsKeyNpub(signer)) ?? signer;
+  return explicitGrantAllows(getDb(), acting, grantId, need === 'write');
+}
+
 /**
  * A classified identity may only use plain canonical paths: the ceiling and the router must see the same path.
  * Percent-encoding (the router decodes it), empty segments and dot segments are refused outright.
@@ -451,6 +495,13 @@ async function ceilingDecision(request: Request, profile: CeilingProfile | null,
   const path = new URL(request.url).pathname;
   if (!isCanonicalRequestPath(path)) return refuseCeiling();
   if (INBOX_ROUTE.test(path)) return null;
+  if (LEARNING_ROUTE.test(path)) {
+    try {
+      return await learningGrantAllows(request, method, path, signer) ? null : refuseCeiling();
+    } catch {
+      return Response.json({ error: 'authorization_unavailable', code: 'authorization_unavailable', message: 'Authorization state is unavailable; retry later', retryable: true }, { status: 503 });
+    }
+  }
   let parsedBody: Promise<any> | null = null;
   const body = () => (parsedBody ??= request.clone().text().then((text) => { try { return text ? JSON.parse(text) : {}; } catch { return null; } }));
   let targets: string[] | null;

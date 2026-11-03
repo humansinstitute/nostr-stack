@@ -221,6 +221,19 @@ Residual: an allowed write's response echoes the bound record written (for examp
 
 Notifications with `reason: "self_mention"` never bind a write. An `origin_notification_id` named on a message must be live in that exact thread.
 
+## Learning for notification-only identities
+
+Learning routes carry no workspace attribution, so a classified identity is otherwise refused there. It may use exactly:
+
+`GET /api/v4/learning/curriculum`, `GET …/curriculum/traverse`, `GET …/mastery`, `GET …/recall/due`, `POST …/plans`, `POST …/lessons`, `POST …/assessments`, `POST …/recall`
+
+and only when:
+
+- the `x-learning-grant-id` header names the grant, AND the NIP-98 event carries the equal signed tag `["learning_grant_id", "<id>"]`, since the header alone is outside the signature;
+- that grant is an active delegation of the acting identity (workspace-key aliases resolve as in the routes). It is read under the learning RLS role with the same predicate as the routes: grantee = actor, not revoked, `can_read`, and `can_write` for POST.
+
+The route then applies the same grant in its own RLS transaction. Implicit learner selection never applies to a classified identity. Profile, delegations, plan/lesson history, views, overlay, evidence, submissions, reviews and `research/*` stay refused. Notifications and receipts never confer learning access. Humans and unclassified identities are unchanged: the header stays optional and no tag is needed.
+
 ## Deliberate self-address
 
 A structured mention of the author in their own message is projected to the author (kind `chat_mention`, reason `self_mention`) only when ALL hold:

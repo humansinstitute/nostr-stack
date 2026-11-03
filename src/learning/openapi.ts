@@ -9,7 +9,7 @@ const body = (name: string) => ({ required: true, content: { 'application/json':
 const response = (name: string, description: string) => ({ description, content: { 'application/json': { schema: ref(name) } } });
 const errors = Object.fromEntries(['400', '401', '403', '404', '409', '503'].map(code => [code, response('ErrorResponse', 'Learning request rejected')]));
 const id = (name: string) => ({ name, in: 'path', required: true, schema: uuid });
-const grant = { name: 'x-learning-grant-id', in: 'header', required: false, schema: uuid, description: 'Select an active grant held by the signed actor. Never supplies a learner identity.' };
+const grant = { name: 'x-learning-grant-id', in: 'header', required: false, schema: uuid, description: 'Select an active grant held by the signed actor. Never supplies a learner identity. Required for identities classified notification-only (strict agent inbox), together with an equal signed NIP-98 tag ["learning_grant_id", <id>]; they may use only GET /curriculum, /curriculum/traverse, /mastery, /recall/due and POST /plans, /lessons, /assessments, /recall.' };
 const operation = (summary: string, result: string, method: 'get' | 'post', options: { input?: string; parameters?: unknown[]; created?: boolean; delegated?: boolean } = {}) => ({
   tags: ['Space Learning'], summary, security: [{ nip98: [] }],
   ...(options.parameters || options.delegated ? { parameters: [...(options.parameters ?? []), ...(options.delegated ? [grant] : [])] } : {}),
