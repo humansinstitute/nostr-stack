@@ -3132,11 +3132,12 @@ flightDeckPgRouter.put('/workspaces/:workspaceId/event-subscription-agents', asy
     return validationError(c, identity, [{ path: 'agent_npubs', code: 'invalid', message: `agent_npubs must contain at most ${FLIGHT_DECK_PG_EVENT_AUDIENCE_MAX} distinct non-empty npubs` }]);
   }
   try {
-    // New legacy visibility-audience registrations need explicit consent to the broad feed (existing rows are kept).
-    const legacyConsentRequired = (Bun.env.AGENT_LEGACY_AUDIENCE_CONSENT ?? 'required').toLowerCase() !== 'off';
+    // Idempotent reconciliation: this manager's existing registrations in this workspace (unchanged or a subset) are
+    // kept without new consent, so old Autopilots reconnect unharmed. Any ADDITION needs explicit consent in this
+    // payload-signed request. Notification-only agents are always rejected. There is no switch to disable this.
     const reconciliation = await replaceFlightDeckPgEventSubscriptionAgents({
       workspaceId: context.workspace.id, managerActorId: context.actor.id, authorizedByActorId: context.actor.id, agentNpubs,
-      allowNewRegistrations: !legacyConsentRequired || body.legacy_broad_feed_consent === true,
+      allowNewRegistrations: body.legacy_broad_feed_consent === true,
     });
     const audienceNpubs = reconciliation.audience.map((member) => member.npub);
     return c.json({

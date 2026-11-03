@@ -207,7 +207,12 @@ Residual: an allowed write's response echoes the bound record written (for examp
 
 ## Legacy visibility audience (transition)
 
-New registrations through `PUT event-subscription-agents` require `legacy_broad_feed_consent: true`; rejected entries get `legacy_consent_required`. Existing registrations are kept. `AGENT_LEGACY_AUDIENCE_CONSENT=off` restores the old behaviour.
+`PUT event-subscription-agents` reconciles idempotently per (manager, workspace):
+
+- The manager's existing registrations in that workspace, sent unchanged or as a subset, are kept without new consent. Existing Autopilots therefore reconnect unharmed after a Tower restart.
+- Any addition (a new agent, a re-added agent, or any agent for a manager with no existing grant) requires `legacy_broad_feed_consent: true` in the payload-signed request. Without it the entry is rejected with `legacy_consent_required`.
+- Notification-only agents are always rejected (`notification_only_agent`), even when previously registered and even with consent.
+- There is no switch that disables this.
 
 Unclassified legacy bots remain an acknowledged exposure during the staged transition.
 

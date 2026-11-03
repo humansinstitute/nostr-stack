@@ -463,13 +463,45 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
   });
 
   // --------------------------------------------------------------------------------------------------- legacy onboarding
-  test('legacy visibility audience: new registrations need explicit consent; existing rows are kept', async () => {
+  test('legacy audience reconciliation: existing manager reconnect (unchanged/subset) needs no new consent; additions and new managers do; classified stays blocked', async () => {
     const path = `/api/v4/flightdeck-pg/workspaces/${w1}/event-subscription-agents`;
-    const refused = await legacy(path, 'PUT', H, { agent_npubs: [npubs[A]] });
-    expect([refused.status, refused.body.audience_npubs, refused.body.rejected_audience]).toEqual([200, [], [{ npub: npubs[A], code: 'legacy_consent_required' }]]);
-    const consented = await legacy(path, 'PUT', H, { agent_npubs: [npubs[A]], legacy_broad_feed_consent: true });
-    expect(consented.body.audience_npubs).toEqual([npubs[A]]);
-    expect((await legacy(path, 'PUT', H, { agent_npubs: [npubs[A]] })).body.audience_npubs).toEqual([npubs[A]]);
+    // Pre-existing grant for manager H covering A and B (as created before this Tower version).
+    await db`DELETE FROM flightdeck_pg_event_subscription_agents WHERE workspace_id = ${w1}`;
+    for (const i of [A, B]) {
+      await db`INSERT INTO flightdeck_pg_event_subscription_agents (workspace_id, manager_actor_id, agent_actor_id, authorized_by_actor_id) VALUES (${w1}, ${actors[H]!}, ${actors[i]!}, ${actors[H]!})`;
+    }
+    // Old Autopilot reconnect: same manager, same workspace, unchanged audience, no consent field => preserved.
+    const unchanged = await legacy(path, 'PUT', H, { agent_npubs: [npubs[A], npubs[B]] });
+    expect([unchanged.status, unchanged.body.audience_npubs, unchanged.body.rejected_audience]).toEqual([200, [npubs[A], npubs[B]].sort(), []]);
+    // Repeated reconnects stay idempotent.
+    expect((await legacy(path, 'PUT', H, { agent_npubs: [npubs[A], npubs[B]] })).body.audience_npubs).toEqual([npubs[A], npubs[B]].sort());
+    // /events with the reconciled audience still works for the manager.
+    expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/events?audience_npub=${encodeURIComponent(npubs[A]!)}`, 'GET', H)).status).toBe(200);
+    // Subset: kept without consent (the omitted one is dropped; re-adding it is an addition).
+    const subset = await legacy(path, 'PUT', H, { agent_npubs: [npubs[A]] });
+    expect([subset.body.audience_npubs, subset.body.rejected_audience]).toEqual([[npubs[A]], []]);
+    const readd = await legacy(path, 'PUT', H, { agent_npubs: [npubs[A], npubs[B]] });
+    expect([readd.body.audience_npubs, readd.body.rejected_audience]).toEqual([[npubs[A]], [{ npub: npubs[B], code: 'legacy_consent_required' }]]);
+    // Addition with explicit consent in the payload-signed request.
+    expect((await legacy(path, 'PUT', H, { agent_npubs: [npubs[A], npubs[B]], legacy_broad_feed_consent: true })).body.audience_npubs).toEqual([npubs[A], npubs[B]].sort());
+    // A different manager in the same workspace has no existing grant: everything is an addition.
+    await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,permission) VALUES(${w1},'actor',${actors[C]!},'workspace','event_subscription.manage')`;
+    const otherManager = await legacy(path, 'PUT', C, { agent_npubs: [npubs[A]] });
+    expect([otherManager.status, otherManager.body.audience_npubs, otherManager.body.rejected_audience]).toEqual([200, [], [{ npub: npubs[A], code: 'legacy_consent_required' }]]);
+    // H's grants are untouched by C's reconciliation.
+    expect((await legacy(path, 'GET', H)).body.audience_npubs).toEqual([npubs[A], npubs[B]].sort());
+    // Classified recipients are always rejected, even when previously registered and even with consent.
+    await db`INSERT INTO flightdeck_pg_agent_access_profiles (workspace_id, actor_id, profile) VALUES (${w1}, ${actors[B]!}, 'notification_only')`;
+    expect((await legacy(path, 'GET', H)).body.audience_npubs).toEqual([npubs[A]]);
+    const classified = await legacy(path, 'PUT', H, { agent_npubs: [npubs[A], npubs[B]], legacy_broad_feed_consent: true });
+    expect([classified.body.audience_npubs, classified.body.rejected_audience]).toEqual([[npubs[A]], [{ npub: npubs[B], code: 'notification_only_agent' }]]);
+    const events = await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/events?audience_npub=${encodeURIComponent(npubs[B]!)}`, 'GET', H);
+    expect(events.body.rejected_audience_npubs).toEqual([npubs[B]]);
+    await db`DELETE FROM flightdeck_pg_agent_access_profiles WHERE actor_id = ${actors[B]!} AND workspace_id = ${w1}`;
+    await db`DELETE FROM flightdeck_pg_permission_grants WHERE principal_actor_id = ${actors[C]!} AND permission = 'event_subscription.manage'`;
+    await db`DELETE FROM flightdeck_pg_event_subscription_agents WHERE workspace_id = ${w1}`;
+    // Restore the state later tests expect (A registered for H via consent).
+    expect((await legacy(path, 'PUT', H, { agent_npubs: [npubs[A]], legacy_broad_feed_consent: true })).body.audience_npubs).toEqual([npubs[A]]);
   });
 
   // --------------------------------------------------------------------------------------------------- ceiling

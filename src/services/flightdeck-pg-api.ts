@@ -7331,7 +7331,7 @@ export async function replaceFlightDeckPgEventSubscriptionAgents(
     `;
     // Notification-only agents use their own self-signed inbox; they are never fanned into a visibility audience.
     // Unsafe new onboarding is refused unless explicitly consented: only already-registered members are kept.
-    const consentMissing = new Set(members.filter((member) => !member.notification_only && input.allowNewRegistrations === false && !existing.has(member.actor_id)).map((member) => member.npub));
+    const consentMissing = new Set(members.filter((member) => !member.notification_only && input.allowNewRegistrations !== true && !existing.has(member.actor_id)).map((member) => member.npub));
     const audience = members.filter((member) => !member.notification_only && !consentMissing.has(member.npub)).map(({ actor_id, npub }) => ({ actor_id, npub }));
     const notificationOnly = new Set(members.filter((member) => member.notification_only).map((member) => member.npub));
     const acceptedNpubs = new Set(audience.map((member) => member.npub));
