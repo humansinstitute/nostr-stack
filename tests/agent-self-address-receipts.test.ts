@@ -678,4 +678,61 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     expect(collide.body.current).toBeUndefined();
     expect(collide.text).not.toContain('SENTINEL-OTHER-PUBLISHER-ACTIVITY');
   });
+
+  // ------------------------------------------------------------------------------------------------ storage adoption
+  test('a classified bot links only its own uploads: human orphans, tombstoned attachments, other bots and unknown ids are refused identically', async () => {
+    const o = await origin('storage-adoption');
+    // Candidate objects the bot did not create.
+    const orphan = await blob(H, 'SENTINEL-HUMAN-ORPHAN-BYTES', 'text/plain');
+    const formerAttachment = await blob(H, 'SENTINEL-TOMBSTONED-ATTACHMENT-BYTES', 'text/plain');
+    const body = 'human attachment';
+    const sent = await request(fd(w1, `/channels/${ch1}/messages`), 'POST', H, {
+      body, metadata: { attachments: [{ kind: 'file', storage_object_id: formerAttachment, filename: 'a.txt', content_type: 'text/plain' }] },
+      message_signature: signature(body, H, w1, ch1, undefined, [], 'none'),
+    });
+    expect(sent.status).toBe(201);
+    await db`UPDATE flightdeck_pg_storage_links SET deleted_at = NOW() WHERE storage_object_id = ${formerAttachment}`;
+    await db`UPDATE flightdeck_pg_messages SET deleted_at = NOW() WHERE id = ${sent.body.message.id}`;
+    const otherBot = await blob(B, 'SENTINEL-OTHER-BOT-BYTES', 'text/plain');
+    const unknown = randomUUID();
+    const before = Number((await db`SELECT COUNT(*)::int AS n FROM flightdeck_pg_storage_links`)[0]!.n);
+    const refusals: string[] = [];
+    const expectRefused = (res: { status: number; text: string; body: any }) => {
+      expect([res.status, res.body.code]).toEqual([403, 'agent_notification_upgrade_required']);
+      expect(res.text).not.toContain('SENTINEL-');
+      const { identity: _identity, ...rest } = res.body;
+      refusals.push(JSON.stringify(rest));
+    };
+    for (const candidate of [orphan, formerAttachment, otherBot, unknown]) {
+      const withOrigin = { origin_notification_id: o.notificationId };
+      expectRefused(await request(fd(w1, `/channels/${ch1}/files`), 'POST', A, { storage_object_id: candidate, display_name: 'x.txt', ...withOrigin }));
+      expectRefused(await request(fd(w1, `/channels/${ch1}/docs`), 'POST', A, { title: 'x', storage_object_id: candidate, ...withOrigin }));
+      expectRefused(await request(fd(w1, `/channels/${ch1}/audio-notes`), 'POST', A, { storage_object_id: candidate, mime_type: 'audio/webm', ...withOrigin }));
+      const reply = 'reply with attachment';
+      expectRefused(await request(fd(w1, `/channels/${ch1}/messages`), 'POST', A, {
+        body: reply, thread_id: o.threadId, metadata: { attachments: [{ kind: 'file', storage_object_id: candidate, filename: 'x.txt', content_type: 'text/plain' }] },
+        message_signature: signature(reply, A, w1, ch1, o.threadId, [], 'none'),
+      }));
+    }
+    // A receipted doc body swap to someone else's object is refused the same way.
+    const own = await createDoc(A, 'Own doc', o.notificationId);
+    expect(own.status).toBe(201);
+    const held = await lease(A, own.body.doc.id);
+    expectRefused(await request(fd(w1, `/docs/${own.body.doc.id}`), 'PATCH', A, {
+      storage_object_id: orphan, row_version: Number(own.body.doc.row_version), base_body_sha256_hex: own.body.work_receipt.body_sha256_hex, lease_token: held.body.lease.lease_token,
+    }));
+    // No oracle: every refusal is byte-identical, and nothing was linked.
+    expect(new Set(refusals).size).toBe(1);
+    expect(Number((await db`SELECT COUNT(*)::int AS n FROM flightdeck_pg_storage_links`)[0]!.n)).toBe(before + 1); // only the own doc
+    // The bot's own uploads keep working everywhere.
+    const ownReply = 'reply with own attachment';
+    const ownAttachment = await blob(A, 'bot attachment', 'text/plain');
+    expect((await request(fd(w1, `/channels/${ch1}/messages`), 'POST', A, {
+      body: ownReply, thread_id: o.threadId, metadata: { attachments: [{ kind: 'file', storage_object_id: ownAttachment, filename: 'b.txt', content_type: 'text/plain' }] },
+      message_signature: signature(ownReply, A, w1, ch1, o.threadId, [], 'none'),
+    })).status).toBe(201);
+    expect((await request(fd(w1, `/channels/${ch1}/files`), 'POST', A, { storage_object_id: await blob(A, 'own file', 'text/plain'), display_name: 'own.txt' })).status).toBe(201);
+    // Humans are unchanged: a human may link a human object.
+    expect((await request(fd(w1, `/channels/${ch1}/files`), 'POST', H, { storage_object_id: orphan, display_name: 'human.txt' })).status).toBe(201);
+  });
 });

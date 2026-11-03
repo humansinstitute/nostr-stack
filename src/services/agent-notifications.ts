@@ -297,6 +297,10 @@ async function targetWorkspaces(sql: Sql, request: Request, path: string, body: 
 async function bindingAllows(sql: Sql, request: Request, actorId: string, workspaceId: string, method: string, path: string, body: () => Promise<any>): Promise<boolean> {
   const rest = path.slice(`/api/v4/flightdeck-pg/workspaces/${workspaceId}`.length);
   if (/^\/agent-notifications(\/|$)/.test(rest)) return true; // routes self-enforce strict recipient auth
+  // Storage referenced by any bound write (a created doc/file/audio body, a doc body swap, message attachments) must
+  // be the bot's OWN upload, by the server-owned creator field. Linking an existing object would otherwise adopt
+  // another creator's (orphaned, tombstoned or group-readable) bytes. Refused before any handler lookup.
+  if (method !== 'GET' && !await onlyOwnUploads(sql, request, await body())) return false;
   const bound = async (column: 'thread' | 'task_id' | 'doc_id' | 'any', value: string | null, channelId?: string) => {
     const [row] = await sql<{ ok: boolean }[]>`
       SELECT EXISTS (
@@ -408,6 +412,34 @@ async function bindingAllows(sql: Sql, request: Request, actorId: string, worksp
   // the bytes become visible only by linking them to a bound write above or to a bound reply.
   if (method === 'POST' && rest === '/storage/prepare') return liveIn(null);
   return false;
+}
+
+/** Storage object ids a write body references: top-level storage_object_id and metadata.attachments[*]. null = malformed. */
+function referencedStorageIds(b: any): string[] | null {
+  if (!b || typeof b !== 'object') return [];
+  const ids: string[] = [];
+  const add = (value: unknown) => {
+    if (value === undefined || value === null || value === '') return true;
+    if (typeof value !== 'string' || !isUuid(value.trim())) return false;
+    ids.push(value.trim().toLowerCase());
+    return true;
+  };
+  if (!add(b.storage_object_id)) return null;
+  const attachments = b.metadata && typeof b.metadata === 'object' ? b.metadata.attachments : undefined;
+  if (Array.isArray(attachments)) for (const a of attachments) if (!add(a && typeof a === 'object' ? a.storage_object_id : a)) return null;
+  return [...new Set(ids)];
+}
+
+async function onlyOwnUploads(sql: Sql, request: Request, b: any): Promise<boolean> {
+  const ids = referencedStorageIds(b);
+  if (ids === null) return false;
+  if (!ids.length) return true;
+  const signer = claimedSignerNpub(request);
+  if (!signer) return false;
+  const acting = (await resolveWsKeyNpub(signer)) ?? signer;
+  const [row] = await sql<{ n: number }[]>`
+    SELECT COUNT(*)::int AS n FROM v4_storage_objects WHERE id = ANY(${ids}::uuid[]) AND created_by_npub = ANY(${[signer, acting]}::text[])`;
+  return Number(row?.n ?? 0) === ids.length;
 }
 
 /** Uploading bytes into / completing an object the bot itself just prepared (never reading or touching others'). */

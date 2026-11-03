@@ -207,7 +207,7 @@ Bound writes (each still subject to its normal route ACL):
 | `POST storage/prepare` | Only while the bot holds a live notification in the workspace. |
 | `PUT /api/v4/storage/{id}`, `POST /api/v4/storage/{id}/complete` | Only the bot's own uncompleted upload. |
 
-Bytes become visible only by linking them to a bound write, such as a reply's attachments, a channel file or a document body.
+Bytes become visible only by linking them to a bound write, such as a reply's attachments, a channel file or a document body. Every storage object a classified bound write references (`storage_object_id`, `metadata.attachments[*].storage_object_id`) must be the bot's OWN upload by the server-owned `created_by_npub` (signer or acting identity). Otherwise the write gets the generic refusal before any handler lookup. A human's orphaned or tombstoned object, another bot's upload or an unknown id is never adopted, and the refusal is identical for all of them.
 
 Unbound and nonexistent ids get byte-identical refusals, so there is no existence or readback oracle.
 
