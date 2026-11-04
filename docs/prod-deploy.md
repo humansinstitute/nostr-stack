@@ -494,3 +494,12 @@ pages should contain only newly readable partitions. See
 [the client contract](contract/additive-record-access-v1.md). Browser retention
 and UI validation follow Tower-first activation; they are separate from schema
 health. Keep live smoke checks read-only or confined to a dedicated fixture.
+
+## Release identity
+
+`/health` reports the package version and image build identity. The local rebuild
+script supplies `TOWER_GIT_COMMIT`, `TOWER_GIT_BRANCH`, and `TOWER_BUILD_TIME` as
+Docker build arguments. A release archive without `.git` should supply the same
+arguments or set the corresponding image environment values from the committed
+release manifest. Keep the source commit and deployed health response together
+in deployment evidence. Runtime environment overrides remain supported.

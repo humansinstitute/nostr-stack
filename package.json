@@ -1,6 +1,6 @@
 {
   "name": "coworker-superbased-be",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "dev": "sh -c 'set -a; [ -f .env ] && . ./.env; set +a; export PORT=\"${COWORKER_BE_PORT:-3100}\"; bun run --watch src/index.ts'",

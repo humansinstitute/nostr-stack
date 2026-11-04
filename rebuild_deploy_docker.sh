@@ -88,6 +88,9 @@ else
   TOWER_BUN_IMAGE="$(./docker/ensure-bun-base.sh)"
 fi
 export TOWER_BUN_IMAGE
+export TOWER_GIT_COMMIT="$(git rev-parse HEAD)"
+export TOWER_GIT_BRANCH="$(git branch --show-current)"
+export TOWER_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 echo "==> Using env file : $ENV_FILE"
 echo "==> Using compose  : $COMPOSE_FILE"
