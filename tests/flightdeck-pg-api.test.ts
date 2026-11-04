@@ -8,6 +8,7 @@ import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { config } from '../src/config';
 import { closeDb, setDb } from '../src/db';
 import { createApp } from '../src/server';
+import { ensureRuntimeSchema } from '../src/schema/ensure-runtime-schema';
 import {
   completeStorageObject,
   enableInMemoryStorageForTest,
@@ -382,6 +383,7 @@ beforeAll(async () => {
   sql = postgres(testOpts);
   setDb(sql);
   await runMigrations();
+  await ensureRuntimeSchema(sql);
   config.adminNpub = ADMIN_NPUB;
   enableInMemoryStorageForTest();
   app = createApp();
@@ -6004,4 +6006,121 @@ describe('Flight Deck PG API routes', () => {
     `;
     expect(deletedRow).toBeUndefined();
   });
+  test('keeps a DM per exact participant pair: shared counterpart, reversed order, repeats and concurrency', async () => {
+    // OWNER plays the shared counterpart ("Violet"); MEMBER and DM_ONLY are two distinct humans; AGENT is a bystander.
+    const { workspaceId, ownerId } = await seedWorkspace('npub1workspacedmpairidentity');
+    for (const [npub, name] of [[MEMBER_NPUB, 'Pete'], [DM_ONLY_NPUB, 'Daughter'], [AGENT_NPUB, 'Bystander']] as const) {
+      const created = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/members`, 'POST', ownerSecret, { member_npub: npub, role: 'member', kind: 'human', display_name: name });
+      expect(created.res.status).toBe(201);
+      await sql`
+        INSERT INTO flightdeck_pg_permission_grants (workspace_id, principal_type, principal_actor_id, resource_type, permission, created_by_actor_id)
+        VALUES (${workspaceId}, 'actor', ${created.json.actor.actor_id}, 'workspace', 'workspace.read', ${ownerId})
+      `;
+    }
+    const scope = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/scopes`, 'POST', ownerSecret, { name: 'DM pair scope', kind: 'project' });
+    const channelsPath = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/scopes/${scope.json.scope.id}/channels`;
+    // The client names every DM after the counterpart, so both requests carry the same name.
+    const dmName = `DM: ${OWNER_NPUB}`;
+    // Three different pairs sharing a recipient, created concurrently with the same requested name.
+    const raced = await Promise.all([
+      requestJson(channelsPath, 'POST', memberSecret, { name: dmName, kind: 'dm', participant_npubs: [MEMBER_NPUB, OWNER_NPUB] }),
+      requestJson(channelsPath, 'POST', dmOnlySecret, { name: dmName, kind: 'dm', participant_npubs: [DM_ONLY_NPUB, OWNER_NPUB] }),
+      requestJson(channelsPath, 'POST', agentSecret, { name: dmName, kind: 'dm', participant_npubs: [AGENT_NPUB, OWNER_NPUB] }),
+    ]);
+    expect(raced.map((result) => result.res.status)).toEqual([201, 201, 201]);
+    expect(new Set(raced.map((result) => result.json.channel.id)).size).toBe(3);
+    expect(new Set(raced.map((result) => result.json.channel.name)).size).toBe(3);
+    const [petes, daughters] = raced;
+    expect([...daughters.json.channel.participant_npubs].sort()).toEqual([DM_ONLY_NPUB, OWNER_NPUB].sort());
+    // An ordinary channel squatting on the requested name cannot block a new pair.
+    const squat = await requestJson(channelsPath, 'POST', ownerSecret, { name: 'Squatted', kind: 'channel' });
+    expect(squat.res.status).toBe(201);
+    const squatted = await requestJson(channelsPath, 'POST', ownerSecret, { name: 'Squatted', kind: 'dm', participant_npubs: [OWNER_NPUB, GROUP_MEMBER_NPUB] });
+    expect([squatted.res.status, squatted.json.channel?.name]).toEqual([201, 'Squatted (2)']);
+
+    // Same pair in reversed order, initiated by the other side, reuses the same DM.
+    const reversed = await requestJson(channelsPath, 'POST', ownerSecret, { name: 'Violet and Pete', kind: 'dm', participant_npubs: [OWNER_NPUB, MEMBER_NPUB] });
+    expect(reversed.res.status).toBe(200);
+    expect(reversed.json.channel.id).toBe(petes.json.channel.id);
+    const repeated = await requestJson(channelsPath, 'POST', memberSecret, { name: dmName, kind: 'dm', participant_npubs: [OWNER_NPUB, MEMBER_NPUB] });
+    expect(repeated.json.channel.id).toBe(petes.json.channel.id);
+
+    // Concurrent creation of a brand-new pair converges on a single row.
+    const concurrent = await Promise.all([
+      requestJson(channelsPath, 'POST', dmOnlySecret, { name: 'Daughter and Bystander', kind: 'dm', participant_npubs: [DM_ONLY_NPUB, AGENT_NPUB] }),
+      requestJson(channelsPath, 'POST', agentSecret, { name: 'Bystander and Daughter', kind: 'dm', participant_npubs: [AGENT_NPUB, DM_ONLY_NPUB] }),
+      requestJson(channelsPath, 'POST', dmOnlySecret, { name: 'Daughter and Bystander', kind: 'dm', participant_npubs: [DM_ONLY_NPUB, AGENT_NPUB] }),
+    ]);
+    expect(new Set(concurrent.map((result) => result.json.channel?.id)).size).toBe(1);
+    const [pairRows] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count FROM flightdeck_pg_channels
+      WHERE workspace_id = ${workspaceId} AND kind = 'dm' AND ${DM_ONLY_NPUB} = ANY(participant_npubs) AND ${AGENT_NPUB} = ANY(participant_npubs)
+    `;
+    expect(Number(pairRows.count)).toBe(1);
+
+    // A caller cannot request someone else's pair, and cannot be handed another pair's DM.
+    const impersonated = await requestJson(channelsPath, 'POST', agentSecret, { name: dmName, kind: 'dm', participant_npubs: [MEMBER_NPUB, OWNER_NPUB] });
+    expect(impersonated.res.status).toBe(400);
+
+    // Non-participants never see or read another pair's DM.
+    const bystanderChannels = await requestJson(channelsPath, 'GET', agentSecret);
+    const visible = (bystanderChannels.json.channels ?? []).map((channel: any) => channel.id);
+    expect(visible).not.toContain(petes.json.channel.id);
+    expect(visible).not.toContain(daughters.json.channel.id);
+    const peteVisible = (await requestJson(channelsPath, 'GET', memberSecret)).json.channels.map((channel: any) => channel.id);
+    expect(peteVisible).toContain(petes.json.channel.id);
+    expect(peteVisible).not.toContain(daughters.json.channel.id);
+    const base = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/channels`;
+    for (const secret of [agentSecret, dmOnlySecret]) {
+      const read = await requestJson(`${base}/${petes.json.channel.id}`, 'GET', secret);
+      expect([403, 404]).toContain(read.res.status);
+      const messages = await requestJson(`${base}/${petes.json.channel.id}/messages`, 'GET', secret);
+      expect([403, 404]).toContain(messages.res.status);
+    }
+
+    // Ordinary channel names stay unique per scope.
+    const first = await requestJson(channelsPath, 'POST', ownerSecret, { name: 'Same name', kind: 'channel' });
+    expect(first.res.status).toBe(201);
+    const second = await requestJson(channelsPath, 'POST', ownerSecret, { name: 'Same name', kind: 'channel' });
+    expect(second.res.status).toBe(409);
+  }, 20_000);
+  test('enforces one active DM per pair in the database and migrates historical duplicates without merging or deleting', async () => {
+    const { workspaceId, ownerId } = await seedWorkspace('npub1workspacedmpairmigration');
+    const [dmScope] = await sql<{ id: string }[]>`INSERT INTO flightdeck_pg_scopes(workspace_id,name,kind,created_by_actor_id) VALUES(${workspaceId},'Pair DMs','dm',${ownerId}) RETURNING id`;
+    const insertDm = (name: string, participants: string[], archived = false) => sql<{ id: string }[]>`
+      INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name,kind,participant_npubs,created_by_actor_id,archived_at)
+      VALUES(${workspaceId},${dmScope.id},${name},'dm',${participants},${ownerId},${archived ? new Date() : null})
+      RETURNING id`;
+    const [first] = await insertDm('first', [OWNER_NPUB, MEMBER_NPUB]);
+    // The database itself rejects a second active DM for the same pair, in either order.
+    await expect(insertDm('second', [MEMBER_NPUB, OWNER_NPUB])).rejects.toThrow(/duplicate key/i);
+    // Archived history for the pair and other pairs are unaffected.
+    await insertDm('archived', [OWNER_NPUB, MEMBER_NPUB], true);
+    await insertDm('other pair', [OWNER_NPUB, DM_ONLY_NPUB]);
+
+    // Simulate pre-fix data: duplicate active pairs with no key, then re-run the migration.
+    await sql`ALTER TABLE flightdeck_pg_channels DISABLE TRIGGER flightdeck_pg_channels_dm_pair_key`;
+    const [legacyDuplicate] = await insertDm('legacy duplicate', [MEMBER_NPUB, OWNER_NPUB]);
+    await sql`ALTER TABLE flightdeck_pg_channels ENABLE TRIGGER flightdeck_pg_channels_dm_pair_key`;
+    const before = await sql<{ id: string }[]>`SELECT id FROM flightdeck_pg_channels WHERE workspace_id = ${workspaceId} ORDER BY id`;
+    await ensureRuntimeSchema(sql);
+    const after = await sql<{ id: string; dm_pair_key: string | null }[]>`SELECT id, dm_pair_key FROM flightdeck_pg_channels WHERE workspace_id = ${workspaceId} ORDER BY id`;
+    expect(after.map((row) => row.id)).toEqual(before.map((row) => row.id));
+    expect(after.find((row) => row.id === first.id)?.dm_pair_key).toBe([OWNER_NPUB, MEMBER_NPUB].sort().join('|'));
+    expect(after.find((row) => row.id === legacyDuplicate.id)?.dm_pair_key).toBeNull();
+    // The API reuses the oldest DM for the pair rather than creating or merging.
+    // An update that would make a second active DM share an existing pair (the identity-rotation case)
+    // must neither fail nor merge: the row is kept, keyless, and the original stays enforced.
+    const [other] = await sql<{ id: string }[]>`SELECT id FROM flightdeck_pg_channels WHERE workspace_id = ${workspaceId} AND name = 'other pair'`;
+    await sql`UPDATE flightdeck_pg_channels SET participant_npubs = ${[MEMBER_NPUB, OWNER_NPUB]} WHERE id = ${other.id}`;
+    const [collided] = await sql<{ dm_pair_key: string | null; archived_at: Date | null }[]>`SELECT dm_pair_key, archived_at FROM flightdeck_pg_channels WHERE id = ${other.id}`;
+    expect(collided).toEqual({ dm_pair_key: null, archived_at: null });
+    const [firstRow] = await sql<{ dm_pair_key: string | null }[]>`SELECT dm_pair_key FROM flightdeck_pg_channels WHERE id = ${first.id}`;
+    expect(firstRow.dm_pair_key).toBe([OWNER_NPUB, MEMBER_NPUB].sort().join('|'));
+    const member = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/members`, 'POST', ownerSecret, { member_npub: MEMBER_NPUB, role: 'member', kind: 'human', display_name: 'Pete' });
+    expect(member.res.status).toBe(201);
+    const scopePath = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/scopes/${dmScope.id}/channels`;
+    const reused = await requestJson(scopePath, 'POST', ownerSecret, { name: 'x', kind: 'dm', participant_npubs: [OWNER_NPUB, MEMBER_NPUB] });
+    expect([reused.res.status, JSON.stringify(reused.json.error), reused.json.channel?.id]).toEqual([200, undefined, first.id]);
+  }, 20_000);
 });

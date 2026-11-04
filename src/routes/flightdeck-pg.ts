@@ -4878,10 +4878,46 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/scopes/:scopeId/channels', asy
         `;
         if (existing) return { channel: existing, auditId: null };
       }
+      let channelName = name;
+      if (kind === 'dm' && !selfDm) {
+        // Identity of a DM is the exact unordered participant pair within the
+        // workspace; the requested name never decides uniqueness or matching.
+        const pairNpubs = [...participantNpubs].sort();
+        if (pairNpubs.length !== 2 || !pairNpubs.includes(auth.userNpub)) {
+          throw new Error('DM requester must be one of the two participants');
+        }
+        const pairKey = `${context.workspace.id}|${pairNpubs.join('|')}`;
+        // Pair lock converges repeated requests; the scope lock (same order as
+        // createFlightDeckPgChannel) makes the name lookup and insert atomic
+        // against other pairs creating DMs in this scope concurrently.
+        await sql`SELECT pg_advisory_xact_lock(hashtextextended(${pairKey}, 0))`;
+        await sql`SELECT id FROM flightdeck_pg_scopes WHERE workspace_id = ${context.workspace.id} AND id = ${scopeId} FOR UPDATE`;
+        const [existingDm] = await sql<FlightDeckPgChannelRow[]>`
+          SELECT *
+          FROM flightdeck_pg_channels
+          WHERE workspace_id = ${context.workspace.id}
+            AND kind = 'dm'
+            AND archived_at IS NULL
+            AND participant_npubs IS NOT NULL
+            AND (SELECT array_agg(DISTINCT participant ORDER BY participant) FROM unnest(participant_npubs) AS participant) = ${pairNpubs}::text[]
+          ORDER BY created_at ASC, id ASC
+          LIMIT 1
+        `;
+        if (existingDm) return { channel: existingDm, auditId: null, reused: true };
+        // Keep the requested display name when free. Names are unique per scope,
+        // so another pair's DM (or any channel) holding it gets a deterministic
+        // numbered fallback, chosen under the scope lock so check+insert is atomic.
+        const likePattern = name.replace(/[\\%_]/g, '\\$&') + '%';
+        const taken = new Set((await sql<{ name: string }[]>`
+          SELECT name FROM flightdeck_pg_channels WHERE scope_id = ${scopeId} AND name LIKE ${likePattern}
+        `).map((row) => row.name));
+        channelName = name;
+        for (let n = 2; taken.has(channelName); n += 1) channelName = `${name} (${n})`;
+      }
       const channel = await createFlightDeckPgChannel({
         workspaceId: context.workspace.id,
         scopeId,
-        name,
+        name: channelName,
         description: typeof body.description === 'string' ? body.description : null,
         metadata: normalizedChannelMetadata.metadata,
         kind,
@@ -4926,18 +4962,20 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/scopes/:scopeId/channels', asy
           ? { participant_npubs: participantNpubs, initial_grants: initialGrants.length }
           : undefined,
       }, sql);
-      return { channel, auditId };
+      return { channel, auditId, reused: false };
     });
 
     return c.json({
       identity,
       channel: serializeFlightDeckPgChannel(payload.channel),
-      audit: {
-        event_id: payload.auditId,
-        operation: 'channel.create',
-        actor_npub: auth.userNpub,
-      },
-    }, 201);
+      ...(payload.reused ? { reused: true } : {
+        audit: {
+          event_id: payload.auditId,
+          operation: 'channel.create',
+          actor_npub: auth.userNpub,
+        },
+      }),
+    }, payload.reused ? 200 : 201);
   } catch (error) {
     if (error instanceof Error && /duplicate key value/i.test(error.message)) {
       return jsonError(c, 409, 'duplicate_channel', 'Channel name already exists in this scope', identity);

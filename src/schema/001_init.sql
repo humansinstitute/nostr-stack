@@ -667,6 +667,7 @@ CREATE TABLE IF NOT EXISTS flightdeck_pg_channels (
   kind TEXT NOT NULL DEFAULT 'channel',
   position INTEGER,
   participant_npubs TEXT[],
+  dm_pair_key TEXT,
   created_by_actor_id UUID REFERENCES flightdeck_pg_actors(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -683,6 +684,37 @@ CREATE TABLE IF NOT EXISTS flightdeck_pg_channels (
 
 CREATE INDEX IF NOT EXISTS idx_flightdeck_pg_channels_scope_position
   ON flightdeck_pg_channels(workspace_id, scope_id, position ASC NULLS LAST, created_at ASC, id ASC);
+
+-- One active DM per exact unordered participant pair (see ensure-runtime-schema.ts).
+CREATE OR REPLACE FUNCTION flightdeck_pg_channels_set_dm_pair_key() RETURNS trigger AS $fn$
+BEGIN
+  IF NEW.kind = 'dm' AND NEW.participant_npubs IS NOT NULL THEN
+    NEW.dm_pair_key := (
+      SELECT string_agg(participant, '|' ORDER BY participant)
+      FROM (SELECT DISTINCT participant FROM unnest(NEW.participant_npubs) AS participant) AS pair
+    );
+  ELSE
+    NEW.dm_pair_key := NULL;
+  END IF;
+  IF TG_OP = 'UPDATE' AND NEW.dm_pair_key IS NOT NULL AND NEW.archived_at IS NULL AND EXISTS (
+    SELECT 1 FROM flightdeck_pg_channels other
+    WHERE other.workspace_id = NEW.workspace_id AND other.kind = 'dm' AND other.archived_at IS NULL
+      AND other.dm_pair_key = NEW.dm_pair_key AND other.id <> NEW.id
+  ) THEN
+    RAISE WARNING 'DM % now duplicates the participant pair of another active DM; left unmerged and outside pair uniqueness', NEW.id;
+    NEW.dm_pair_key := NULL;
+  END IF;
+  RETURN NEW;
+END;
+$fn$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER flightdeck_pg_channels_dm_pair_key
+BEFORE INSERT OR UPDATE OF kind, participant_npubs ON flightdeck_pg_channels
+FOR EACH ROW EXECUTE FUNCTION flightdeck_pg_channels_set_dm_pair_key();
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fd_pg_channels_active_dm_pair
+  ON flightdeck_pg_channels(workspace_id, dm_pair_key)
+  WHERE kind = 'dm' AND archived_at IS NULL AND dm_pair_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS flightdeck_pg_permission_definitions (
   permission TEXT PRIMARY KEY,

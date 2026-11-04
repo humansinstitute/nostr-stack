@@ -12,6 +12,33 @@ import { readFileSync } from 'node:fs';
 
 type DbClient = ReturnType<typeof getDb>;
 
+// Shared with 001_init.sql so bootstrap and runtime schemas define the same trigger.
+// On UPDATE (e.g. identity rotation) a collision with another active DM for the
+// resulting pair leaves the row keyless with a warning instead of failing the
+// whole operation or merging conversations.
+const DM_PAIR_KEY_FUNCTION_SQL = `
+    CREATE OR REPLACE FUNCTION flightdeck_pg_channels_set_dm_pair_key() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW.kind = 'dm' AND NEW.participant_npubs IS NOT NULL THEN
+        NEW.dm_pair_key := (
+          SELECT string_agg(participant, '|' ORDER BY participant)
+          FROM (SELECT DISTINCT participant FROM unnest(NEW.participant_npubs) AS participant) AS pair
+        );
+      ELSE
+        NEW.dm_pair_key := NULL;
+      END IF;
+      IF TG_OP = 'UPDATE' AND NEW.dm_pair_key IS NOT NULL AND NEW.archived_at IS NULL AND EXISTS (
+        SELECT 1 FROM flightdeck_pg_channels other
+        WHERE other.workspace_id = NEW.workspace_id AND other.kind = 'dm' AND other.archived_at IS NULL
+          AND other.dm_pair_key = NEW.dm_pair_key AND other.id <> NEW.id
+      ) THEN
+        RAISE WARNING 'DM % now duplicates the participant pair of another active DM; left unmerged and outside pair uniqueness', NEW.id;
+        NEW.dm_pair_key := NULL;
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql`;
+
 function wappActivityPublishingV1Sql(): string {
   const migration = readFileSync(new URL('./001_init.sql', import.meta.url), 'utf8');
   const startMarker = '-- wapp_activity_publishing_v1';
@@ -4272,6 +4299,57 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
     WHERE channel.id = canonicalized.id
       AND channel.participant_npubs IS DISTINCT FROM canonicalized.participant_npubs
   `);
+
+  // A DM is identified by its exact unordered participant pair within a
+  // workspace. dm_pair_key is derived by trigger from participant_npubs so every
+  // writer (API, identity rotation, scripts) stays consistent, and a partial
+  // unique index enforces one active DM per pair. Historical duplicate pairs are
+  // never merged or deleted: the oldest keeps the key, later duplicates stay
+  // keyless (grandfathered) and are reported below instead of silently skipped.
+  // Sent as one multi-statement simple query so the column, trigger, backfill and
+  // index apply in a single implicit transaction with no unenforced window.
+  await sql.unsafe(`
+    ALTER TABLE flightdeck_pg_channels ADD COLUMN IF NOT EXISTS dm_pair_key TEXT;
+
+    ${DM_PAIR_KEY_FUNCTION_SQL};
+
+    CREATE OR REPLACE TRIGGER flightdeck_pg_channels_dm_pair_key
+    BEFORE INSERT OR UPDATE OF kind, participant_npubs ON flightdeck_pg_channels
+    FOR EACH ROW EXECUTE FUNCTION flightdeck_pg_channels_set_dm_pair_key();
+
+    WITH keyed AS (
+      SELECT c.id, c.archived_at, c.dm_pair_key IS NOT NULL AS already_keyed,
+        (SELECT string_agg(participant, '|' ORDER BY participant)
+         FROM (SELECT DISTINCT participant FROM unnest(c.participant_npubs) AS participant) AS pair) AS pair_key,
+        c.workspace_id, c.created_at
+      FROM flightdeck_pg_channels c
+      WHERE c.kind = 'dm' AND c.participant_npubs IS NOT NULL
+    ), ranked AS (
+      SELECT id, pair_key, archived_at,
+        row_number() OVER (
+          PARTITION BY workspace_id, pair_key
+          ORDER BY (archived_at IS NULL) DESC, already_keyed DESC, created_at ASC, id ASC
+        ) AS rank
+      FROM keyed
+    )
+    UPDATE flightdeck_pg_channels c
+    SET dm_pair_key = CASE WHEN ranked.archived_at IS NOT NULL OR ranked.rank = 1 THEN ranked.pair_key ELSE NULL END
+    FROM ranked
+    WHERE c.id = ranked.id
+      AND c.dm_pair_key IS DISTINCT FROM CASE WHEN ranked.archived_at IS NOT NULL OR ranked.rank = 1 THEN ranked.pair_key ELSE NULL END;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_fd_pg_channels_active_dm_pair
+    ON flightdeck_pg_channels(workspace_id, dm_pair_key)
+    WHERE kind = 'dm' AND archived_at IS NULL AND dm_pair_key IS NOT NULL
+  `);
+  const [grandfatheredDms] = await sql<{ count: string }[]>`
+    SELECT COUNT(*)::text AS count
+    FROM flightdeck_pg_channels
+    WHERE kind = 'dm' AND archived_at IS NULL AND participant_npubs IS NOT NULL AND dm_pair_key IS NULL
+  `;
+  if (Number(grandfatheredDms.count) > 0) {
+    console.warn(`[tower] ${grandfatheredDms.count} historical duplicate active DM(s) share a participant pair with an older DM; left unmerged and outside the pair uniqueness index. Review and archive manually.`);
+  }
 
   // Keep the runtime migration byte-for-byte aligned with the bootstrap schema.
   // This block is additive in v1 and can safely run on every startup.
