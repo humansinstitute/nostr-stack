@@ -10029,7 +10029,9 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/agent-activities/:activityId/l
       message: rejection.message,
       identity,
       server_time: serverTime,
-      ...(await callerClassified(c, auth, context.workspace.id) ? {} : { current: serializeFlightDeckPgAgentActivity(lease.activity) }),
+      // Only reached after the publisher check: this is always the caller's own lifecycle, so even a
+      // notification-only caller may see it (needed to adopt epoch/sequence).
+      current: serializeFlightDeckPgAgentActivity(lease.activity),
     }, rejection.status);
   }
   return c.json({

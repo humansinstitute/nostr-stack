@@ -384,6 +384,15 @@ async function bindingAllows(sql: Sql, request: Request, actorId: string, worksp
     if (!channelId || (b?.thread_id && !threadId)) return false;
     return bound('thread', threadId, channelId);
   }
+  // Lease renew/resume for the bot's OWN activity row only, under the same thread binding as its PUT. The row's
+  // immutable channel/thread come from Tower, never the request; another publisher's row is refused (no oracle).
+  if (method === 'POST' && (m = new RegExp(`^/agent-activities/(${UUID_SEG}|[0-9a-f]{32})/lease$`).exec(rest))) {
+    const [activity] = await sql<{ channel_id: string; thread_id: string | null }[]>`
+      SELECT channel_id, thread_id FROM flightdeck_pg_agent_activities
+      WHERE workspace_id = ${workspaceId} AND activity_id = ${m[1]!} AND publisher_actor_id = ${actorId}`;
+    if (!activity) return false;
+    return bound('thread', activity.thread_id, activity.channel_id);
+  }
   if (method === 'POST' && rest === '/response-activities') {
     const b = await body();
     const target = id(b?.target_id ?? b?.thread_id ?? b?.parent_comment_id);

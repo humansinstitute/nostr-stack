@@ -763,6 +763,41 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     expect((await request(fd(w1, `/agent-activities/${id.toUpperCase()}`), 'PUT', A, activity(A, o.threadId, o.messageId, 'turn-hex', 'x'))).status).toBe(403);
   });
 
+  test('a classified bot renews only its own thread-bound activity lease; other rows are refused without an oracle', async () => {
+    const o = await origin('activity-lease');
+    const activityId = createHash('sha256').update(`${w1}:turn-lease:${npubs[A]}`).digest('hex').slice(0, 32);
+    const put = await request(fd(w1, `/agent-activities/${activityId}`), 'PUT', A, {
+      contract: 'agent-activity/v2', channel_id: ch1, thread_id: o.threadId, trigger_message_id: o.messageId, turn_id: 'turn-lease',
+      session_id: 'session-lease', agent_npub: npubs[A], state: 'working', visibility: 'user_visible', sequence: 1,
+    });
+    expect([200, 201]).toContain(put.status);
+    const renew = (actor: number, id: string, sequence: number) => request(fd(w1, `/agent-activities/${id}/lease`), 'POST', actor, {
+      action: 'renew', turn_id: 'turn-lease', session_id: 'session-lease', agent_npub: npubs[actor], lease_epoch: 1, lease_sequence: sequence,
+    });
+    const renewed = await renew(A, activityId, 1);
+    expect(renewed.status).toBe(200);
+    expect(renewed.body.agent_activity).toMatchObject({ lease_sequence: 1, lease_epoch: 1 });
+    expect(typeof renewed.body.server_time).toBe('string');
+    expect(renewed.body.outbox).toBeUndefined();
+    // Own-row rejection carries its own current lease so the producer can adopt ordering.
+    const stale = await renew(A, activityId, 0);
+    expect([stale.status, stale.body.code, stale.body.current?.lease_sequence]).toEqual([409, 'stale_lease_sequence', 1]);
+    // Another publisher's row and an unknown id are refused identically before any handler runs.
+    const other = await origin('activity-lease-b');
+    const forB = await post(ch1, 'B lease', { threadId: other.threadId, mentions: [B] });
+    const bId = createHash('sha256').update(`${w1}:turn-lease-b:${npubs[B]}`).digest('hex').slice(0, 32);
+    expect([200, 201]).toContain((await request(fd(w1, `/agent-activities/${bId}`), 'PUT', B, {
+      channel_id: ch1, thread_id: other.threadId, trigger_message_id: forB.body.message.id, turn_id: 'turn-lease-b', session_id: 'session-b',
+      agent_npub: npubs[B], state: 'working', visibility: 'user_visible', sequence: 1, summary: 'SENTINEL-B-LEASE-ROW',
+    })).status);
+    const foreign = await renew(A, bId, 5);
+    const unknown = await renew(A, 'f'.repeat(32), 5);
+    expect([foreign.status, foreign.body.code]).toEqual([403, 'agent_notification_upgrade_required']);
+    expect(foreign.text).not.toContain('SENTINEL-B-LEASE-ROW');
+    const strip = (body: any) => { const { identity: _identity, ...rest } = body; return JSON.stringify(rest); };
+    expect(strip(foreign.body)).toBe(strip(unknown.body));
+  });
+
   test('a receipted lease conflict is bare: no other holder, lease id or expiry', async () => {
     const o = await origin('lease-conflict');
     const doc = await createDoc(A, 'Lease doc', o.notificationId);
