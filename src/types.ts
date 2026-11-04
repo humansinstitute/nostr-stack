@@ -3642,3 +3642,39 @@ export interface AgentNotificationContextChannel {
   metadata: Record<string, unknown>;
   agent_chat: unknown;
 }
+
+/** Preview reflects exact Tower grants, never infers content access from a scope. */
+export interface FlightDeckPgChannelMoveAccessActor {
+  actor_id: string;
+  npub: string;
+  label: string;
+  permissions: string[];
+}
+export interface FlightDeckPgChannelMoveGrant {
+  id: string;
+  principal_type: 'actor' | 'group';
+  principal_id: string;
+  permission: string;
+}
+export interface FlightDeckPgChannelMovePreview {
+  channel_id: string;
+  source_scope_id: string;
+  destination_scope_id: string;
+  confirmation_token: string;
+  access_changes: {
+    gained: FlightDeckPgChannelMoveAccessActor[];
+    lost: FlightDeckPgChannelMoveAccessActor[];
+    retained: FlightDeckPgChannelMoveAccessActor[];
+    direct_grants_preserved: true;
+    direct_grant_count: number;
+    unchanged_direct_grants: FlightDeckPgChannelMoveGrant[];
+    source_scope_access: FlightDeckPgChannelMoveAccessActor[];
+    destination_scope_access: FlightDeckPgChannelMoveAccessActor[];
+  };
+  warnings: string[];
+}
+export interface FlightDeckPgChannelMoveRequest {
+  destination_scope_id: string;
+  confirmation_token: string;
+  mutation_id: string;
+}

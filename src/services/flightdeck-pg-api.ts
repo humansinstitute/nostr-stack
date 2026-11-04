@@ -7206,7 +7206,7 @@ export async function listVisibleFlightDeckPgEvents(
           )
         )
         OR (
-          e.entity_type IN ('context_component','context_reference')
+          (e.entity_type IN ('context_component','context_reference') OR (e.entity_type='scope' AND e.event_type='scope.channels_changed'))
           AND EXISTS (
             SELECT 1 FROM flightdeck_pg_scopes s
             WHERE s.workspace_id=e.workspace_id AND s.id=e.scope_id AND s.archived_at IS NULL

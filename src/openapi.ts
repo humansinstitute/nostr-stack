@@ -2482,6 +2482,29 @@ export function buildOpenApiDocument(origin: string) {
 
       },
       schemas: {
+        FlightDeckPgChannelMoveAccessActor: {
+          type:'object', required:['actor_id','npub','label','permissions'],
+          properties:{actor_id:{type:'string',format:'uuid'},npub:{type:'string'},label:{type:'string'},permissions:{type:'array',items:{type:'string'}}},
+        },
+        FlightDeckPgChannelMoveGrant: {
+          type:'object',required:['id','principal_type','principal_id','permission'],
+          properties:{id:{type:'string',format:'uuid'},principal_type:{type:'string',enum:['actor','group']},principal_id:{type:'string',format:'uuid'},permission:{type:'string'}},
+        },
+        FlightDeckPgChannelMovePreview: {
+          type:'object', required:['channel_id','source_scope_id','destination_scope_id','confirmation_token','access_changes','warnings'],
+          properties:{channel_id:{type:'string',format:'uuid'},source_scope_id:{type:'string',format:'uuid'},destination_scope_id:{type:'string',format:'uuid'},confirmation_token:{type:'string',format:'uuid'},
+            warnings:{type:'array',items:{type:'string'}},access_changes:{type:'object',required:['gained','lost','retained','direct_grants_preserved','direct_grant_count','unchanged_direct_grants','source_scope_access','destination_scope_access'],
+              properties:{
+                gained:{type:'array',items:{$ref:'#/components/schemas/FlightDeckPgChannelMoveAccessActor'}},
+                lost:{type:'array',items:{$ref:'#/components/schemas/FlightDeckPgChannelMoveAccessActor'}},
+                retained:{type:'array',items:{$ref:'#/components/schemas/FlightDeckPgChannelMoveAccessActor'}},
+                direct_grants_preserved:{type:'boolean',enum:[true]},direct_grant_count:{type:'integer',minimum:0},
+                unchanged_direct_grants:{type:'array',items:{$ref:'#/components/schemas/FlightDeckPgChannelMoveGrant'}},
+                source_scope_access:{type:'array',items:{$ref:'#/components/schemas/FlightDeckPgChannelMoveAccessActor'}},
+                destination_scope_access:{type:'array',items:{$ref:'#/components/schemas/FlightDeckPgChannelMoveAccessActor'}},
+              }},
+          },
+        },
         FlightDeckPgPrivatePreference: {
           type:'object', required:['id','workspace_id','actor_id','preference_key','value','row_version','updated_at'],
           properties:{id:{type:'string',format:'uuid'},workspace_id:{type:'string',format:'uuid'},actor_id:{type:'string',format:'uuid'},preference_key:{type:'string',pattern:'^[a-z][a-z0-9_.-]{0,95}$'},value:{type:'string',maxLength:2048,description:'At most 2048 UTF-8 bytes; no ASCII control characters'},row_version:{type:'integer',minimum:1},updated_at:{type:'string',format:'date-time'}},
@@ -5042,6 +5065,36 @@ export function buildOpenApiDocument(origin: string) {
             '401': { description: 'Invalid NIP-98 auth', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
             '403': { description: 'Permission denied', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
             '404': { description: 'Channel not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+          },
+        },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/channels/{channelId}/move-preview': {
+        post: {
+          tags: ['Flight Deck PG'], summary: 'Preview channel relocation and effective access',
+          description: 'Requires channel.manage, channel.grants.read and scope.manage on both source and destination. Exact channel grants remain unchanged; scope grants do not inherit channel content access. Preview tokens bind requester, channel revision, scope and access state for 15 minutes. Confirm only after user reviews the preview. Stable IDs and all scope-bound contents are preserved. Exact mutation retries are safe; a superseded move returns 409. Notification-only agents retain their existing ceiling.',
+          parameters: [{name:'workspaceId',in:'path',required:true,schema:{type:'string',format:'uuid'}},{name:'channelId',in:'path',required:true,schema:{type:'string',format:'uuid'}}],
+          requestBody: {required:true,content:{'application/json':{schema:{type:'object',additionalProperties:false,required:['destination_scope_id'],properties:{destination_scope_id: {type:'string',format:'uuid'}}}}}},
+          responses: {
+            '200': {description:'Bound preview; no authoritative location change',content:{'application/json':{schema:{type:'object',required:['preview'],properties:{preview:{$ref:'#/components/schemas/FlightDeckPgChannelMovePreview'}}}}}},
+            '400': {description:'Malformed UUID or unexpected request field'}, '401': {description:'NIP-98 authentication required'},
+            '403': {description:'Channel management/grant disclosure or source/destination scope management denied'},
+            '404': {description:'Channel or scope not found in this workspace'},
+            '409': {description:'Stale/expired preview, concurrent change, reused mutation, superseded move, duplicate name, same destination, or unsupported archived/default/DM/system channel or scope'},
+          },
+        },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/channels/{channelId}/move': {
+        post: {
+          tags: ['Flight Deck PG'], summary: 'Atomically relocate a channel and its contents',
+          description: 'Requires channel.manage, channel.grants.read and scope.manage on both source and destination. Exact channel grants remain unchanged; scope grants do not inherit channel content access. Preview tokens bind requester, channel revision, scope and access state for 15 minutes. Confirm only after user reviews the preview. Stable IDs and all scope-bound contents are preserved. Exact mutation retries are safe; a superseded move returns 409. Notification-only agents retain their existing ceiling.',
+          parameters: [{name:'workspaceId',in:'path',required:true,schema:{type:'string',format:'uuid'}},{name:'channelId',in:'path',required:true,schema:{type:'string',format:'uuid'}}],
+          requestBody: {required:true,content:{'application/json':{schema:{type:'object',additionalProperties:false,required:['destination_scope_id','confirmation_token','mutation_id'],properties:{destination_scope_id: {type:'string',format:'uuid'}, confirmation_token: {type:'string',format:'uuid'}, mutation_id: {type:'string',format:'uuid'}}}}}},
+          responses: {
+            '200': {description:'Committed move or exact retry; current serialized channel',content:{'application/json':{schema:{type:'object',required:['channel','move'],properties:{channel:{type:'object',additionalProperties:true,required:['id','scope_id'],properties:{id:{type:'string',format:'uuid'},scope_id:{type:'string',format:'uuid'}}},move:{type:'object',required:['source_scope_id','destination_scope_id','mutation_id'],properties:{source_scope_id:{type:'string',format:'uuid'},destination_scope_id:{type:'string',format:'uuid'},mutation_id:{type:'string',format:'uuid'}}}}}}}},
+            '400': {description:'Malformed UUID or unexpected request field'}, '401': {description:'NIP-98 authentication required'},
+            '403': {description:'Channel management/grant disclosure or source/destination scope management denied'},
+            '404': {description:'Channel or scope not found in this workspace'},
+            '409': {description:'Stale/expired preview, concurrent change, reused mutation, superseded move, duplicate name, same destination, or unsupported archived/default/DM/system channel or scope'},
           },
         },
       },

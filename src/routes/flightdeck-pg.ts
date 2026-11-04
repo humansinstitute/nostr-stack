@@ -1,3 +1,4 @@
+import { runFlightDeckPgChannelMove, ChannelMoveError } from '../services/flightdeck-pg-channel-move';
 import { getWorkspaceApp } from '../services/workspace-apps';
 import { MembershipAdminError, previewWorkspaceMemberRemoval, removeWorkspaceMember, setWorkspaceAgentManager, inspectWorkspaceMemberAccess } from '../services/flightdeck-pg-membership-admin';
 import { registerPermissionDiagnosticRoutes } from './permission-diagnostics';
@@ -5056,6 +5057,31 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/channels/:channelId', async (
     return jsonError(c, 400, 'validation_error', error instanceof Error ? error.message : 'Channel could not be updated', identity);
   }
 });
+
+for (const operation of ['move-preview', 'move'] as const) {
+  flightDeckPgRouter.post(`/workspaces/:workspaceId/channels/:channelId/${operation}`, async (c) => {
+    const auth = await requireNip98AuthResolved(c);
+    if (auth instanceof Response) return auth;
+    const contextResult = await requireFlightDeckPgContext(c, auth.userNpub);
+    if ('response' in contextResult) return contextResult.response;
+    const { context, identity } = contextResult;
+    const body = await readJsonBody(c);
+    if (!body) return validationError(c, identity, [{path:'body',code:'invalid_json',message:'body must be valid JSON'}]);
+    const allowed = operation === 'move' ? ['destination_scope_id','confirmation_token','mutation_id'] : ['destination_scope_id'];
+    if (Object.keys(body).some(key => !allowed.includes(key))) return validationError(c, identity, [{path:'body',code:'unknown_field',message:'Unexpected channel move field'}]);
+    try {
+      const payload = await runFlightDeckPgChannelMove({workspaceId:context.workspace.id,appNpub:context.workspace.app_npub,actorNpub:auth.userNpub,
+        channelId:c.req.param('channelId'),destinationScopeId:body.destination_scope_id as string,
+        confirmationToken:body.confirmation_token as string,mutationId:body.mutation_id as string},operation === 'move');
+      return c.json({identity,...payload});
+    } catch (error) {
+      if (error instanceof ChannelMoveError) return jsonError(c,error.status,error.code,error.message,identity);
+      const code = (error as {code?:string}).code;
+      if (['23505','23503','40001','40P01'].includes(code || '')) return jsonError(c,409,'channel_move_conflict','Channel, content or access changed; refresh the preview and retry',identity);
+      throw error;
+    }
+  });
+}
 
 flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/reorder', async (c) => {
   const auth = await requireNip98AuthResolved(c);
