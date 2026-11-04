@@ -9,7 +9,7 @@ const tags = ['Agent notifications'];
 const security = [{ nip98: [] }];
 const strictNote = 'Strict exact-request NIP-98 in the Authorization header only (`?token` is rejected): tags `u` (exact URL with query), `method`, '
   + '`payload` (sha256 of the exact body; optional on bodyless GET/DELETE) and a unique `nonce` (16-128 chars); age <= 60s; '
-  + 'each signed event is accepted once (`nip98_replayed`). The recipient is always the verified signer.';
+  + 'each signed event is accepted once (`nip98_replayed`). The recipient is always the verified signer. Human/agent labels do not gate member inbox admission or self-restriction; app/service identities require an existing explicit notification-only profile.';
 const op = (summary: string, extra: Record<string, unknown> = {}) => ({
   tags, security, summary, description: [extra.description, strictNote].filter(Boolean).join('\n\n'),
   parameters: [workspaceParam, ...((extra.parameters as unknown[]) ?? [])],
@@ -17,7 +17,7 @@ const op = (summary: string, extra: Record<string, unknown> = {}) => ({
 });
 const authErrors = {
   '401': err('nip98_auth_required | nip98_header_required | nip98_invalid_event | nip98_url_mismatch | nip98_method_mismatch | nip98_stale_event | nip98_payload_mismatch | nip98_nonce_required | nip98_replayed'),
-  '403': err('workspace_membership_required | agent_identity_required | identity_rotated | subscription_revoked'),
+  '403': err('workspace_membership_required | notification_identity_ineligible | identity_rotated | subscription_revoked'),
 };
 
 export const agentNotificationSchemas = {

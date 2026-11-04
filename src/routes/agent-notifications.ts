@@ -4,7 +4,7 @@ import type { Sql } from '../services/notification-core';
 import { authorizeFlightDeckPgOperation } from '../services/flightdeck-pg-authorization';
 import {
   AGENT_NOTIFICATION_STREAM_MAX_SECONDS, AgentNotificationError, acknowledge, agentNotificationApiEnabled, buildContext,
-  clearAccessProfile, createOrRecoverSubscription, isClassifiedOrAgent, listInboxPage, readAccessProfile, readAttachment,
+  clearAccessProfile, createOrRecoverSubscription, isNotificationIdentity, listInboxPage, readAccessProfile, readAttachment,
   resolveRecipient, setAccessProfile, verifyAgentNotificationRequest, type StrictAuth,
 } from '../services/agent-notifications';
 
@@ -134,9 +134,8 @@ agentNotificationsRouter.put(`${BASE}/access-profile`, async (c) => {
     if (body.profile !== undefined && body.profile !== 'notification_only') throw new AgentNotificationError(400, 'validation_error', 'profile must be notification_only');
     if (body.scope !== undefined && body.scope !== 'workspace') throw new AgentNotificationError(400, 'validation_error', 'only workspace scope exists');
     const { caller, target } = await accessProfileParties(c, auth, body.actor_npub);
-    // A bot may restrict itself; a workspace manager may restrict a member agent IN THIS WORKSPACE only.
+    // An eligible member may restrict itself; restricting another member requires workspace.manage here.
     if (caller.actorId !== target.actorId) await requireManage(c, auth);
-    if (target.kind !== 'agent') throw new AgentNotificationError(403, 'agent_identity_required', 'Only agent identities can be classified notification-only');
     await setAccessProfile(sqlOf(), { workspaceId: target.workspaceId, targetActorId: target.actorId, byActorId: caller.actorId });
     return c.json({ actor_npub: target.npub, ...(await readAccessProfile(sqlOf(), target.workspaceId, target.actorId)) });
   } catch (error) { return errorResponse(c, error); }
@@ -205,7 +204,7 @@ async function accessProfileParties(c: Context, auth: StrictAuth, actorNpub: unk
   const targetNpub = typeof actorNpub === 'string' && actorNpub.trim() ? actorNpub.trim() : auth.userNpub;
   const target = targetNpub === auth.userNpub ? caller : await member(targetNpub);
   if (!target) throw new AgentNotificationError(404, 'actor_not_found', 'Target actor is not a member of this workspace');
-  if (!isClassifiedOrAgent(target) && caller.actorId === target.actorId) throw new AgentNotificationError(403, 'agent_identity_required', 'Only agent identities have an access profile');
+  if (!isNotificationIdentity(target)) throw new AgentNotificationError(403, 'notification_identity_ineligible', 'App and service identities require an existing explicit notification-only profile');
   return { caller, target };
 }
 

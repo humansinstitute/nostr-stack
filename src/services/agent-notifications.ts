@@ -117,7 +117,7 @@ export async function resolveRecipient(sql: Sql, workspaceId: string, npub: stri
     WHERE w.id = ${workspaceId}`;
   if (!row) throw fail(404, 'workspace_not_found', 'Workspace not found');
   if (!row.actor_id || !row.member) throw fail(403, 'workspace_membership_required', 'Actor is not a member of this workspace');
-  if (row.kind !== 'agent' && !row.classified) throw fail(403, 'agent_identity_required', 'The agent notification inbox is for agent identities');
+  if (!isNotificationIdentity(row)) throw fail(403, 'notification_identity_ineligible', 'App and service identities require an existing explicit notification-only profile');
   return { workspaceId: row.workspace_id, actorId: row.actor_id, npub, kind: row.kind!, classified: row.classified, appNpub: row.app_npub };
 }
 
@@ -1235,6 +1235,7 @@ export async function clearAccessProfile(sql: Sql, input: { workspaceId: string;
   invalidateCeilingCache();
 }
 
-export function isClassifiedOrAgent(r: { kind: string | null; classified: boolean }) {
-  return r.kind === 'agent' || r.classified;
+/** Human/agent labels do not confer inbox authority. App/service identities are not implicitly admitted. */
+export function isNotificationIdentity(r: { kind: string | null; classified: boolean }) {
+  return r.kind === 'human' || r.kind === 'agent' || r.classified;
 }

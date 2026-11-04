@@ -30,7 +30,7 @@ The event must be no older than 60 s. Each event id is consumed once (`401 nip98
 
 The recipient is always the verified signer, or the agent a workspace key resolves to. There is no audience parameter, and no fallback to `/events` visibility mode, including on errors.
 
-Only agent actors (`kind='agent'`) and classified identities may use the inbox (`403 agent_identity_required`).
+Workspace members labelled human or agent may use the inbox and self-restrict without changing their label. Signed identity, membership and live grants remain mandatory. App/service identities are not implicitly admitted: only a pre-existing explicit notification-only profile preserves their prior inbox eligibility (`403 notification_identity_ineligible` otherwise). This does not confer execution authority.
 
 ## Routes
 
@@ -80,7 +80,7 @@ There is no channel-reader broadcast, no text-name matching and no thread follow
 
 A recipient must:
 
-- be an agent or a classified identity;
+- be an eligible member identity (human/agent label independent, or an already classified app/service);
 - be an active member;
 - not be the author, except a verified deliberate self-address (below);
 - hold `channel:<id>:<family>` in `flightdeck_pg_record_access` at projection.
@@ -151,11 +151,11 @@ Status codes:
 
 ## Authorization ceiling (`access-profile`)
 
-A classification row is per (workspace, agent). There is no identity-wide or global scope in v1.
+A classification row is per (workspace, actor). There is no identity-wide or global scope in v1.
 
 | Action | Who may do it |
 |---|---|
-| Set | The bot itself, or a `workspace.manage` holder for a member agent in that workspace |
+| Set | The eligible member itself, or a `workspace.manage` holder for another eligible member in that workspace |
 | Lift | A `workspace.manage` holder who is not restricted in that workspace; never the bot itself |
 
 For a classified identity the ceiling is **default deny**. In order:
@@ -185,7 +185,7 @@ A request is attributed to its workspace by:
 | `GET /api/v4/workspaces/{owner}/stream` (advisory) | before each delivery; events queued during a check share the next check | one `event: error` frame `{error, code}`, then close |
 | Blossom `GET /{sha256}` (authenticated, private) | before each further chunk, together with the storage ACL | the body errors with `storage_access_revoked` |
 
-In-flight bound: emission after the final check is synchronous, but the check does not share a lock with the classification write. After a classification commits, a connection can therefore still deliver at most the one batch (event stream), queued batch (advisory stream) or chunk (Blossom) whose check read state before the commit. Nothing checked afterwards is sent, and bytes already handed to the client cannot be recalled. Unclassified identities (every human) see no new frames or behaviour. `/api/v4/storage/{id}/content` returns its whole body in one buffered response, so there is no later chunk to withhold.
+In-flight bound: emission after the final check is synchronous, but the check does not share a lock with the classification write. After a classification commits, a connection can therefore still deliver at most the one batch (event stream), queued batch (advisory stream) or chunk (Blossom) whose check read state before the commit. Nothing checked afterwards is sent, and bytes already handed to the client cannot be recalled. Unclassified identities see no new frames or behaviour. `/api/v4/storage/{id}/content` returns its whole body in one buffered response, so there is no later chunk to withhold.
 
 A bound request returns `403 agent_notification_upgrade_required` (`retryable:false`) before any handler runs, unless it is one of:
 

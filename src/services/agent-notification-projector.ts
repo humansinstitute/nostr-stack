@@ -9,8 +9,8 @@ import { liveOrigin } from './agent-work-receipts';
  *
  * Addressing comes ONLY from the same-transaction outbox payload of the exact source revision (canonical structured
  * mentions, explicit recipients, DM participants, assignments). There is no channel-reader broadcast, no text-name
- * matching, and a later revision never re-addresses an older event. Recipients must be agent actors (or identities
- * classified notification-only), active members, not the author (except a verified deliberate self-address, see
+ * matching, and a later revision never re-addresses an older event. Recipients are eligible human/agent identities (or explicitly
+ * classified app/service identities), active members, not the author (except a verified deliberate self-address, see
  * selfAddress), and currently hold the record-access key.
  *
  * Sequencing: the per-recipient counter row lock is held until commit, so per-recipient seq order equals commit order.
@@ -237,7 +237,7 @@ async function selfAddress(tx: Sql, w: string, ob: OutboxRow, message: { id: str
   return { actorId: message.created_by_actor_id, npub: author.npub, kind: 'chat_mention', reason: 'self_mention', originNotificationId: origin };
 }
 
-/** Resolve addresses to eligible recipients (agent or classified, member, not author unless self_mention, current ACL). */
+/** Resolve addresses to eligible recipients (human/agent label independent, member, not author unless self_mention, current ACL). */
 async function resolveRecipients(tx: Sql, workspaceId: string, source: AgentSource, addresses: AgentAddress[]) {
   const npubs = [...new Set(addresses.map((a) => a.npub).filter((v): v is string => Boolean(v)))];
   const ids = [...new Set(addresses.map((a) => a.actorId).filter((v): v is string => Boolean(v)))];
@@ -246,7 +246,7 @@ async function resolveRecipients(tx: Sql, workspaceId: string, source: AgentSour
     SELECT a.id, a.npub FROM flightdeck_pg_actors a
     JOIN flightdeck_pg_workspace_memberships m ON m.workspace_id = ${workspaceId} AND m.actor_id = a.id
     WHERE (a.id = ANY(${ids}::uuid[]) OR a.npub = ANY(${npubs}::text[]))
-      AND (a.kind = 'agent' OR EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = a.id AND p.workspace_id = ${workspaceId}))`;
+      AND (a.kind IN ('human', 'agent') OR EXISTS (SELECT 1 FROM flightdeck_pg_agent_access_profiles p WHERE p.actor_id = a.id AND p.workspace_id = ${workspaceId}))`;
   const byNpub = new Map(actors.map((a) => [a.npub, a.id]));
   const known = new Set(actors.map((a) => a.id));
   const aclKey = `channel:${source.channelId}:${source.aclFamily}`;

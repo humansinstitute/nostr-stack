@@ -160,7 +160,53 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     expect(Object.keys(n).sort()).toEqual(envelopeKeys); // no bodies, titles, prompts, names, URLs or other recipients
     expect((await all(B)).notifications).toHaveLength(0);
     const h = await subscribe(H);
-    expect([h.status, h.body.code]).toEqual([403, 'agent_identity_required']);
+    expect([200, 201]).toContain(h.status);
+  });
+
+  test('human-labelled member can self-restrict and receive bounded work without relabeling; authority boundaries remain', async () => {
+    const path = `${base()}/access-profile`;
+    expect((await call(path, 'GET', C)).status).toBe(200);
+    const unclassified = await subscribe(C, 'human-before-classification');
+    expect([200, 201]).toContain(unclassified.status);
+    const before = await post(ch1, 'human-labelled member addressed before classification', { mentions: [C], createThread: true });
+    await drain();
+    const beforePage = await page(C, unclassified.body.cursor);
+    expect(beforePage.body.notifications.some((n: any) => n.source?.id === before.message.id)).toBe(true);
+    expect((await db`SELECT kind FROM flightdeck_pg_actors WHERE id = ${actors[C]!}`)[0]!.kind).toBe('human');
+    expect((await call(path, 'PUT', C, { actor_npub: npubs[A] })).status).toBe(403);
+    expect((await call(path, 'PUT', H2, {})).body.code).toBe('workspace_membership_required');
+    expect((await call(path, 'PUT', H, { actor_npub: npubs[H2] })).body.code).toBe('actor_not_found');
+    expect((await subscribe(C, 'human-member', w2)).body.code).toBe('workspace_membership_required');
+    expect((await call(path, 'PUT', C, {})).status).toBe(200);
+    try {
+      const sub = await subscribe(C, 'human-member');
+      expect([200, 201]).toContain(sub.status);
+      const message = await post(ch1, 'bounded work for human-labelled identity', { mentions: [C], createThread: true });
+      await drain();
+      const delivered = await page(C, sub.body.cursor);
+      const notification = delivered.body.notifications.find((n: any) => n.source?.id === message.message.id);
+      expect(notification).toBeDefined();
+      const context = await call(`${base()}/${notification.id}/context`, 'GET', C);
+      expect(context.status).toBe(200);
+      expect(context.body.trigger.message.body).toBe('bounded work for human-labelled identity');
+      expect((await call(`${base()}?cursor=${encodeURIComponent(sub.body.cursor)}`, 'GET', A)).status).toBe(400);
+      expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/sync`, 'GET', C)).status).toBe(403);
+      expect((await call(path, 'DELETE', C)).body.code).toBe('ceiling_lift_forbidden');
+      expect((await db`SELECT kind FROM flightdeck_pg_actors WHERE id = ${actors[C]!}`)[0]!.kind).toBe('human');
+    } finally {
+      expect((await call(`${path}?actor_npub=${npubs[C]}`, 'DELETE', H)).status).toBe(200);
+    }
+    // Managers can restrict another member regardless of human/agent label, but no new app/service admission.
+    expect((await call(path, 'PUT', H, { actor_npub: npubs[C] })).status).toBe(200);
+    expect((await call(`${path}?actor_npub=${npubs[C]}`, 'DELETE', H)).status).toBe(200);
+    for (const kind of ['app', 'service']) {
+      await db`UPDATE flightdeck_pg_actors SET kind = ${kind} WHERE id = ${actors[C]!}`;
+      try {
+        expect((await subscribe(C, `not-${kind}`)).body.code).toBe('notification_identity_ineligible');
+        expect((await call(path, 'PUT', C, {})).body.code).toBe('notification_identity_ineligible');
+        expect((await call(path, 'PUT', H, { actor_npub: npubs[C] })).body.code).toBe('notification_identity_ineligible');
+      } finally { await db`UPDATE flightdeck_pg_actors SET kind = 'human' WHERE id = ${actors[C]!}`; }
+    }
   });
 
   test('context default = bounded effective transcript of the same thread lineage; sibling threads absent; foreign ids byte-identical 404', async () => {

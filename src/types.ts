@@ -3607,6 +3607,7 @@ export interface AgentNotificationPage {
   next_cursor: string;
   has_more: boolean;
 }
+/** Admission uses verified identity and workspace membership, independent of human/agent labels. */
 export interface AgentNotificationSubscriptionResponse {
   recipient_npub: string;
   created: boolean;
