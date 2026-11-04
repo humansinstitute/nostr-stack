@@ -24,6 +24,9 @@ export async function seedBoundedRecordWorkload(sql:ReturnType<typeof postgres>,
     const template=family==='personal_pin'?{id:c.actorId,workspace_id:c.workspaceId,actor_id:c.actorId,resource_type:'thread',resource_id:c.actorId,thread_id:c.actorId,pinned:true,pinned_at:'2026-01-01T00:00:00Z',row_version:1,updated_at:'2026-01-01T00:00:00Z'}
       :family==='scope_order'?{workspace_id:c.workspaceId,actor_id:c.actorId,scope_ids:[c.scopeId],row_version:1,updated_at:'2026-01-01T00:00:00Z'}
       :family==='context_component'?context.components[0]:family==='context_reference'?context.references[0]:canonical.find((r:any)=>r.family===family).row;
+    // jsonb_populate_record does not apply column defaults. Keep the additive
+    // thread attention default in this canonical workload template.
+    if (family === 'thread') template.attention ??= {policy_version:1,mention_activity_versions:{}};
     const table=`flightdeck_pg_${suffix}`;
     if(['doc','file','audio_note'].includes(family))for(let start=0;start<count;start+=1000)await sql`INSERT INTO v4_storage_objects(id,owner_npub,created_by_npub,file_name,content_type,storage_path)
       SELECT md5('storage-'||${family}||i::text)::uuid,'owner','creator',${family}||i::text,${family==='audio_note'?'audio/ogg':family==='doc'?'text/plain':'application/octet-stream'},'bounded-fixture/'||${family}||i::text

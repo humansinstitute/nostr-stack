@@ -2,3 +2,7 @@
 # not credentials; preserve scanning for all other history and future commits.
 20cc0e2255807f3afaba0c4778cd19cb709b73f4:docs/grasp-fips-poc-progress-2026-09-10.md:generic-api-key:125
 e77514af45668ff89104d956b68973f638a0daa0:tests/forgejo-native-boundary.test.ts:generic-api-key:9
+
+# Exact historical OpenAPI documentation prose about relationship validation.
+d4b48bbe42ea325bc6dff6a34e7a2c5478bd9614:src/openapi.ts:generic-api-key:6850
+8dc34ac7464f82e58498c0d290e5ddf5371144ac:src/openapi.ts:generic-api-key:6771
