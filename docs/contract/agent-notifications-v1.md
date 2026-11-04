@@ -333,3 +333,7 @@ Unclassified legacy bots remain an acknowledged exposure during the staged trans
 - Approval and flow-step notifications. They have no PG outbox events.
 - Reactions and generic storage reads by classified bots.
 - Any identity-wide (global) ceiling.
+
+### Exact DM activation facts
+
+The bounded context channel includes `participant_npubs`, read from the current channel in the same locked, relationship-revalidated snapshot. Consumers may activate an unmentioned DM only when `kind` is `dm` and exactly two distinct participants are the current addressed bot and the verified message author. Historical keys, instance identities, channel names and labels never substitute for either participant. Missing or malformed facts fail closed. This adds no ordinary channel-read permission; instruction signatures and instructor authorization remain mandatory. A handled inbox acknowledgement records processing, not an answered message; suppressed dispatch outcomes remain distinct.

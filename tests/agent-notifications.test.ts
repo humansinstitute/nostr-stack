@@ -227,6 +227,27 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     expect(JSON.stringify(events.body.events.map((e: any) => e.payload))).not.toContain('agent_direct_recipient_npub');
   });
 
+  test('DM context carries exact current participants and refuses foreign or removed recipients', async () => {
+    const dmNotifications = (await all(A)).notifications.filter((n: any) => n.kind === 'direct_message' && n.source.channel_id === dm);
+    expect(dmNotifications.length).toBeGreaterThan(0);
+    const notification = dmNotifications[0];
+    const context = await call(`${base()}/${notification.id}/context`, 'GET', A);
+    expect(context.status).toBe(200);
+    expect(context.body.channel.participant_npubs).toEqual([npubs[H], npubs[A]]);
+    expect(context.body.channel.kind).toBe('dm');
+    expect(context.body.trigger.message.mentions).toEqual([]);
+    expect(context.body.trigger.message.agent_instruction_signature.nostr_event.pubkey).toBe(getPublicKey(secrets[H]!));
+    expect((await call(`${base()}/${notification.id}/context`, 'GET', B)).status).toBe(404);
+    await db`UPDATE flightdeck_pg_channels SET participant_npubs = ${[npubs[H]!, npubs[B]!]} WHERE id = ${dm}`;
+    try {
+      const removed = await call(`${base()}/${notification.id}/context`, 'GET', A);
+      expect([removed.status, removed.body.code]).toEqual([403, 'relationship_removed']);
+      expect(removed.text).not.toContain(SENTINEL.dm);
+    } finally {
+      await db`UPDATE flightdeck_pg_channels SET participant_npubs = ${[npubs[H]!, npubs[A]!]} WHERE id = ${dm}`;
+    }
+  });
+
   test('tasks and invocations: assignment, comment mentions, prompt never in the envelope', async () => {
     const task = await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/tasks`, 'POST', H, { title: SENTINEL.task });
     expect(task.status).toBe(201);

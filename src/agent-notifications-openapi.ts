@@ -21,6 +21,12 @@ const authErrors = {
 };
 
 export const agentNotificationSchemas = {
+  AgentNotificationContextChannel: {
+    type: 'object', required: ['id', 'workspace_id', 'kind', 'participant_npubs'],
+    description: 'Current channel facts from the same locked, recipient-authorized snapshot. Exact participant identities only; no historical key aliases.',
+    properties: { id: uuid, workspace_id: uuid, scope_id: { ...uuid, nullable: true }, name: { type: 'string' }, kind: { type: 'string' },
+      participant_npubs: { type: 'array', items: { type: 'string' } }, metadata: { type: 'object' }, agent_chat: { type: 'object' } },
+  },
   AgentNotificationError: {
     type: 'object', required: ['error', 'code'],
     properties: { error: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' }, recovery_cursor: { type: 'string' }, from_seq: { type: 'integer' }, through_seq: { type: 'integer' } },
@@ -118,7 +124,7 @@ export const agentNotificationPaths = {
     get: op('Read bounded, revalidated context for one notification', {
       description: 'Recipient-bound, lock-linearized, relationship-revalidated. Default bounded_transcript (thread lineage incl. inherited range, <=20 messages / 32 KiB); AGENT_NOTIF_CONTEXT_POLICY=trigger_only for trigger only. No URLs. Unknown and foreign ids are byte-identical 404s.',
       parameters: [notificationParam],
-      responses: { '200': json({ type: 'object' }), '403': err('access_revoked | relationship_removed | workspace_membership_required'), '404': err('notification_not_found'), '410': err('source_gone'), '503': err('authorization_contention'), '401': authErrors['401'] },
+      responses: { '200': json({ type: 'object', properties: { channel: ref('AgentNotificationContextChannel') } }), '403': err('access_revoked | relationship_removed | workspace_membership_required'), '404': err('notification_not_found'), '410': err('source_gone'), '503': err('authorization_contention'), '401': authErrors['401'] },
     }),
   },
   [`${BASE}/{notificationId}/attachments/{storageObjectId}`]: {

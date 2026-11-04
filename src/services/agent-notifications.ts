@@ -1,3 +1,4 @@
+import type { AgentNotificationContextChannel } from '../types';
 import { createHash } from 'node:crypto';
 import { nip19, verifyEvent } from 'nostr-tools';
 import { getDb } from '../db';
@@ -1032,13 +1033,13 @@ async function contextIn(t: Sql, r: Recipient, n: FullNotification, policy: Cont
     await assertNotificationLive(t, r, n);
     const w = r.workspaceId;
     const gone = () => fail(410, 'source_gone', 'The notification source no longer exists at its notified location');
-    const [channel] = await t<{ id: string; scope_id: string; name: string; kind: string; metadata: any }[]>`
-      SELECT id, scope_id, name, kind, metadata FROM flightdeck_pg_channels WHERE workspace_id = ${w} AND id = ${n.channel_id} AND archived_at IS NULL`;
+    const [channel] = await t<{ id: string; scope_id: string; name: string; kind: string; participant_npubs: string[] | null; metadata: any }[]>`
+      SELECT id, scope_id, name, kind, participant_npubs, metadata FROM flightdeck_pg_channels WHERE workspace_id = ${w} AND id = ${n.channel_id} AND archived_at IS NULL`;
     if (!channel) throw gone();
     const base = {
       notification: serializeEnvelope(n),
       policy: { context: policy, window_messages: WINDOW_MESSAGES, window_bytes: WINDOW_BYTES },
-      channel: { id: channel.id, workspace_id: w, scope_id: channel.scope_id, name: channel.name, kind: channel.kind, metadata: { agent_chat: normalizeFlightDeckPgChannelMetadata(channel.metadata).agent_chat }, agent_chat: normalizeFlightDeckPgChannelMetadata(channel.metadata).agent_chat },
+      channel: { id: channel.id, workspace_id: w, scope_id: channel.scope_id, name: channel.name, kind: channel.kind, participant_npubs: channel.participant_npubs ?? [], metadata: { agent_chat: normalizeFlightDeckPgChannelMetadata(channel.metadata).agent_chat }, agent_chat: normalizeFlightDeckPgChannelMetadata(channel.metadata).agent_chat } satisfies AgentNotificationContextChannel,
     };
 
     if (n.source_type === 'message') {

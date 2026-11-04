@@ -3630,3 +3630,15 @@ export interface AgentWorkReceipt {
   /** Files: the exact receipted version. Null for other entity types. */
   version_id: string | null;
 }
+
+/** Current authoritative channel facts, returned only inside a live recipient-bound notification context. */
+export interface AgentNotificationContextChannel {
+  id: string;
+  workspace_id: string;
+  scope_id: string | null;
+  name: string;
+  kind: string;
+  participant_npubs: string[];
+  metadata: Record<string, unknown>;
+  agent_chat: unknown;
+}
