@@ -4,7 +4,7 @@ import { acquireDocumentEditSession } from './document-edit-session';
 import { DOCUMENT_EDIT_PROTOCOL, type DocumentEditSessionRequest } from '../types';
 import { inboxApiEnabled } from './notification-core';
 import { transportAdvertisement } from './notification-registry';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { getDb } from '../db';
 
 /**
@@ -1686,10 +1686,24 @@ export function serializeFlightDeckPgResponseActivity(activity: FlightDeckPgResp
 }
 
 export function serializeFlightDeckPgAgentActivity(activity: FlightDeckPgAgentActivityRow) {
+  // Resume challenge digests are server-internal proof state.
+  const {
+    lease_resume_challenge_sha256: _challenge,
+    lease_resume_challenge_expires_at: _challengeExpiresAt,
+    lease_resume_last_challenge_sha256: _lastChallenge,
+    ...publicActivity
+  } = activity;
+  const leaseLive = !activity.expired_at && new Date(activity.lease_expires_at).getTime() > Date.now();
   return {
-    ...activity,
+    ...publicActivity,
     sequence: Number(activity.sequence),
-    lease_health: activity.terminal_at || activity.lease_expires_at.getTime() > Date.now() ? 'live' : 'stale',
+    lease_epoch: Number(activity.lease_epoch ?? 1),
+    lease_sequence: Number(activity.lease_sequence ?? 0),
+    expired_at: activity.expired_at ?? null,
+    contract_version: Number(activity.contract_version ?? 1),
+    // Legacy vocabulary is stable: 'live' | 'stale'. Clients evaluate
+    // lease_expires_at themselves against server_time; this is a hint only.
+    lease_health: activity.terminal_at || leaseLive ? 'live' : 'stale',
     ...(activity.commentary_history
       ? {
           commentary_history: activity.commentary_history.map((entry) => ({
@@ -5759,6 +5773,20 @@ export async function clearFlightDeckPgResponseActivity(
 
 const terminalAgentActivityStates = new Set<FlightDeckPgAgentActivityState>(['completed', 'failed', 'cancelled']);
 
+/** Producer clocks may run ahead by at most this much; they can only shorten a lease. */
+export const AGENT_ACTIVITY_LEASE_SKEW_SECONDS = 30;
+/** One 60 s heartbeat interval plus the skew allowance. */
+export const AGENT_ACTIVITY_HEARTBEAT_MAX_AGE_SECONDS = 90;
+export const AGENT_ACTIVITY_RESUME_CHALLENGE_TTL_SECONDS = 60;
+export const AGENT_ACTIVITY_V2_LEASE_TTL = { min: 60, max: 300, default: 180 } as const;
+export const AGENT_ACTIVITY_V1_LEASE_TTL = { min: 30, max: 3600, default: 300 } as const;
+
+export function clampAgentActivityLeaseTtl(value: unknown, contractVersion: 1 | 2): number {
+  const bounds = contractVersion === 2 ? AGENT_ACTIVITY_V2_LEASE_TTL : AGENT_ACTIVITY_V1_LEASE_TTL;
+  const requested = Number(value || bounds.default);
+  return Math.max(bounds.min, Math.min(bounds.max, Math.floor(Number.isFinite(requested) ? requested : bounds.default)));
+}
+
 export async function listFlightDeckPgAgentActivities(
   input: { workspaceId: string; channelId: string; threadId?: string | null; activityId?: string | null; limit: number; historyLimit?: number; beforeSequence?: number | null; afterSequence?: number | null; afterCommentaryCursor?: string | null; beforeCreatedAt?: string | null; beforeId?: string | null },
   sql: DbClient = getDb(),
@@ -5830,25 +5858,34 @@ export async function upsertFlightDeckPgAgentActivity(
     summary?: string | null;
     body?: string | null;
     sequence: number;
-    expiresAt: Date;
+    /** 1 = legacy: every accepted write renews. 2 = only create and /lease move the lease. */
+    contractVersion: 1 | 2;
+    leaseTtlSeconds: number;
+    /** v2 create only: producer time can shorten, never extend, the initial lease. */
+    observedAt?: Date | null;
     blockedByTurnId: string | null;
     queuePosition: number | null;
   },
   sql: DbClient = getDb(),
 ): Promise<{ activity: FlightDeckPgAgentActivityRow; outcome: 'created' | 'updated' | 'idempotent' | 'stale' | 'terminal' | 'identity_mismatch' }> {
   const terminalAt = terminalAgentActivityStates.has(input.state) ? new Date() : null;
+  const observedAt = input.contractVersion === 2 ? input.observedAt ?? null : null;
+  // Database time is authoritative. A late v2 create replay arrives already expired.
   const rows = await sql<FlightDeckPgAgentActivityRow[]>`
     INSERT INTO flightdeck_pg_agent_activities (
       workspace_id, scope_id, channel_id, thread_id, trigger_message_id,
       turn_id, session_id, activity_id, agent_npub, publisher_actor_id, state,
       label, summary, body, visibility, sequence, expires_at, last_heartbeat_at,
-      lease_expires_at, blocked_by_turn_id, queue_position, terminal_at
+      lease_expires_at, blocked_by_turn_id, queue_position, terminal_at, contract_version
     ) VALUES (
       ${input.workspaceId}, ${input.scopeId}, ${input.channelId}, ${input.threadId}, ${input.triggerMessageId},
       ${input.turnId}, ${input.sessionId}, ${input.activityId}, ${input.agentNpub}, ${input.publisherActorId}, ${input.state},
       ${input.label ?? null}, ${input.summary ?? null}, ${input.body ?? null}, 'user_visible',
-      ${input.sequence}, ${input.expiresAt}, NOW(), ${input.expiresAt},
-      ${input.blockedByTurnId}, ${input.queuePosition}, ${terminalAt}
+      ${input.sequence},
+      LEAST(NOW(), COALESCE(${observedAt}::timestamptz + make_interval(secs => ${AGENT_ACTIVITY_LEASE_SKEW_SECONDS}), NOW())) + make_interval(secs => ${input.leaseTtlSeconds}),
+      NOW(),
+      LEAST(NOW(), COALESCE(${observedAt}::timestamptz + make_interval(secs => ${AGENT_ACTIVITY_LEASE_SKEW_SECONDS}), NOW())) + make_interval(secs => ${input.leaseTtlSeconds}),
+      ${input.blockedByTurnId}, ${input.queuePosition}, ${terminalAt}, ${input.contractVersion}
     )
     ON CONFLICT (workspace_id, activity_id) DO UPDATE SET
       state = EXCLUDED.state,
@@ -5857,9 +5894,25 @@ export async function upsertFlightDeckPgAgentActivity(
       summary = EXCLUDED.summary,
       body = EXCLUDED.body,
       sequence = EXCLUDED.sequence,
-      expires_at = EXCLUDED.expires_at,
-      last_heartbeat_at = EXCLUDED.last_heartbeat_at,
-      lease_expires_at = EXCLUDED.lease_expires_at,
+      -- Legacy v1 rows renew on every accepted write; a revival after expiry
+      -- opens a new lease epoch so clients order it after the expiry. Once
+      -- either side speaks v2, state/commentary writes never move the lease.
+      expires_at = CASE WHEN flightdeck_pg_agent_activities.contract_version = 1 AND EXCLUDED.contract_version = 1
+        THEN EXCLUDED.expires_at ELSE flightdeck_pg_agent_activities.expires_at END,
+      last_heartbeat_at = CASE WHEN flightdeck_pg_agent_activities.contract_version = 1 AND EXCLUDED.contract_version = 1
+        THEN EXCLUDED.last_heartbeat_at ELSE flightdeck_pg_agent_activities.last_heartbeat_at END,
+      lease_expires_at = CASE WHEN flightdeck_pg_agent_activities.contract_version = 1 AND EXCLUDED.contract_version = 1
+        THEN EXCLUDED.lease_expires_at ELSE flightdeck_pg_agent_activities.lease_expires_at END,
+      lease_epoch = CASE WHEN flightdeck_pg_agent_activities.contract_version = 1 AND EXCLUDED.contract_version = 1
+          AND (flightdeck_pg_agent_activities.expired_at IS NOT NULL OR flightdeck_pg_agent_activities.lease_expires_at <= NOW())
+        THEN flightdeck_pg_agent_activities.lease_epoch + 1 ELSE flightdeck_pg_agent_activities.lease_epoch END,
+      lease_sequence = CASE WHEN flightdeck_pg_agent_activities.contract_version = 1 AND EXCLUDED.contract_version = 1
+        THEN CASE WHEN flightdeck_pg_agent_activities.expired_at IS NOT NULL OR flightdeck_pg_agent_activities.lease_expires_at <= NOW()
+          THEN 0 ELSE flightdeck_pg_agent_activities.lease_sequence + 1 END
+        ELSE flightdeck_pg_agent_activities.lease_sequence END,
+      expired_at = CASE WHEN flightdeck_pg_agent_activities.contract_version = 1 AND EXCLUDED.contract_version = 1
+        THEN NULL ELSE flightdeck_pg_agent_activities.expired_at END,
+      contract_version = GREATEST(flightdeck_pg_agent_activities.contract_version, EXCLUDED.contract_version),
       blocked_by_turn_id = EXCLUDED.blocked_by_turn_id,
       queue_position = EXCLUDED.queue_position,
       terminal_at = EXCLUDED.terminal_at,
@@ -5917,6 +5970,208 @@ export async function upsertFlightDeckPgAgentActivity(
       && current.label === (input.label ?? null) && current.summary === (input.summary ?? null)
       && current.body === (input.body ?? null)) return { activity: current, outcome: 'idempotent' };
   return { activity: current, outcome: current.terminal_at ? 'terminal' : 'stale' };
+}
+
+export type FlightDeckPgAgentActivityLeaseAction = 'renew' | 'resume_challenge' | 'resume';
+
+export type FlightDeckPgAgentActivityLeaseOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'identity_mismatch' | 'terminal' | 'stale_lease_epoch' | 'stale_lease_sequence' | 'heartbeat_too_old'
+      | 'lease_live' | 'resume_challenge_invalid'; activity: FlightDeckPgAgentActivityRow; serverTime: Date }
+  /** Rejected renewal; `expiredNow` means this transaction recorded expired_at and must emit the expiry event. */
+  | { outcome: 'lease_expired'; activity: FlightDeckPgAgentActivityRow; serverTime: Date; expiredNow: boolean }
+  | { outcome: 'idempotent'; activity: FlightDeckPgAgentActivityRow; serverTime: Date }
+  | { outcome: 'renewed' | 'resumed'; activity: FlightDeckPgAgentActivityRow; serverTime: Date }
+  | { outcome: 'challenge_issued'; activity: FlightDeckPgAgentActivityRow; serverTime: Date;
+      challenge: { value: string; expiresAt: Date } };
+
+function sha256HexText(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+/**
+ * Lease renewal and resume, transactional against the database deadline. Must
+ * run inside a transaction: the row is locked, NOW() is the transaction time,
+ * and a rejected request changes nothing except recording an observed expiry.
+ * Neither the canonical sequence nor the lease sequence ever advances on
+ * rejection, so a dead heartbeat can never block a later terminal write.
+ */
+export async function applyFlightDeckPgAgentActivityLease(
+  input: {
+    workspaceId: string;
+    activityId: string;
+    publisherActorId: string;
+    agentNpub: string;
+    turnId: string;
+    sessionId: string;
+    action: FlightDeckPgAgentActivityLeaseAction;
+    leaseEpoch: number | null;
+    leaseSequence: number | null;
+    observedAt: Date | null;
+    ttlSeconds: number;
+    challenge: string | null;
+  },
+  sql: DbClient,
+): Promise<FlightDeckPgAgentActivityLeaseOutcome> {
+  const [row] = await sql<(FlightDeckPgAgentActivityRow & { db_now: Date })[]>`
+    SELECT *, NOW() AS db_now FROM flightdeck_pg_agent_activities
+    WHERE workspace_id = ${input.workspaceId} AND activity_id = ${input.activityId}
+    FOR UPDATE
+  `;
+  // Another publisher's lifecycle is indistinguishable from a missing one.
+  if (!row || row.publisher_actor_id !== input.publisherActorId || row.agent_npub !== input.agentNpub) return { outcome: 'not_found' };
+  const { db_now: serverTime, ...activity } = row;
+  if (activity.turn_id !== input.turnId || activity.session_id !== input.sessionId) {
+    return { outcome: 'identity_mismatch', activity, serverTime };
+  }
+  if (activity.terminal_at) return { outcome: 'terminal', activity, serverTime };
+  const storedEpoch = Number(activity.lease_epoch);
+  const storedSequence = Number(activity.lease_sequence);
+  const leaseLive = !activity.expired_at && new Date(activity.lease_expires_at).getTime() > serverTime.getTime();
+  const skewMs = AGENT_ACTIVITY_LEASE_SKEW_SECONDS * 1000;
+
+  if (input.action === 'renew') {
+    if (input.leaseEpoch !== storedEpoch) return { outcome: 'stale_lease_epoch', activity, serverTime };
+    if (input.leaseSequence === null || input.leaseSequence < storedSequence) return { outcome: 'stale_lease_sequence', activity, serverTime };
+    if (!leaseLive) {
+      if (activity.expired_at) return { outcome: 'lease_expired', activity, serverTime, expiredNow: false };
+      const [expired] = await sql<FlightDeckPgAgentActivityRow[]>`
+        UPDATE flightdeck_pg_agent_activities SET expired_at = NOW()
+        WHERE id = ${activity.id} RETURNING *
+      `;
+      return { outcome: 'lease_expired', activity: expired, serverTime, expiredNow: true };
+    }
+    if (input.leaseSequence === storedSequence) return { outcome: 'idempotent', activity, serverTime };
+    if (input.observedAt && input.observedAt.getTime() < serverTime.getTime() - AGENT_ACTIVITY_HEARTBEAT_MAX_AGE_SECONDS * 1000) {
+      return { outcome: 'heartbeat_too_old', activity, serverTime };
+    }
+    const base = new Date(Math.min(serverTime.getTime(), input.observedAt ? input.observedAt.getTime() + skewMs : serverTime.getTime()));
+    const [renewed] = await sql<FlightDeckPgAgentActivityRow[]>`
+      UPDATE flightdeck_pg_agent_activities SET
+        lease_sequence = ${input.leaseSequence},
+        last_heartbeat_at = NOW(),
+        lease_expires_at = ${base}::timestamptz + make_interval(secs => ${input.ttlSeconds}),
+        expires_at = ${base}::timestamptz + make_interval(secs => ${input.ttlSeconds}),
+        contract_version = 2
+      WHERE id = ${activity.id} RETURNING *
+    `;
+    return { outcome: 'renewed', activity: renewed, serverTime };
+  }
+
+  if (input.action === 'resume_challenge') {
+    if (leaseLive) return { outcome: 'lease_live', activity, serverTime };
+    const value = randomBytes(32).toString('hex');
+    const [challenged] = await sql<FlightDeckPgAgentActivityRow[]>`
+      UPDATE flightdeck_pg_agent_activities SET
+        lease_resume_challenge_sha256 = ${sha256HexText(value)},
+        lease_resume_challenge_expires_at = NOW() + make_interval(secs => ${AGENT_ACTIVITY_RESUME_CHALLENGE_TTL_SECONDS})
+      WHERE id = ${activity.id} RETURNING *
+    `;
+    return { outcome: 'challenge_issued', activity: challenged, serverTime,
+      challenge: { value, expiresAt: challenged.lease_resume_challenge_expires_at as Date } };
+  }
+
+  // resume: fresh single-use Tower challenge bound to this lifecycle and epoch.
+  const challengeSha = input.challenge ? sha256HexText(input.challenge) : null;
+  if (challengeSha && input.leaseEpoch === storedEpoch && activity.lease_resume_last_challenge_sha256 === challengeSha) {
+    return { outcome: 'idempotent', activity, serverTime };
+  }
+  if (input.leaseEpoch !== storedEpoch + 1) return { outcome: 'stale_lease_epoch', activity, serverTime };
+  if (leaseLive) return { outcome: 'lease_live', activity, serverTime };
+  if (!challengeSha || !activity.lease_resume_challenge_sha256 || activity.lease_resume_challenge_sha256 !== challengeSha
+      || !activity.lease_resume_challenge_expires_at
+      || new Date(activity.lease_resume_challenge_expires_at).getTime() <= serverTime.getTime()) {
+    return { outcome: 'resume_challenge_invalid', activity, serverTime };
+  }
+  const [resumed] = await sql<FlightDeckPgAgentActivityRow[]>`
+    UPDATE flightdeck_pg_agent_activities SET
+      lease_epoch = ${storedEpoch + 1},
+      lease_sequence = ${Math.max(0, input.leaseSequence ?? 0)},
+      last_heartbeat_at = NOW(),
+      lease_expires_at = NOW() + make_interval(secs => ${input.ttlSeconds}),
+      expires_at = NOW() + make_interval(secs => ${input.ttlSeconds}),
+      expired_at = NULL,
+      lease_resume_challenge_sha256 = NULL,
+      lease_resume_challenge_expires_at = NULL,
+      lease_resume_last_challenge_sha256 = ${challengeSha},
+      contract_version = 2
+    WHERE id = ${activity.id} RETURNING *
+  `;
+  return { outcome: 'resumed', activity: resumed, serverTime };
+}
+
+export type FlightDeckPgAgentActivityLeaseEvent = 'renewed' | 'resumed' | 'expired';
+
+/**
+ * Lease changes reuse the existing snapshot envelope so current readers keep
+ * refetching/merging. The canonical sequence is unchanged; readers order lease
+ * fields by (lease_epoch, lease_sequence). Empty commentary_history: a lease
+ * event never carries or implies commentary.
+ */
+export function buildFlightDeckPgAgentActivityLeaseEventPayload(
+  activity: FlightDeckPgAgentActivityRow,
+  leaseEvent: FlightDeckPgAgentActivityLeaseEvent,
+  serverTime: Date,
+) {
+  const serialized = { ...serializeFlightDeckPgAgentActivity({ ...activity, commentary_history: undefined }), commentary_history: [] };
+  return {
+    agent_activity: serialized,
+    activity_id: activity.activity_id,
+    turn_id: activity.turn_id,
+    thread_id: activity.thread_id,
+    trigger_message_id: activity.trigger_message_id,
+    lease_event: leaseEvent,
+    lease_epoch: serialized.lease_epoch,
+    lease_sequence: serialized.lease_sequence,
+    lease_expires_at: activity.lease_expires_at,
+    expired_at: activity.expired_at ?? null,
+    server_time: serverTime,
+  };
+}
+
+/**
+ * Marks lapsed, non-terminal leases expired and emits one expiry event each so
+ * offline and replaying clients converge. Not needed for correctness: renewals
+ * check the deadline transactionally. Rows that lapsed long ago (pre-existing
+ * history) are marked silently to avoid an event burst on first deployment.
+ */
+export async function sweepExpiredFlightDeckPgAgentActivityLeases(
+  options: { limit?: number; eventWindowSeconds?: number } = {},
+  db: DbClient = getDb(),
+): Promise<{ expired: number; events: number }> {
+  const limit = Math.max(1, Math.min(500, options.limit ?? 500));
+  const eventWindowSeconds = Math.max(0, options.eventWindowSeconds ?? 3600);
+  return db.begin(async (tx) => {
+    const sql = tx as unknown as DbClient;
+    const rows = await sql<(FlightDeckPgAgentActivityRow & { emit_event: boolean; db_now: Date })[]>`
+      WITH due AS (
+        SELECT id FROM flightdeck_pg_agent_activities
+        WHERE terminal_at IS NULL AND expired_at IS NULL AND lease_expires_at <= NOW()
+        ORDER BY lease_expires_at
+        LIMIT ${limit}
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE flightdeck_pg_agent_activities activity SET expired_at = NOW()
+      FROM due WHERE activity.id = due.id
+      RETURNING activity.*, (activity.lease_expires_at > NOW() - make_interval(secs => ${eventWindowSeconds})) AS emit_event, NOW() AS db_now
+    `;
+    let events = 0;
+    for (const { emit_event: emitEvent, db_now: serverTime, ...activity } of rows) {
+      if (!emitEvent) continue;
+      await createFlightDeckPgAgentActivityOutboxEvent({
+        workspaceId: activity.workspace_id,
+        scopeId: activity.scope_id,
+        channelId: activity.channel_id,
+        actorId: activity.publisher_actor_id,
+        entityId: activity.id,
+        operation: 'updated',
+        sequence: Number(activity.sequence),
+        payload: buildFlightDeckPgAgentActivityLeaseEventPayload(activity, 'expired', serverTime),
+      }, sql);
+      events += 1;
+    }
+    return { expired: rows.length, events };
+  }) as Promise<{ expired: number; events: number }>;
 }
 
 export async function listFlightDeckPgChannelTasks(

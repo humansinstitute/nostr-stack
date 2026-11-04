@@ -5157,6 +5157,232 @@ describe('Flight Deck PG API routes', () => {
 
   });
 
+  test('lease v2: transactional renew, expiry without sweeper, challenged resume, terminal wins, events carry deadlines', async () => {
+    const { workspaceId } = await seedWorkspace('npub1workspaceflightdeckpgagentlease');
+    const agentMember = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/members`, 'POST', ownerSecret, {
+      member_npub: AGENT_NPUB, role: 'agent', kind: 'agent', display_name: 'Lease Agent',
+    });
+    const viewerAgent = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/members`, 'POST', ownerSecret, {
+      member_npub: INACCESSIBLE_AGENT_NPUB, role: 'agent', kind: 'agent', display_name: 'Viewer Agent',
+    });
+    expect(agentMember.res.status).toBe(201);
+    const scope = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/scopes`, 'POST', ownerSecret, { name: 'Lease', kind: 'project' });
+    const channel = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/scopes/${scope.json.scope.id}/channels`, 'POST', ownerSecret, {
+      name: 'Lease Activity', kind: 'channel',
+      grants: [
+        { principal_type: 'actor', principal_id: agentMember.json.actor.actor_id, access_level: 'contribute' },
+        { principal_type: 'actor', principal_id: viewerAgent.json.actor.actor_id, access_level: 'view' },
+      ],
+    });
+    const channelId = channel.json.channel.id as string;
+    const triggerBody = 'Run the long job';
+    const trigger = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/channels/${channelId}/messages`, 'POST', ownerSecret, {
+      body: triggerBody, create_thread: true,
+      message_signature: messageSignature({ body: triggerBody, secret: ownerSecret, workspaceId, channelId }),
+    });
+    const threadId = trigger.json.thread.id as string;
+    const activityId = 'lease-activity-1';
+    const activityPath = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/agent-activities/${activityId}`;
+    const leasePath = `${activityPath}/lease`;
+    const base = {
+      contract: 'agent-activity/v2', channel_id: channelId, thread_id: threadId, trigger_message_id: trigger.json.message.id,
+      turn_id: 'lease-turn-1', session_id: 'lease-session-1', agent_npub: AGENT_NPUB, visibility: 'user_visible', expires_in_seconds: 180,
+    };
+    const leaseBase = { turn_id: base.turn_id, session_id: base.session_id, agent_npub: AGENT_NPUB };
+    const seq = 1_784_873_857_700_000;
+    const leaseEvents = async () => {
+      const events = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/events?limit=200`, 'GET', ownerSecret);
+      return events.json.events.filter((event: any) => event.event_type === 'flightdeck_pg.agent_activity.snapshot' && event.payload?.lease_event);
+    };
+    const dbLease = async (id = activityId) => (await sql<{ lease_expires_at: Date; lease_sequence: string; lease_epoch: number; sequence: string; expired_at: Date | null; db_now: Date }[]>`
+      SELECT lease_expires_at, lease_sequence::text, lease_epoch, sequence::text, expired_at, NOW() AS db_now
+      FROM flightdeck_pg_agent_activities WHERE workspace_id = ${workspaceId} AND activity_id = ${id}`)[0];
+
+    const invalidContract = await requestJson(activityPath, 'PUT', agentSecret, { ...base, contract: 'agent-activity/v9', state: 'accepted', sequence: seq });
+    expect(invalidContract.res.status).toBe(400);
+
+    // v2 create: 180 s lease from database time, fresh epoch, server_time for calibration.
+    const created = await requestJson(activityPath, 'PUT', agentSecret, { ...base, state: 'working', sequence: seq, observed_at: new Date().toISOString() });
+    expect(created.res.status).toBe(201);
+    expect(typeof created.json.server_time).toBe('string');
+    expect(created.json.agent_activity).toMatchObject({ contract_version: 2, lease_epoch: 1, lease_sequence: 0, expired_at: null, lease_health: 'live' });
+    for (const hidden of ['lease_resume_challenge_sha256', 'lease_resume_challenge_expires_at', 'lease_resume_last_challenge_sha256']) {
+      expect(Object.hasOwn(created.json.agent_activity, hidden)).toBe(false);
+    }
+    const createdLease = await dbLease();
+    const createdTtl = (createdLease.lease_expires_at.getTime() - createdLease.db_now.getTime()) / 1000;
+    expect(createdTtl).toBeGreaterThan(170);
+    expect(createdTtl).toBeLessThanOrEqual(181);
+
+    // v2 state/commentary never moves the lease.
+    const commentary = await requestJson(activityPath, 'PUT', agentSecret, { ...base, state: 'working', sequence: seq + 1, summary: 'Reading the repo', body: 'Reading the repository layout.' });
+    expect(commentary.res.status).toBe(200);
+    expect((await dbLease()).lease_expires_at.getTime()).toBe(createdLease.lease_expires_at.getTime());
+
+    // Renew: increasing lease_sequence; one snapshot-envelope event with the new deadline and unchanged sequence.
+    const renewBody = { ...leaseBase, action: 'renew', lease_epoch: 1, lease_sequence: 1, observed_at: new Date().toISOString(), expires_in_seconds: 180 };
+    const renewed = await requestJson(leasePath, 'POST', agentSecret, renewBody);
+    expect(renewed.res.status).toBe(200);
+    expect(renewed.json.agent_activity).toMatchObject({ lease_epoch: 1, lease_sequence: 1, sequence: seq + 1, lease_health: 'live' });
+    expect(renewed.json.outbox).toEqual(expect.objectContaining({ id: expect.any(String) }));
+    expect(typeof renewed.json.server_time).toBe('string');
+    let events = await leaseEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ entity_type: 'agent_activity', entity_row_version: seq + 1 });
+    expect(events[0].payload).toMatchObject({ lease_event: 'renewed', activity_id: activityId, turn_id: base.turn_id, lease_epoch: 1, lease_sequence: 1,
+      lease_expires_at: renewed.json.agent_activity.lease_expires_at, server_time: expect.any(String),
+      agent_activity: { lease_sequence: 1, commentary_history: [] } });
+    const [renewAudit] = await sql<{ count: string }[]>`SELECT COUNT(*)::text AS count FROM flightdeck_pg_audit_events WHERE workspace_id = ${workspaceId} AND action = 'agent_activity.lease_renew'`;
+    expect(renewAudit.count).toBe('1');
+
+    // Exact replay is idempotent (no event); lower/other-epoch writes are stale; nothing changes.
+    const replay = await requestJson(leasePath, 'POST', agentSecret, renewBody);
+    expect(replay.res.status).toBe(200);
+    expect(replay.json.idempotent).toBe(true);
+    expect(replay.json.outbox).toBeNull();
+    const lower = await requestJson(leasePath, 'POST', agentSecret, { ...renewBody, lease_sequence: 0 });
+    expect(lower.res.status).toBe(409);
+    expect(lower.json.code).toBe('stale_lease_sequence');
+    expect(typeof lower.json.server_time).toBe('string');
+    const wrongEpoch = await requestJson(leasePath, 'POST', agentSecret, { ...renewBody, lease_epoch: 2, lease_sequence: 5 });
+    expect(wrongEpoch.json.code).toBe('stale_lease_epoch');
+    const tooOld = await requestJson(leasePath, 'POST', agentSecret, { ...renewBody, lease_sequence: 2, observed_at: new Date(Date.now() - 120_000).toISOString() });
+    expect(tooOld.json.code).toBe('heartbeat_too_old');
+    // Producer clock ahead: it can only shorten, never extend, the lease.
+    const ahead = await requestJson(leasePath, 'POST', agentSecret, { ...renewBody, lease_sequence: 2, observed_at: new Date(Date.now() + 3_600_000).toISOString() });
+    expect(ahead.res.status).toBe(200);
+    const aheadLease = await dbLease();
+    expect((aheadLease.lease_expires_at.getTime() - aheadLease.db_now.getTime()) / 1000).toBeLessThanOrEqual(181);
+    const identity = await requestJson(leasePath, 'POST', agentSecret, { ...renewBody, turn_id: 'other-turn', lease_sequence: 3 });
+    expect(identity.json.code).toBe('agent_activity_turn_identity_mismatch');
+    const otherPublisher = await requestJson(leasePath, 'POST', inaccessibleAgentSecret, { ...renewBody, agent_npub: INACCESSIBLE_AGENT_NPUB, lease_sequence: 3 });
+    expect(otherPublisher.res.status).toBe(404);
+    const spoofed = await requestJson(leasePath, 'POST', inaccessibleAgentSecret, { ...renewBody, lease_sequence: 3 });
+    expect(spoofed.res.status).toBe(400);
+    expect((await dbLease()).lease_sequence).toBe('2');
+
+    // Deadline passes with no sweeper: a late renewal is rejected by database time, records
+    // expired_at once with one expiry event, and changes neither sequence nor lease_sequence.
+    await sql`UPDATE flightdeck_pg_agent_activities SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE workspace_id = ${workspaceId} AND activity_id = ${activityId}`;
+    const late = await requestJson(leasePath, 'POST', agentSecret, { ...renewBody, lease_sequence: 3, observed_at: new Date().toISOString() });
+    expect(late.res.status).toBe(409);
+    expect(late.json.code).toBe('agent_activity_lease_expired');
+    expect(late.json.current).toMatchObject({ lease_sequence: 2, sequence: seq + 1, lease_health: 'stale', expired_at: expect.any(String) });
+    const lateAgain = await requestJson(leasePath, 'POST', agentSecret, { ...renewBody, lease_sequence: 4 });
+    expect(lateAgain.json.code).toBe('agent_activity_lease_expired');
+    const afterLate = await dbLease();
+    expect(afterLate).toMatchObject({ lease_sequence: '2', sequence: String(seq + 1), lease_epoch: 1 });
+    events = await leaseEvents();
+    expect(events.map((event: any) => event.payload.lease_event)).toEqual(['renewed', 'renewed', 'expired']);
+    expect(events.at(-1).payload).toMatchObject({ lease_epoch: 1, lease_sequence: 2, expired_at: expect.any(String) });
+
+    // Durable replays add history only; liveness stays expired.
+    const replayedState = await requestJson(activityPath, 'PUT', agentSecret, { ...base, state: 'working', sequence: seq + 2, summary: 'Replayed late', body: 'Delivered after expiry.' });
+    expect(replayedState.res.status).toBe(200);
+    expect(replayedState.json.agent_activity).toMatchObject({ lease_health: 'stale', expired_at: expect.any(String) });
+    expect((await dbLease()).lease_expires_at.getTime()).toBe(afterLate.lease_expires_at.getTime());
+
+    // Resume needs a fresh, single-use Tower challenge bound to this lifecycle and epoch.
+    const missingChallenge = await requestJson(leasePath, 'POST', agentSecret, { ...leaseBase, action: 'resume', lease_epoch: 2 });
+    expect(missingChallenge.res.status).toBe(400);
+    const forged = await requestJson(leasePath, 'POST', agentSecret, { ...leaseBase, action: 'resume', lease_epoch: 2, challenge: 'a'.repeat(64) });
+    expect(forged.json.code).toBe('agent_activity_resume_challenge_invalid');
+    const issued = await requestJson(leasePath, 'POST', agentSecret, { ...leaseBase, action: 'resume_challenge' });
+    expect(issued.res.status).toBe(200);
+    // Capture before matching: asymmetric matchers can replace matched values in place.
+    const issuedChallenge = String(issued.json.challenge.value);
+    expect(issuedChallenge).toMatch(/^[0-9a-f]{64}$/);
+    expect(typeof issued.json.challenge.expires_at).toBe('string');
+    expect(issued.json.challenge).toMatchObject({ lease_epoch: 1, next_lease_epoch: 2 });
+    expect(issued.json.outbox).toBeNull();
+    const [stored] = await sql<{ digest: string }[]>`SELECT lease_resume_challenge_sha256 AS digest FROM flightdeck_pg_agent_activities WHERE workspace_id = ${workspaceId} AND activity_id = ${activityId}`;
+    expect(stored.digest).toBe(sha256Hex(issuedChallenge));
+    const sameEpoch = await requestJson(leasePath, 'POST', agentSecret, { ...leaseBase, action: 'resume', lease_epoch: 1, challenge: issuedChallenge });
+    expect(sameEpoch.json.code).toBe('stale_lease_epoch');
+    // An expired challenge (e.g. a durable queued resume arriving late) never renews.
+    await sql`UPDATE flightdeck_pg_agent_activities SET lease_resume_challenge_expires_at = NOW() - INTERVAL '1 second' WHERE workspace_id = ${workspaceId} AND activity_id = ${activityId}`;
+    const stale = await requestJson(leasePath, 'POST', agentSecret, { ...leaseBase, action: 'resume', lease_epoch: 2, challenge: issuedChallenge });
+    expect(stale.json.code).toBe('agent_activity_resume_challenge_invalid');
+    const fresh = await requestJson(leasePath, 'POST', agentSecret, { ...leaseBase, action: 'resume_challenge' });
+    const resumeBody = { ...leaseBase, action: 'resume', lease_epoch: 2, challenge: String(fresh.json.challenge.value), expires_in_seconds: 180 };
+    const resumed = await requestJson(leasePath, 'POST', agentSecret, resumeBody);
+    expect(resumed.res.status).toBe(200);
+    expect(resumed.json.agent_activity).toMatchObject({ lease_epoch: 2, lease_sequence: 0, expired_at: null, lease_health: 'live', sequence: seq + 2 });
+    const resumedRetry = await requestJson(leasePath, 'POST', agentSecret, resumeBody);
+    expect(resumedRetry.json.idempotent).toBe(true);
+    expect(resumedRetry.json.outbox).toBeNull();
+    const liveChallenge = await requestJson(leasePath, 'POST', agentSecret, { ...leaseBase, action: 'resume_challenge' });
+    expect(liveChallenge.json.code).toBe('agent_activity_lease_live');
+    const oldEpoch = await requestJson(leasePath, 'POST', agentSecret, { ...renewBody, lease_epoch: 1, lease_sequence: 10 });
+    expect(oldEpoch.json.code).toBe('stale_lease_epoch');
+    const newEpoch = await requestJson(leasePath, 'POST', agentSecret, { ...renewBody, lease_epoch: 2, lease_sequence: 1, observed_at: new Date().toISOString() });
+    expect(newEpoch.res.status).toBe(200);
+    events = await leaseEvents();
+    expect(events.map((event: any) => event.payload.lease_event)).toEqual(['renewed', 'renewed', 'expired', 'resumed', 'renewed']);
+
+    // Terminal always wins: accepted at the next canonical sequence; the lease is then closed.
+    const terminal = await requestJson(activityPath, 'PUT', agentSecret, { ...base, state: 'completed', sequence: seq + 3 });
+    expect(terminal.res.status).toBe(200);
+    const afterTerminal = await requestJson(leasePath, 'POST', agentSecret, { ...renewBody, lease_epoch: 2, lease_sequence: 2 });
+    expect(afterTerminal.json.code).toBe('agent_activity_terminal');
+    const lateCommentary = await requestJson(activityPath, 'PUT', agentSecret, { ...base, state: 'working', sequence: seq + 4, summary: 'Late public note' });
+    expect(lateCommentary.json.agent_activity).toMatchObject({ state: 'completed' });
+
+    // A late create replay arrives already expired.
+    const lateCreate = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/agent-activities/lease-activity-late`, 'PUT', agentSecret, {
+      ...base, turn_id: 'lease-turn-late', state: 'accepted', sequence: seq, observed_at: new Date(Date.now() - 600_000).toISOString(),
+    });
+    expect(lateCreate.res.status).toBe(201);
+    expect(lateCreate.json.agent_activity.lease_health).toBe('stale');
+    const lateCreateRenew = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/agent-activities/lease-activity-late/lease`, 'POST', agentSecret, {
+      action: 'renew', turn_id: 'lease-turn-late', session_id: base.session_id, agent_npub: AGENT_NPUB, lease_epoch: 1, lease_sequence: 1,
+    });
+    expect(lateCreateRenew.json.code).toBe('agent_activity_lease_expired');
+
+    // v1 compatibility: every accepted PUT renews; revival after expiry opens a new epoch.
+    const v1Base = { ...base, contract: undefined, turn_id: 'lease-turn-v1' };
+    const v1Path = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/agent-activities/lease-activity-v1`;
+    const v1Created = await requestJson(v1Path, 'PUT', agentSecret, { ...v1Base, state: 'working', sequence: seq, expires_in_seconds: 300 });
+    expect(v1Created.json.agent_activity).toMatchObject({ contract_version: 1, lease_epoch: 1, lease_sequence: 0 });
+    const v1Beat = await requestJson(v1Path, 'PUT', agentSecret, { ...v1Base, state: 'working', sequence: seq + 1, expires_in_seconds: 300 });
+    expect(v1Beat.json.agent_activity).toMatchObject({ lease_epoch: 1, lease_sequence: 1 });
+    await sql`UPDATE flightdeck_pg_agent_activities SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE workspace_id = ${workspaceId} AND activity_id = 'lease-activity-v1'`;
+    const v1Revived = await requestJson(v1Path, 'PUT', agentSecret, { ...v1Base, state: 'working', sequence: seq + 2, expires_in_seconds: 300 });
+    expect(v1Revived.json.agent_activity).toMatchObject({ lease_epoch: 2, lease_sequence: 0, expired_at: null, lease_health: 'live' });
+
+    // Sweeper (normally every 15 s) converges offline clients: one expiry event per lapsed lease;
+    // long-lapsed history is marked silently; idempotent across passes.
+    const { sweepExpiredFlightDeckPgAgentActivityLeases } = await import('../src/services/flightdeck-pg-api');
+    await sql`UPDATE flightdeck_pg_agent_activities SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE workspace_id = ${workspaceId} AND activity_id = 'lease-activity-v1'`;
+    const ancientId = 'lease-activity-ancient';
+    await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/agent-activities/${ancientId}`, 'PUT', agentSecret, { ...v1Base, turn_id: 'lease-turn-ancient', state: 'queued', sequence: seq });
+    await sql`UPDATE flightdeck_pg_agent_activities SET lease_expires_at = NOW() - INTERVAL '2 hours' WHERE workspace_id = ${workspaceId} AND activity_id = ${ancientId}`;
+    const sweep = await sweepExpiredFlightDeckPgAgentActivityLeases({}, sql as any);
+    expect(sweep.expired).toBeGreaterThanOrEqual(2);
+    expect((await dbLease('lease-activity-v1')).expired_at).toBeTruthy();
+    expect((await dbLease(ancientId)).expired_at).toBeTruthy();
+    events = await leaseEvents();
+    const expiredFor = (id: string) => events.filter((event: any) => event.payload.lease_event === 'expired' && event.payload.activity_id === id);
+    expect(expiredFor('lease-activity-v1')).toHaveLength(1);
+    expect(expiredFor('lease-activity-v1')[0].payload).toMatchObject({ lease_epoch: 2, turn_id: 'lease-turn-v1', expired_at: expect.any(String) });
+    expect(expiredFor(ancientId)).toHaveLength(0);
+    expect(expiredFor('lease-activity-late')).toHaveLength(1);
+    await sweepExpiredFlightDeckPgAgentActivityLeases({}, sql as any);
+    events = await leaseEvents();
+    expect(expiredFor('lease-activity-v1')).toHaveLength(1);
+
+    // Readers get server_time on hydration and on the SSE connected frame.
+    const hydrated = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/agent-activities?channel_id=${channelId}&history_limit=0`, 'GET', ownerSecret);
+    expect(typeof hydrated.json.server_time).toBe('string');
+    expect(hydrated.json.agent_activities.every((row: any) => Number.isInteger(row.lease_epoch) && !Object.hasOwn(row, 'lease_resume_challenge_sha256'))).toBe(true);
+    const zeroCursor = Buffer.from(JSON.stringify({ version: 1, rowVersion: 0 }), 'utf8').toString('base64url');
+    const streamPath = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/events/stream?cursor=${encodeURIComponent(zeroCursor)}&limit=200`;
+    const stream = await app.request(streamPath, { method: 'GET', headers: { Authorization: authHeader(streamPath, 'GET', ownerSecret) } });
+    const preview = await readSsePreview(stream, (text) => text.includes('"lease_event":"resumed"'));
+    expect(preview).toMatch(/event: connected\ndata: \{[^\n]*"server_time":"/);
+    expect(preview).toContain('"lease_event":"resumed"');
+  }, 30_000);
+
   test('allows any permitted actor kind to publish activity with a matching signer', async () => {
     const { workspaceId } = await seedWorkspace('npub1workspaceflightdeckpghumandirectactivity');
     const humanAgentMember = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/members`, 'POST', ownerSecret, {

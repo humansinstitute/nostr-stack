@@ -1473,6 +1473,18 @@ export interface FlightDeckPgAgentActivity {
   blocked_by_turn_id: string | null;
   queue_position: number | null;
   terminal_at: Date | null;
+  /** Lease generation. Only an explicit challenged resume advances it (v1 revival also bumps it). */
+  lease_epoch: number;
+  /** Renewal order inside one epoch; independent of the canonical state/commentary sequence. */
+  lease_sequence: number;
+  /** Set once Tower observed the lease deadline pass for the current epoch. */
+  expired_at: Date | null;
+  /** 1 = legacy PUT renews the lease; 2 = only /lease renew/resume moves it. */
+  contract_version: 1 | 2;
+  /** Server-internal; never serialized. */
+  lease_resume_challenge_sha256?: string | null;
+  lease_resume_challenge_expires_at?: Date | null;
+  lease_resume_last_challenge_sha256?: string | null;
   created_at: Date;
   updated_at: Date;
   commentary_history?: FlightDeckPgAgentActivityCommentary[];

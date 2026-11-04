@@ -168,3 +168,71 @@ idempotent replay preserving the high-water mark, mixed-cursor rejection, and
 repeat-safe migration of a schema without the delivery cursor. Bun bundle and
 whitespace checks pass; the previously documented repository-wide check blockers
 remain unchanged.
+
+## Lease v2 (2026-11-04)
+
+Liveness is a per-lifecycle lease, independent of the canonical state/commentary
+`sequence`. Commentary is history; it never implies liveness.
+
+Additive serialized fields on every snapshot: `lease_epoch` (≥ 1),
+`lease_sequence` (≥ 0), `expired_at` (null until Tower observes the deadline
+pass for the current epoch) and `contract_version` (1 | 2). GET, PUT and lease
+responses, and the SSE `connected` frame, carry top-level `server_time`. Resume
+challenge digests are server-internal and never serialized. `lease_health`
+keeps its legacy `live | stale` vocabulary as a serialization-time hint only.
+
+### Producers
+
+- v1 (no `contract`): unchanged. Every accepted increasing-sequence PUT renews
+  the lease (30..3600 s, default 300). Tower also advances `lease_sequence`, and
+  a write that revives an expired v1 lease opens `lease_epoch + 1`, so readers
+  can order v1 renewals with the same rule as v2. Legacy limit: a late durable
+  v1 replay can still revive a dead turn; only v2 producers close that gap.
+- v2 (`contract: "agent-activity/v2"`): the lease is set only on create, as
+  `min(NOW, observed_at + 30 s) + ttl` (60..300 s, default 180), so a late create
+  replay arrives already expired. Later state/commentary PUTs never move it.
+  A lifecycle touched by v2 (PUT or lease route) stays v2.
+- `POST .../agent-activities/{activity_id}/lease`, publisher-only with
+  `channel.write`, row-locked against database time:
+  - `renew` (`lease_epoch` = current, `lease_sequence` > stored, optional
+    server-calibrated `observed_at` no older than 90 s). Rejected after the
+    deadline with `agent_activity_lease_expired` (records `expired_at` once).
+    Rejection changes neither `sequence` nor `lease_sequence`, so a dead
+    heartbeat can never block a later terminal write. Equal `lease_sequence`
+    is an idempotent no-op. Other codes: `stale_lease_sequence`,
+    `stale_lease_epoch`, `heartbeat_too_old`, `agent_activity_terminal`,
+    `agent_activity_turn_identity_mismatch`; another publisher's lifecycle is 404.
+  - `resume_challenge`: for an expired, non-terminal lifecycle only, returns a
+    single-use 60 s challenge bound to that lifecycle and its current epoch.
+  - `resume` with that challenge and `lease_epoch` = current + 1 opens a fresh
+    lease and clears `expired_at`. A retry with the same challenge is
+    idempotent; an expired or reused challenge never renews. A durable queued
+    resume therefore cannot revive an abandoned turn.
+- Heartbeats are best-effort and must never be durably replayed. Terminal
+  writes are always accepted, whatever the lease says.
+
+### Events and readers
+
+Every accepted renew/resume and every observed expiry emits the existing
+`flightdeck_pg.agent_activity.snapshot` envelope (no new event type) with
+`payload.lease_event` (`renewed | resumed | expired`), `lease_epoch`,
+`lease_sequence`, `lease_expires_at`, `expired_at`, `server_time`, routing
+identity, and `agent_activity` with `commentary_history: []`. The canonical
+`sequence` (and `entity_row_version`) is unchanged by lease events. Readers merge
+per lifecycle:
+
+- state, label, body and commentary by higher `sequence`;
+- lease fields by higher `(lease_epoch, lease_sequence)`; `expired_at` for an
+  epoch survives other events of that epoch, a higher epoch clears it;
+- terminal always wins.
+
+Show live iff non-terminal and server-calibrated now < `lease_expires_at` +
+15 s grace; otherwise "Stopped responding", never finished. Calibrate the
+server offset from fresh GET/connected responses, never from replayed event
+timestamps, and keep local deadlines on a monotonic clock.
+
+A sweeper (`AGENT_ACTIVITY_LEASE_SWEEP_MS`, default 15000, 0 disables) marks
+lapsed non-terminal leases `expired_at` with `FOR UPDATE SKIP LOCKED` in batches
+of 500 and emits the expiry event, so offline or replaying clients converge.
+Correctness never depends on it. Leases that lapsed more than an hour earlier
+(pre-existing history) are marked without events to avoid a first-deploy burst.

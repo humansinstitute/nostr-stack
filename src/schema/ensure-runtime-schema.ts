@@ -3360,6 +3360,34 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
     ON flightdeck_pg_agent_activities(workspace_id, lease_expires_at)
   `);
 
+  // Lease v2 (additive): renewal ordering is independent of the canonical
+  // state/commentary sequence. Existing rows start at epoch 1 / sequence 0 as
+  // v1 lifecycles. Resume challenges are stored only as SHA-256 digests.
+  await sql.unsafe(`
+    ALTER TABLE flightdeck_pg_agent_activities
+      ADD COLUMN IF NOT EXISTS lease_epoch INTEGER NOT NULL DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS lease_sequence BIGINT NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS expired_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS contract_version SMALLINT NOT NULL DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS lease_resume_challenge_sha256 TEXT,
+      ADD COLUMN IF NOT EXISTS lease_resume_challenge_expires_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS lease_resume_last_challenge_sha256 TEXT
+  `);
+  await sql.unsafe(`
+    ALTER TABLE flightdeck_pg_agent_activities
+      DROP CONSTRAINT IF EXISTS flightdeck_pg_agent_activities_lease_check
+  `);
+  await sql.unsafe(`
+    ALTER TABLE flightdeck_pg_agent_activities
+      ADD CONSTRAINT flightdeck_pg_agent_activities_lease_check
+        CHECK (lease_epoch >= 1 AND lease_sequence >= 0 AND contract_version IN (1, 2))
+  `);
+  await sql.unsafe(`
+    CREATE INDEX IF NOT EXISTS idx_fd_pg_agent_activities_lease_sweep
+    ON flightdeck_pg_agent_activities(lease_expires_at)
+    WHERE terminal_at IS NULL AND expired_at IS NULL
+  `);
+
   await sql.unsafe(`
     CREATE TABLE IF NOT EXISTS flightdeck_pg_agent_activity_commentary (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -380,6 +380,10 @@ import {
   upsertFlightDeckPgPersonalWapp,
   upsertFlightDeckPgResponseActivity,
   upsertFlightDeckPgAgentActivity,
+  applyFlightDeckPgAgentActivityLease,
+  buildFlightDeckPgAgentActivityLeaseEventPayload,
+  clampAgentActivityLeaseTtl,
+  type FlightDeckPgAgentActivityLeaseAction,
   validateFlightDeckPgEditLease,
   clearFlightDeckPgResponseActivity,
   type FlightDeckPgEditLeaseEntityType,
@@ -3907,6 +3911,7 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/events/stream', async (c) => {
         data: {
           cursor: encodeFlightDeckPgEventCursor(afterRowVersion),
           poll_ms: FLIGHT_DECK_PG_EVENT_STREAM_POLL_MS,
+          server_time: new Date().toISOString(),
           ...(initialAudience ? {
             subscription_audience_npubs: activeAudienceNpubs,
             rejected_audience_npubs: rejectedAudienceNpubs,
@@ -9765,7 +9770,7 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/agent-activities', async (c) =>
     limit: limit + 1, historyLimit, beforeSequence, afterSequence, afterCommentaryCursor, beforeCreatedAt: cursor.createdAt, beforeId: cursor.id,
   });
   const page = activities.slice(0, limit);
-  return c.json({ identity, agent_activities: page.map(serializeFlightDeckPgAgentActivity), next_cursor: activities.length > limit ? encodeFlightDeckPgMessageCursor(page.at(-1)!) : null });
+  return c.json({ identity, server_time: new Date().toISOString(), agent_activities: page.map(serializeFlightDeckPgAgentActivity), next_cursor: activities.length > limit ? encodeFlightDeckPgMessageCursor(page.at(-1)!) : null });
 });
 
 flightDeckPgRouter.put('/workspaces/:workspaceId/agent-activities/:activityId', async (c) => {
@@ -9792,7 +9797,13 @@ flightDeckPgRouter.put('/workspaces/:workspaceId/agent-activities/:activityId', 
   const activityBody = normalizeOptionalText(body.body);
   const blockedByTurnId = normalizeOptionalText(body.blocked_by_turn_id);
   const queuePosition = body.queue_position == null ? null : Number(body.queue_position);
+  const contractVersion = body.contract === 'agent-activity/v2' ? 2 : 1;
+  const observedAt = body.observed_at == null ? null : new Date(String(body.observed_at));
   const fields: { path: string; code: string; message: string }[] = [];
+  if (body.contract != null && body.contract !== 'agent-activity/v1' && body.contract !== 'agent-activity/v2') {
+    fields.push({ path: 'contract', code: 'invalid', message: 'contract must be agent-activity/v1 or agent-activity/v2' });
+  }
+  if (observedAt && Number.isNaN(observedAt.getTime())) fields.push({ path: 'observed_at', code: 'invalid', message: 'observed_at must be an ISO timestamp' });
   if (!activityId) fields.push({ path: 'activity_id', code: 'required', message: 'activity_id is required' });
   if (!channelId) fields.push({ path: 'channel_id', code: 'required', message: 'channel_id is required' });
   if (!threadId) fields.push({ path: 'thread_id', code: 'required', message: 'thread_id is required' });
@@ -9828,7 +9839,7 @@ flightDeckPgRouter.put('/workspaces/:workspaceId/agent-activities/:activityId', 
   });
   if (!decision.allowed) return authorizationError(c, decision, identity, 'channel.write');
 
-  const expiresInSeconds = Math.max(30, Math.min(3600, Math.floor(Number(body.expires_in_seconds || 300))));
+  const leaseTtlSeconds = clampAgentActivityLeaseTtl(body.expires_in_seconds, contractVersion);
   const payload = await getDb().begin(async (tx) => {
     const sql = asDbClient(tx);
     const upsert = await upsertFlightDeckPgAgentActivity({
@@ -9847,7 +9858,9 @@ flightDeckPgRouter.put('/workspaces/:workspaceId/agent-activities/:activityId', 
       summary,
       body: activityBody,
       sequence,
-      expiresAt: new Date(Date.now() + expiresInSeconds * 1000),
+      contractVersion,
+      leaseTtlSeconds,
+      observedAt,
       blockedByTurnId: state === 'queued' ? blockedByTurnId : null,
       queuePosition: state === 'queued' ? queuePosition : null,
     }, sql);
@@ -9881,17 +9894,160 @@ flightDeckPgRouter.put('/workspaces/:workspaceId/agent-activities/:activityId', 
       code: identityMismatch ? 'agent_activity_turn_identity_mismatch' : payload.outcome === 'terminal' ? 'agent_activity_terminal' : 'stale_agent_activity_sequence',
       message: identityMismatch ? 'Agent activity turn_id is immutable' : payload.outcome === 'terminal' ? 'Terminal agent activity cannot be changed' : 'Agent activity sequence must increase',
       identity,
+      server_time: new Date().toISOString(),
       // A notification-only caller never sees the existing row (it may be another publisher's, anywhere).
       ...(await callerClassified(c, auth, context.workspace.id) ? {} : { current: serializeFlightDeckPgAgentActivity(payload.activity) }),
     }, 409);
   }
   return c.json({
     identity,
+    server_time: new Date().toISOString(),
     agent_activity: serializeFlightDeckPgAgentActivity(payload.activity),
     idempotent: payload.outcome === 'idempotent',
     audit: payload.auditId ? { event_id: payload.auditId, operation: 'agent_activity.upsert', actor_npub: auth.userNpub } : null,
     outbox: payload.outbox,
   }, payload.outcome === 'created' ? 201 : 200);
+});
+
+const agentActivityLeaseActions = new Set<FlightDeckPgAgentActivityLeaseAction>(['renew', 'resume_challenge', 'resume']);
+const agentActivityLeaseRejections: Record<string, { status: 404 | 409; code: string; message: string }> = {
+  not_found: { status: 404, code: 'agent_activity_not_found', message: 'Agent activity not found for this publisher' },
+  identity_mismatch: { status: 409, code: 'agent_activity_turn_identity_mismatch', message: 'Agent activity turn_id and session_id are immutable' },
+  terminal: { status: 409, code: 'agent_activity_terminal', message: 'Terminal agent activity has no lease' },
+  stale_lease_epoch: { status: 409, code: 'stale_lease_epoch', message: 'lease_epoch does not match the current lease' },
+  stale_lease_sequence: { status: 409, code: 'stale_lease_sequence', message: 'lease_sequence must increase within the epoch' },
+  heartbeat_too_old: { status: 409, code: 'heartbeat_too_old', message: 'observed_at is older than one heartbeat interval plus skew' },
+  lease_expired: { status: 409, code: 'agent_activity_lease_expired', message: 'Lease deadline passed; resume with a fresh challenge' },
+  lease_live: { status: 409, code: 'agent_activity_lease_live', message: 'Lease is live; renew instead of resuming' },
+  resume_challenge_invalid: { status: 409, code: 'agent_activity_resume_challenge_invalid', message: 'Resume challenge is missing, expired, or already used' },
+};
+
+// Lease v2: renew / resume_challenge / resume, checked against database time.
+flightDeckPgRouter.post('/workspaces/:workspaceId/agent-activities/:activityId/lease', async (c) => {
+  const auth = await requireNip98AuthResolved(c);
+  if (auth instanceof Response) return auth;
+  const result = await requireFlightDeckPgContext(c, auth.userNpub);
+  if ('response' in result) return result.response;
+  const { context, identity } = result;
+  const activityId = c.req.param('activityId').trim();
+  const body = await readJsonBody(c);
+  if (!body) return validationError(c, identity, [{ path: 'body', code: 'invalid_json', message: 'body must be valid JSON' }]);
+
+  const action = String(body.action || '').trim() as FlightDeckPgAgentActivityLeaseAction;
+  const turnId = String(body.turn_id || '').trim();
+  const sessionId = String(body.session_id || '').trim();
+  const agentNpub = String(body.agent_npub || '').trim();
+  const leaseEpoch = body.lease_epoch == null ? null : Number(body.lease_epoch);
+  const leaseSequence = body.lease_sequence == null ? null : Number(body.lease_sequence);
+  const observedAt = body.observed_at == null ? null : new Date(String(body.observed_at));
+  const challenge = body.challenge == null ? null : String(body.challenge).trim();
+  const fields: { path: string; code: string; message: string }[] = [];
+  if (!activityId) fields.push({ path: 'activity_id', code: 'required', message: 'activity_id is required' });
+  if (!agentActivityLeaseActions.has(action)) fields.push({ path: 'action', code: 'invalid', message: 'action must be renew, resume_challenge, or resume' });
+  if (!turnId) fields.push({ path: 'turn_id', code: 'required', message: 'turn_id is required' });
+  if (!sessionId) fields.push({ path: 'session_id', code: 'required', message: 'session_id is required' });
+  if (!agentNpub) fields.push({ path: 'agent_npub', code: 'required', message: 'agent_npub is required' });
+  if (agentNpub && agentNpub !== auth.userNpub) fields.push({ path: 'agent_npub', code: 'mismatch', message: 'agent_npub must match the authenticated publisher' });
+  if (action !== 'resume_challenge' && (leaseEpoch === null || !Number.isSafeInteger(leaseEpoch) || leaseEpoch < 1)) {
+    fields.push({ path: 'lease_epoch', code: 'invalid', message: 'lease_epoch must be a positive integer' });
+  }
+  if ((action === 'renew' || leaseSequence !== null) && (leaseSequence === null || !Number.isSafeInteger(leaseSequence) || leaseSequence < 0)) {
+    fields.push({ path: 'lease_sequence', code: 'invalid', message: 'lease_sequence must be a non-negative safe integer' });
+  }
+  if (observedAt && Number.isNaN(observedAt.getTime())) fields.push({ path: 'observed_at', code: 'invalid', message: 'observed_at must be an ISO timestamp' });
+  if (action === 'resume' && (!challenge || !/^[0-9a-f]{64}$/.test(challenge))) {
+    fields.push({ path: 'challenge', code: 'invalid', message: 'resume requires the challenge issued by resume_challenge' });
+  }
+  if (fields.length) return validationError(c, identity, fields);
+
+  const [existing] = await getDb()<{ channel_id: string; publisher_actor_id: string; agent_npub: string }[]>`
+    SELECT channel_id, publisher_actor_id, agent_npub FROM flightdeck_pg_agent_activities
+    WHERE workspace_id = ${context.workspace.id} AND activity_id = ${activityId}
+  `;
+  const notFound = agentActivityLeaseRejections.not_found;
+  if (!existing || existing.publisher_actor_id !== context.actor.id || existing.agent_npub !== agentNpub) {
+    return jsonError(c, notFound.status, notFound.code, notFound.message, identity);
+  }
+  const decision = await authorizeFlightDeckPgOperation({
+    actorNpub: auth.userNpub,
+    appNpub: context.workspace.app_npub,
+    workspaceId: context.workspace.id,
+    permission: 'channel.write',
+    resource: { type: 'channel', channelId: existing.channel_id },
+  });
+  if (!decision.allowed) return authorizationError(c, decision, identity, 'channel.write');
+
+  const ttlSeconds = clampAgentActivityLeaseTtl(body.expires_in_seconds, 2);
+  const payload = await getDb().begin(async (tx) => {
+    const sql = asDbClient(tx);
+    const lease = await applyFlightDeckPgAgentActivityLease({
+      workspaceId: context.workspace.id,
+      activityId,
+      publisherActorId: context.actor.id,
+      agentNpub,
+      turnId,
+      sessionId,
+      action,
+      leaseEpoch,
+      leaseSequence,
+      observedAt,
+      ttlSeconds,
+      challenge,
+    }, sql);
+    const leaseEvent = lease.outcome === 'renewed' || lease.outcome === 'resumed' ? lease.outcome
+      : lease.outcome === 'lease_expired' && lease.expiredNow ? 'expired' : null;
+    if (!leaseEvent || !('activity' in lease)) return { lease, auditId: null, outbox: null };
+    const auditId = leaseEvent === 'expired' ? null : await writeFlightDeckPgAudit({
+      workspaceId: context.workspace.id,
+      actorId: context.actor.id,
+      action: `agent_activity.lease_${leaseEvent === 'renewed' ? 'renew' : 'resume'}`,
+      resourceType: 'agent_activity',
+      resourceId: lease.activity.id,
+      metadata: { activity_id: activityId, turn_id: turnId, lease_epoch: Number(lease.activity.lease_epoch),
+        lease_sequence: Number(lease.activity.lease_sequence), channel_id: lease.activity.channel_id, thread_id: lease.activity.thread_id },
+    }, sql);
+    const outbox = await createFlightDeckPgAgentActivityOutboxEvent({
+      workspaceId: context.workspace.id,
+      scopeId: lease.activity.scope_id,
+      channelId: lease.activity.channel_id,
+      actorId: context.actor.id,
+      entityId: lease.activity.id,
+      operation: 'updated',
+      sequence: Number(lease.activity.sequence),
+      payload: buildFlightDeckPgAgentActivityLeaseEventPayload(lease.activity, leaseEvent, lease.serverTime),
+    }, sql);
+    return { lease, auditId, outbox };
+  });
+  const { lease } = payload;
+  const serverTime = 'serverTime' in lease ? lease.serverTime.toISOString() : new Date().toISOString();
+  if (lease.outcome === 'not_found') return jsonError(c, notFound.status, notFound.code, notFound.message, identity);
+  const rejection = agentActivityLeaseRejections[lease.outcome];
+  if (rejection) {
+    return c.json({
+      error: rejection.code,
+      code: rejection.code,
+      message: rejection.message,
+      identity,
+      server_time: serverTime,
+      ...(await callerClassified(c, auth, context.workspace.id) ? {} : { current: serializeFlightDeckPgAgentActivity(lease.activity) }),
+    }, rejection.status);
+  }
+  return c.json({
+    identity,
+    server_time: serverTime,
+    agent_activity: serializeFlightDeckPgAgentActivity(lease.activity),
+    idempotent: lease.outcome === 'idempotent',
+    ...(lease.outcome === 'challenge_issued' ? {
+      challenge: {
+        value: lease.challenge.value,
+        lease_epoch: Number(lease.activity.lease_epoch),
+        next_lease_epoch: Number(lease.activity.lease_epoch) + 1,
+        expires_at: lease.challenge.expiresAt,
+      },
+    } : {}),
+    audit: payload.auditId ? { event_id: payload.auditId, operation: `agent_activity.lease_${lease.outcome === 'renewed' ? 'renew' : 'resume'}`, actor_npub: auth.userNpub } : null,
+    outbox: payload.outbox,
+  });
 });
 
 flightDeckPgRouter.get('/workspaces/:workspaceId/response-activities', async (c) => {

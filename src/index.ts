@@ -36,6 +36,9 @@ startAgentNotificationWorker();
 // Durable push alert delivery (NOTIF_ALERTS=off disables); idle unless APNs is fully configured.
 const { startAlertWorker } = await import('./services/notification-alerts');
 startAlertWorker();
+// Agent activity lease expiry events (AGENT_ACTIVITY_LEASE_SWEEP_MS=0 disables).
+const { startAgentActivityLeaseSweeper } = await import('./services/agent-activity-lease-sweeper');
+startAgentActivityLeaseSweeper();
 
 console.log(`[coworker-be] listening on :${config.port}`);
 console.log(`[coworker-be] service npub: ${identity.npub}`);
