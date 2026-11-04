@@ -5190,9 +5190,10 @@ describe('Flight Deck PG API routes', () => {
     };
     const leaseBase = { turn_id: base.turn_id, session_id: base.session_id, agent_npub: AGENT_NPUB };
     const seq = 1_784_873_857_700_000;
-    const leaseEvents = async () => {
+    const leaseEvents = async (id: string | null = activityId) => {
       const events = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/events?limit=200`, 'GET', ownerSecret);
-      return events.json.events.filter((event: any) => event.event_type === 'flightdeck_pg.agent_activity.snapshot' && event.payload?.lease_event);
+      return events.json.events.filter((event: any) => event.event_type === 'flightdeck_pg.agent_activity.snapshot' && event.payload?.lease_event
+        && (id === null || event.payload.activity_id === id));
     };
     const dbLease = async (id = activityId) => (await sql<{ lease_expires_at: Date; lease_sequence: string; lease_epoch: number; sequence: string; expired_at: Date | null; db_now: Date }[]>`
       SELECT lease_expires_at, lease_sequence::text, lease_epoch, sequence::text, expired_at, NOW() AS db_now
@@ -5275,6 +5276,26 @@ describe('Flight Deck PG API routes', () => {
     events = await leaseEvents();
     expect(events.map((event: any) => event.payload.lease_event)).toEqual(['renewed', 'renewed', 'expired']);
     expect(events.at(-1).payload).toMatchObject({ lease_epoch: 1, lease_sequence: 2, expired_at: expect.any(String) });
+
+    // Lock wait across the deadline: a renewal whose transaction started before the deadline but
+    // acquired the row lock after it must be judged by the actual post-lock clock and rejected.
+    const lockWaitId = 'lease-activity-lock-wait';
+    const lockWaitPath = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/agent-activities/${lockWaitId}`;
+    await requestJson(lockWaitPath, 'PUT', agentSecret, { ...base, turn_id: 'lease-turn-lock-wait', state: 'working', sequence: seq });
+    let blockedRenewal: Promise<{ res: Response; json: any }> | null = null;
+    await sql.begin(async (tx) => {
+      await tx`SELECT id FROM flightdeck_pg_agent_activities WHERE workspace_id = ${workspaceId} AND activity_id = ${lockWaitId} FOR UPDATE`;
+      await tx`UPDATE flightdeck_pg_agent_activities SET lease_expires_at = clock_timestamp() + INTERVAL '700 milliseconds'
+        WHERE workspace_id = ${workspaceId} AND activity_id = ${lockWaitId}`;
+      blockedRenewal = requestJson(`${lockWaitPath}/lease`, 'POST', agentSecret, {
+        action: 'renew', turn_id: 'lease-turn-lock-wait', session_id: base.session_id, agent_npub: AGENT_NPUB, lease_epoch: 1, lease_sequence: 1,
+      });
+      await Bun.sleep(1_200);
+    });
+    const lockWaited = await blockedRenewal!;
+    expect(lockWaited.res.status).toBe(409);
+    expect(lockWaited.json.code).toBe('agent_activity_lease_expired');
+    expect((await dbLease(lockWaitId)).lease_sequence).toBe('0');
 
     // Durable replays add history only; liveness stays expired.
     const replayedState = await requestJson(activityPath, 'PUT', agentSecret, { ...base, state: 'working', sequence: seq + 2, summary: 'Replayed late', body: 'Delivered after expiry.' });
@@ -5361,14 +5382,14 @@ describe('Flight Deck PG API routes', () => {
     expect(sweep.expired).toBeGreaterThanOrEqual(2);
     expect((await dbLease('lease-activity-v1')).expired_at).toBeTruthy();
     expect((await dbLease(ancientId)).expired_at).toBeTruthy();
-    events = await leaseEvents();
+    events = await leaseEvents(null);
     const expiredFor = (id: string) => events.filter((event: any) => event.payload.lease_event === 'expired' && event.payload.activity_id === id);
     expect(expiredFor('lease-activity-v1')).toHaveLength(1);
     expect(expiredFor('lease-activity-v1')[0].payload).toMatchObject({ lease_epoch: 2, turn_id: 'lease-turn-v1', expired_at: expect.any(String) });
     expect(expiredFor(ancientId)).toHaveLength(0);
     expect(expiredFor('lease-activity-late')).toHaveLength(1);
     await sweepExpiredFlightDeckPgAgentActivityLeases({}, sql as any);
-    events = await leaseEvents();
+    events = await leaseEvents(null);
     expect(expiredFor('lease-activity-v1')).toHaveLength(1);
 
     // Readers get server_time on hydration and on the SSE connected frame.

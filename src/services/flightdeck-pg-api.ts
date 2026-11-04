@@ -5904,10 +5904,10 @@ export async function upsertFlightDeckPgAgentActivity(
       lease_expires_at = CASE WHEN flightdeck_pg_agent_activities.contract_version = 1 AND EXCLUDED.contract_version = 1
         THEN EXCLUDED.lease_expires_at ELSE flightdeck_pg_agent_activities.lease_expires_at END,
       lease_epoch = CASE WHEN flightdeck_pg_agent_activities.contract_version = 1 AND EXCLUDED.contract_version = 1
-          AND (flightdeck_pg_agent_activities.expired_at IS NOT NULL OR flightdeck_pg_agent_activities.lease_expires_at <= NOW())
+          AND (flightdeck_pg_agent_activities.expired_at IS NOT NULL OR flightdeck_pg_agent_activities.lease_expires_at <= clock_timestamp())
         THEN flightdeck_pg_agent_activities.lease_epoch + 1 ELSE flightdeck_pg_agent_activities.lease_epoch END,
       lease_sequence = CASE WHEN flightdeck_pg_agent_activities.contract_version = 1 AND EXCLUDED.contract_version = 1
-        THEN CASE WHEN flightdeck_pg_agent_activities.expired_at IS NOT NULL OR flightdeck_pg_agent_activities.lease_expires_at <= NOW()
+        THEN CASE WHEN flightdeck_pg_agent_activities.expired_at IS NOT NULL OR flightdeck_pg_agent_activities.lease_expires_at <= clock_timestamp()
           THEN 0 ELSE flightdeck_pg_agent_activities.lease_sequence + 1 END
         ELSE flightdeck_pg_agent_activities.lease_sequence END,
       expired_at = CASE WHEN flightdeck_pg_agent_activities.contract_version = 1 AND EXCLUDED.contract_version = 1
@@ -5991,7 +5991,7 @@ function sha256HexText(value: string): string {
 
 /**
  * Lease renewal and resume, transactional against the database deadline. Must
- * run inside a transaction: the row is locked, NOW() is the transaction time,
+ * run inside a transaction: the row is locked, server time is sampled after the lock,
  * and a rejected request changes nothing except recording an observed expiry.
  * Neither the canonical sequence nor the lease sequence ever advances on
  * rejection, so a dead heartbeat can never block a later terminal write.
@@ -6013,14 +6013,17 @@ export async function applyFlightDeckPgAgentActivityLease(
   },
   sql: DbClient,
 ): Promise<FlightDeckPgAgentActivityLeaseOutcome> {
-  const [row] = await sql<(FlightDeckPgAgentActivityRow & { db_now: Date })[]>`
-    SELECT *, NOW() AS db_now FROM flightdeck_pg_agent_activities
+  const [activity] = await sql<FlightDeckPgAgentActivityRow[]>`
+    SELECT * FROM flightdeck_pg_agent_activities
     WHERE workspace_id = ${input.workspaceId} AND activity_id = ${input.activityId}
     FOR UPDATE
   `;
   // Another publisher's lifecycle is indistinguishable from a missing one.
-  if (!row || row.publisher_actor_id !== input.publisherActorId || row.agent_npub !== input.agentNpub) return { outcome: 'not_found' };
-  const { db_now: serverTime, ...activity } = row;
+  if (!activity || activity.publisher_actor_id !== input.publisherActorId || activity.agent_npub !== input.agentNpub) return { outcome: 'not_found' };
+  // Sample the actual clock only after the row lock is held: NOW() is the
+  // transaction start, which can precede a long lock wait past the deadline.
+  // Every check and write below uses this one server-time base.
+  const [{ db_now: serverTime }] = await sql<{ db_now: Date }[]>`SELECT clock_timestamp() AS db_now`;
   if (activity.turn_id !== input.turnId || activity.session_id !== input.sessionId) {
     return { outcome: 'identity_mismatch', activity, serverTime };
   }
@@ -6036,7 +6039,7 @@ export async function applyFlightDeckPgAgentActivityLease(
     if (!leaseLive) {
       if (activity.expired_at) return { outcome: 'lease_expired', activity, serverTime, expiredNow: false };
       const [expired] = await sql<FlightDeckPgAgentActivityRow[]>`
-        UPDATE flightdeck_pg_agent_activities SET expired_at = NOW()
+        UPDATE flightdeck_pg_agent_activities SET expired_at = ${serverTime}::timestamptz
         WHERE id = ${activity.id} RETURNING *
       `;
       return { outcome: 'lease_expired', activity: expired, serverTime, expiredNow: true };
@@ -6049,7 +6052,7 @@ export async function applyFlightDeckPgAgentActivityLease(
     const [renewed] = await sql<FlightDeckPgAgentActivityRow[]>`
       UPDATE flightdeck_pg_agent_activities SET
         lease_sequence = ${input.leaseSequence},
-        last_heartbeat_at = NOW(),
+        last_heartbeat_at = ${serverTime}::timestamptz,
         lease_expires_at = ${base}::timestamptz + make_interval(secs => ${input.ttlSeconds}),
         expires_at = ${base}::timestamptz + make_interval(secs => ${input.ttlSeconds}),
         contract_version = 2
@@ -6064,7 +6067,7 @@ export async function applyFlightDeckPgAgentActivityLease(
     const [challenged] = await sql<FlightDeckPgAgentActivityRow[]>`
       UPDATE flightdeck_pg_agent_activities SET
         lease_resume_challenge_sha256 = ${sha256HexText(value)},
-        lease_resume_challenge_expires_at = NOW() + make_interval(secs => ${AGENT_ACTIVITY_RESUME_CHALLENGE_TTL_SECONDS})
+        lease_resume_challenge_expires_at = ${serverTime}::timestamptz + make_interval(secs => ${AGENT_ACTIVITY_RESUME_CHALLENGE_TTL_SECONDS})
       WHERE id = ${activity.id} RETURNING *
     `;
     return { outcome: 'challenge_issued', activity: challenged, serverTime,
@@ -6087,9 +6090,9 @@ export async function applyFlightDeckPgAgentActivityLease(
     UPDATE flightdeck_pg_agent_activities SET
       lease_epoch = ${storedEpoch + 1},
       lease_sequence = ${Math.max(0, input.leaseSequence ?? 0)},
-      last_heartbeat_at = NOW(),
-      lease_expires_at = NOW() + make_interval(secs => ${input.ttlSeconds}),
-      expires_at = NOW() + make_interval(secs => ${input.ttlSeconds}),
+      last_heartbeat_at = ${serverTime}::timestamptz,
+      lease_expires_at = ${serverTime}::timestamptz + make_interval(secs => ${input.ttlSeconds}),
+      expires_at = ${serverTime}::timestamptz + make_interval(secs => ${input.ttlSeconds}),
       expired_at = NULL,
       lease_resume_challenge_sha256 = NULL,
       lease_resume_challenge_expires_at = NULL,
