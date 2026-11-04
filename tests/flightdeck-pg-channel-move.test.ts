@@ -6,10 +6,10 @@ import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { setDb, closeDb } from '../src/db';
 import { createApp } from '../src/server';
 import { splitSqlStatements } from '../src/schema/sql-statements';
-import { runFlightDeckPgChannelMove } from '../src/services/flightdeck-pg-channel-move';
+import type { WorkReceipt } from '../src/services/agent-work-receipts';
 import { listVisibleFlightDeckPgEvents } from '../src/services/flightdeck-pg-api';
 
-const database = 'tower_test_channel_move';
+const database = `tower_test_channel_move_${process.pid}`;
 let sql: ReturnType<typeof postgres>;
 let app: ReturnType<typeof createApp>;
 const connection = {host:process.env.DB_HOST || '127.0.0.1',port:Number(process.env.DB_PORT || 5432),username:process.env.DB_USER || 'postgres',password:process.env.DB_PASSWORD || 'postgres'};
@@ -253,7 +253,8 @@ test('in-flight content writer completes before relocation and its new row moves
   let unblock!:()=>void, inserted!:()=>void;
   const released=new Promise<void>(r=>unblock=r), ready=new Promise<void>(r=>inserted=r);
   const write=sql.begin(async tx=>{
-    const [row]=await tx`INSERT INTO flightdeck_pg_threads(workspace_id,scope_id,channel_id,title,created_by_actor_id,updated_by_actor_id)
+    const transaction=tx as unknown as typeof sql;
+    const [row]=await transaction`INSERT INTO flightdeck_pg_threads(workspace_id,scope_id,channel_id,title,created_by_actor_id,updated_by_actor_id)
       VALUES(${f.workspace.id},${f.source.id},${f.channel.id},'In flight',${f.actor.id},${f.actor.id}) RETURNING id`;
     inserted();await released;return row;
   });
@@ -283,14 +284,14 @@ test('location-only relocation preserves exact live work receipts and never revi
   await insertRow('flightdeck_pg_agent_notification_subscriptions',{workspace_id:f.workspace.id,recipient_actor_id:f.actor.id,consumer_id:'move-test',floor_at:new Date(0)});
   const receipt=await insertRow('flightdeck_pg_agent_work_receipts',{workspace_id:f.workspace.id,recipient_actor_id:f.actor.id,entity_type:'task',entity_id:c.task.id,channel_id:f.channel.id,origin_notification_id:notification.id,receipt_row_version:c.task.row_version});
   const {assertReceiptedVersion}=await import('../src/services/agent-work-receipts');
-  await assertReceiptedVersion(sql as any,receipt,{rowVersion:c.task.row_version});
+  await assertReceiptedVersion(sql as any,receipt as unknown as WorkReceipt,{rowVersion:c.task.row_version});
   expect((await f.request('move',await f.moveBody())).status).toBe(200);
   const [current]=await sql`SELECT * FROM flightdeck_pg_tasks WHERE id=${c.task.id}`;
-  await assertReceiptedVersion(sql as any,receipt,{rowVersion:current.row_version});
+  await assertReceiptedVersion(sql as any,receipt as unknown as WorkReceipt,{rowVersion:current.row_version});
   const [saved]=await sql`SELECT * FROM flightdeck_pg_agent_work_receipts WHERE entity_id=${c.task.id}`;expect(saved).toEqual(receipt);
   const [origin]=await sql`SELECT scope_id,addressing FROM flightdeck_pg_agent_notifications WHERE id=${notification.id}`;expect(origin).toEqual({scope_id:f.destination.id,addressing:{immutable:true}});
   await sql`UPDATE flightdeck_pg_tasks SET row_version=row_version+1 WHERE id=${c.task.id}`;
   const back=await f.request('move-preview',{destination_scope_id:f.source.id});
   expect((await f.request('move',{destination_scope_id:f.source.id,confirmation_token:back.body.preview.confirmation_token,mutation_id:randomUUID()})).status).toBe(200);
-  await expect(assertReceiptedVersion(sql as any,receipt,{rowVersion:Number(c.task.row_version)+1})).rejects.toMatchObject({status:409});
+  await expect(assertReceiptedVersion(sql as any,receipt as unknown as WorkReceipt,{rowVersion:Number(c.task.row_version)+1})).rejects.toMatchObject({status:409});
 });
