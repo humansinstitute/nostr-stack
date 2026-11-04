@@ -10,7 +10,7 @@ describe('Tower version', () => {
 
     const body = await res.json();
     expect(body.name).toBe('wingman-tower');
-    expect(body.version).toBe('0.1.0');
+    expect(body.version).toBe('0.2.0');
     expect(typeof body.runtime).toBe('string');
   });
 });
