@@ -28,8 +28,8 @@ export const AGENT_NOTIFICATION_PAGE_MAX = 100;
 export const AGENT_NOTIFICATION_STREAM_MAX_SECONDS = 600;
 const STRICT_MAX_AGE_SECONDS = 60;
 const CURSOR_ROUTE = 'agent_notifications';
-const WINDOW_MESSAGES = 20;
-const WINDOW_BYTES = 32 * 1024;
+export const WINDOW_MESSAGES = 20;
+export const WINDOW_BYTES = 32 * 1024;
 const TRANSCRIPT_SCAN_PAGES = 20;
 const DOC_BODY_MAX_BYTES = 2 * 1024 * 1024;
 const SERIALIZATION_RETRIES = 5;
@@ -50,7 +50,7 @@ export class AgentNotificationError extends Error {
     super(message ?? code);
   }
 }
-const fail = (status: AgentNotificationError['status'], code: string, message?: string, extra?: Record<string, unknown>) => new AgentNotificationError(status, code, message, extra);
+export const fail = (status: AgentNotificationError['status'], code: string, message?: string, extra?: Record<string, unknown>) => new AgentNotificationError(status, code, message, extra);
 /** Unknown, foreign and other-recipient ids are byte-identical (no existence oracle). */
 const notFound = () => fail(404, 'notification_not_found', 'Notification not found');
 
@@ -127,7 +127,7 @@ export async function resolveRecipient(sql: Sql, workspaceId: string, npub: stri
  * commits after our snapshot conflicts with these locks (40001) and the whole read retries on a fresh snapshot; one
  * that starts later blocks until our serialization commits (bytes "in flight"). A stale snapshot is never the proof.
  */
-async function withAuthorizedSnapshot<T>(sql: Sql, r: Recipient, work: (tx: Sql) => Promise<T>): Promise<T> {
+export async function withAuthorizedSnapshot<T>(sql: Sql, r: Recipient, work: (tx: Sql) => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await sql.begin('ISOLATION LEVEL REPEATABLE READ', async (tx) => {
@@ -172,7 +172,7 @@ async function withAuthorizedSnapshot<T>(sql: Sql, r: Recipient, work: (tx: Sql)
  * Channel archival and scope archival change record-access keys: share-lock the channel and scope rows a response
  * depends on, so such a change committing after our snapshot forces a retry (40001) instead of serving stale access.
  */
-async function lockChannels(t: Sql, workspaceId: string, channelIds: Array<string | null>) {
+export async function lockChannels(t: Sql, workspaceId: string, channelIds: Array<string | null>) {
   const ids = [...new Set(channelIds.filter((id): id is string => Boolean(id)))].sort();
   if (!ids.length) return;
   const rows = await t<{ scope_id: string }[]>`
@@ -839,9 +839,9 @@ export async function listInboxPage(sql: Sql, r: Recipient, rawCursor: unknown, 
 // ------------------------------------------------------------------------------------------------------------------
 // Context, attachments and ack: recipient-bound, revalidated per request.
 // ------------------------------------------------------------------------------------------------------------------
-type FullNotification = NotificationRow & { workspace_id: string; recipient_actor_id: string; scope_id: string | null };
+export type FullNotification = NotificationRow & { workspace_id: string; recipient_actor_id: string; scope_id: string | null };
 
-async function loadOwnNotification(sql: Sql, r: Recipient, notificationId: string): Promise<FullNotification> {
+export async function loadOwnNotification(sql: Sql, r: Recipient, notificationId: string): Promise<FullNotification> {
   if (!isUuid(notificationId)) throw notFound();
   // Only notifications inside some subscription's floor are reachable: an id never confers pre-floor history.
   const [row] = await sql<FullNotification[]>`
@@ -864,7 +864,7 @@ async function assertNotificationLive(t: Sql, r: Recipient, n: FullNotification)
   if (row.relation !== 'ok') throw fail(403, 'relationship_removed', 'The recipient is no longer addressed by this source');
 }
 
-type MessageRow = {
+export type MessageRow = {
   id: string; workspace_id: string; scope_id: string; channel_id: string; thread_id: string | null; body: string; metadata: any; row_version: number;
   created_at: Date; updated_at: Date; created_by_actor_id: string; updated_by_actor_id: string; author_npub: string; author_label: string | null;
   thread_source_message_id?: string | null; inherited?: boolean; owning_thread_id?: string | null; effective_thread_id?: string | null;
@@ -893,7 +893,7 @@ async function attachmentDescriptors(tx: Sql, workspaceId: string, entityType: s
  * routing/authorization facts and attachments replaced by authoritative, URL-free descriptors (download through the
  * notification attachment route only).
  */
-function serializeMessage(m: MessageRow, attachments: any[]) {
+export function serializeMessage(m: MessageRow, attachments: any[]) {
   const source = m.metadata ?? {};
   const mentions = Array.isArray(source.mentions) ? source.mentions : [];
   const metadata: Record<string, unknown> = { mentions, attachments };
@@ -924,7 +924,7 @@ async function loadMessage(tx: Sql, workspaceId: string, id: string) {
 }
 
 /** Newest-first bounded window (count and bytes), returned oldest-first. */
-function boundWindow<T extends { body: string }>(newestFirst: T[], maxCount: number, maxBytes: number) {
+export function boundWindow<T extends { body: string }>(newestFirst: T[], maxCount: number, maxBytes: number) {
   const kept: T[] = [];
   let bytes = 0;
   for (const row of newestFirst) {
@@ -937,11 +937,13 @@ function boundWindow<T extends { body: string }>(newestFirst: T[], maxCount: num
 }
 
 /** Effective transcript (thread lineage incl. inherited parent ranges) strictly before the trigger, bounded. */
-async function boundedTranscript(t: Sql, w: string, trigger: MessageRow) {
+export async function boundedTranscript(t: Sql, w: string, trigger: Pick<MessageRow, 'channel_id' | 'thread_id'> & { created_at: Date; id: string },
+  cutoff: { created_at: Date; id: string } | null = trigger) {
   const before = (row: { created_at: Date; id: string }) => {
+    if (!cutoff) return true;
     const a = new Date(row.created_at).getTime();
-    const b = new Date(trigger.created_at).getTime();
-    return a < b || (a === b && row.id < trigger.id);
+    const b = new Date(cutoff.created_at).getTime();
+    return a < b || (a === b && row.id < cutoff.id);
   };
   const window: MessageRow[] = [];
   let afterCreatedAt: string | null = null;
@@ -970,7 +972,7 @@ async function boundedTranscript(t: Sql, w: string, trigger: MessageRow) {
 }
 
 /** Document body in the same shape as GET docs/:id/body (exact bytes, base64); never partial. */
-async function docBody(tx: Sql, workspaceId: string, docId: string) {
+export async function docBody(tx: Sql, workspaceId: string, docId: string) {
   const [doc] = await tx<{ id: string; title: string; row_version: number; channel_id: string; storage_object_id: string | null; deleted_at: Date | null }[]>`
     SELECT id, title, row_version, channel_id, storage_object_id, deleted_at FROM flightdeck_pg_docs WHERE workspace_id = ${workspaceId} AND id = ${docId}`;
   if (!doc || doc.deleted_at) return null;
@@ -1036,7 +1038,7 @@ async function buildContextThen<T>(sql: Sql, r: Recipient, notificationId: strin
   return withAuthorizedSnapshot(sql, r, async (t) => then(await contextIn(t, r, n, policy), t));
 }
 
-async function contextIn(t: Sql, r: Recipient, n: FullNotification, policy: ContextPolicy): Promise<any> {
+export async function contextIn(t: Sql, r: Recipient, n: FullNotification, policy: ContextPolicy): Promise<any> {
   {
     await lockChannels(t, r.workspaceId, [n.channel_id]);
     await assertNotificationLive(t, r, n);

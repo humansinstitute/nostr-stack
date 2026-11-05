@@ -42,6 +42,7 @@ All routes are under `/api/v4/flightdeck-pg/workspaces/{ws}/agent-notifications`
 | `GET /?cursor&limit≤100` | Page of envelopes and tombstones. |
 | `GET /stream?cursor` | SSE, using the same service function as polling. Frames: `ready`, `page` (identical to the poll response), `session_expired` (at most 10 min; reconnect with a fresh signature), `error` (terminal, then close). |
 | `GET /{id}/context` | Bounded, revalidated context. |
+| `GET /{id}/references/threads/{channel_id}/{thread_id}`, `…/references/docs/{id}`, `…/references/tasks/{id}` | A record a human referenced in the notified text (see Referenced records). |
 | `GET /{id}/attachments/{storage_object_id}` | Bytes of a trigger or transcript attachment. Never a URL. |
 | `POST /{id}/ack {subscription_id, outcome, code?}` | Outcome: `handled`, `suppressed`, `source_gone` or `failed_permanent`. Idempotent per (notification, subscription). `source_gone` is accepted only when Tower confirms it (`409 source_present` otherwise). |
 | `GET/PUT/DELETE /access-profile` | Notification-only classification (the authorization ceiling). |
@@ -148,6 +149,25 @@ Status codes:
 - `410 source_gone`: terminal.
 - `403 access_revoked` or `403 relationship_removed`: authorization. These are never acked past as handled.
 - Unknown and foreign ids return a byte-identical `404 notification_not_found`.
+
+## Referenced records
+
+A notification-only agent cannot follow a link in chat on its own: its ceiling admits only the notified record. A human can delegate a read of one more record by writing a reference token in text the notification already carries:
+
+- `@[label](mention:chat:{channel_id}#{thread_id})` (a thread), `mention:doc:{id}` or `mention:document:{id}`, `mention:task:{id}`.
+- The token must appear in the trigger or in the bounded context window: the trigger message or earlier window messages, the trigger task title/description or comment, an invocation prompt, or a document trigger body. Each piece of text delegates on behalf of its own author.
+- The route is `GET /{notification_id}/references/threads/{channel_id}/{thread_id}`, `…/docs/{id}` or `…/tasks/{id}`, signed like every inbox route by the recipient.
+
+The read is served only when all of these hold in one locked snapshot:
+
+1. The notification is the recipient's own, inside an active subscription floor, and its source access and canonical relationship are still `ok` (same checks as context). A `self_mention` notification delegates nothing.
+2. A token naming exactly that record was written by an actor with kind `human`, who is a workspace member and not the recipient. Agent-written tokens delegate nothing.
+3. The record is in the same workspace, not deleted, and its channel is not archived.
+4. At least one such human currently holds record access to the record's channel ACL key (`message` for threads, `doc`, `task`). Revoking that access ends the delegation on the next request.
+
+Anything else is `404 reference_not_found`, byte-identical for unreferenced, foreign-workspace, deleted, inaccessible, nonexistent and malformed ids. The route is no existence oracle.
+
+Responses are bounded like context: a thread returns the effective transcript (newest 20 messages / 32 KiB, oldest-first, `truncated`), a task returns the task and its 20 newest comments, a document returns `docBody` (exact bytes, base64, `body_too_large` over 2 MiB). No attachment descriptors or URLs are included, and the route grants no write. A reference grants no further references: tokens inside a referenced record are not followed. Revocation of the delegating human's access that commits after the snapshot is read can still be in flight, as with context.
 
 ## Authorization ceiling (`access-profile`)
 

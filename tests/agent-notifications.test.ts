@@ -767,6 +767,62 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     expect(await count(C)).toBeGreaterThan(cBefore);
   });
 
+  test('referenced records: a human reference token in the notified text delegates read of exactly that record, as that human; everything else is one 404', async () => {
+    const REF = { thread: 'SENTINEL-REF-THREAD-31c1', task: 'SENTINEL-REF-TASK-31c2', hidden: 'SENTINEL-REF-HIDDEN-31c3', w2: 'SENTINEL-REF-W2-31c4', unlinked: 'SENTINEL-REF-UNLINKED-31c5' };
+    const refThread = (await post(ch2, `Discussion ${REF.thread}`, { createThread: true })).thread.id as string;
+    await post(ch2, `${REF.thread} second`, { threadId: refThread });
+    const unlinkedThread = (await post(ch2, `Discussion ${REF.unlinked}`, { createThread: true })).thread.id as string;
+    const taskId = (await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch2}/tasks`, 'POST', H, { title: REF.task })).body.task.id as string;
+    const [object] = await db`INSERT INTO v4_storage_objects (owner_npub, created_by_npub, content_type, storage_path) VALUES (${npubs[H]!}, ${npubs[H]!}, 'text/markdown', 'x/ref-doc') RETURNING id`;
+    const [doc] = await db`INSERT INTO flightdeck_pg_docs (workspace_id, scope_id, channel_id, storage_object_id, title, created_by_actor_id, updated_by_actor_id)
+      VALUES (${w1}, ${scope}, ${ch2}, ${object!.id}, 'Referenced doc title', ${actors[H]!}, ${actors[H]!}) RETURNING id`;
+    // A private channel only C can read, and a thread in the other workspace.
+    const hiddenChannel = (await db`INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name) VALUES(${w1},${scope},'Hidden') RETURNING id`)[0]!.id as string;
+    for (const p of ['channel.read', 'channel.write']) await grant(w1, actors[C]!, hiddenChannel, p);
+    const hiddenThread = (await post(hiddenChannel, `Hidden ${REF.hidden}`, { actor: C, createThread: true })).thread.id as string;
+    const w2Thread = (await post(w2ch, `Foreign ${REF.w2}`, { actor: H2, createThread: true, workspace: w2 })).thread.id as string;
+
+    const token = (kind: string, id: string) => `@[Link](mention:${kind}:${id})`;
+    const trigger = await post(ch1, `@Bot1 read ${token('chat', `${ch2}#${refThread}`)} ${token('task', taskId)} ${token('document', doc!.id)} `
+      + `${token('chat', `${hiddenChannel}#${hiddenThread}`)} ${token('chat', `${w2ch}#${w2Thread}`)}`, { mentions: [A], createThread: true });
+    await drain();
+    const inbox = await all(A, 'consumer-refs');
+    const n = inbox.notifications.find((x: any) => x.source?.id === trigger.message.id);
+    expect(n).toBeTruthy();
+    const ref = (path: string, actor = A, notification = n.id) => call(`${base()}/${notification}/references/${path}`, 'GET', actor);
+
+    const thread = await ref(`threads/${ch2}/${refThread}`);
+    expect(thread.status).toBe(200);
+    expect(thread.body.referenced).toBe(true);
+    expect(thread.body.messages.map((m: any) => m.body)).toEqual([`Discussion ${REF.thread}`, `${REF.thread} second`]);
+    expect(thread.text).not.toMatch(/https?:\/\/|content_url|download_url/);
+    const task = await ref(`tasks/${taskId}`);
+    expect([task.status, task.body.task.title]).toEqual([200, REF.task]);
+    const document = await ref(`docs/${doc!.id}`);
+    expect([document.status, document.body.document.title]).toEqual([200, 'Referenced doc title']);
+
+    // Not named by any token, in the hidden channel (the author cannot read it), in another workspace, nonexistent, or malformed.
+    const refused = [
+      await ref(`threads/${ch2}/${unlinkedThread}`), await ref(`threads/${hiddenChannel}/${hiddenThread}`), await ref(`threads/${w2ch}/${w2Thread}`),
+      await ref(`tasks/${randomUUID()}`), await ref(`docs/${randomUUID()}`), await ref(`tasks/${otherTaskId}`), await ref('threads/not-a-uuid/also-not'),
+    ];
+    for (const result of refused) expect([result.status, result.body.code]).toEqual([404, 'reference_not_found']);
+    expect(new Set(refused.map((r) => r.text)).size).toBe(1);
+    for (const sentinel of [REF.unlinked, REF.hidden, REF.w2]) expect(refused.map((r) => r.text).join('')).not.toContain(sentinel);
+    // Another recipient cannot use A's notification, and a token written by an agent delegates nothing.
+    expect((await ref(`threads/${ch2}/${refThread}`, B)).status).toBe(404);
+    const botText = await post(ch1, `@Bot2 ${token('task', otherTaskId)}`, { actor: A, mentions: [B], createThread: true });
+    await drain();
+    const botNotification = (await all(B, 'consumer-refs-bot')).notifications.find((x: any) => x.source?.id === botText.message.id);
+    expect(botNotification).toBeTruthy();
+    expect((await ref(`tasks/${otherTaskId}`, B, botNotification.id)).status).toBe(404);
+    // Revoking the author's read access ends the delegation immediately.
+    await db`UPDATE flightdeck_pg_permission_grants SET revoked_at = NOW() WHERE workspace_id = ${w1} AND principal_actor_id = ${actors[H]!} AND resource_channel_id = ${ch2} AND permission = 'channel.read'`;
+    expect((await ref(`threads/${ch2}/${refThread}`)).status).toBe(404);
+    await db`UPDATE flightdeck_pg_permission_grants SET revoked_at = NULL WHERE workspace_id = ${w1} AND principal_actor_id = ${actors[H]!} AND resource_channel_id = ${ch2} AND permission = 'channel.read'`;
+    expect((await ref(`threads/${ch2}/${refThread}`)).status).toBe(200);
+  });
+
   test('cross-bot leakage audit: no byte seen by B carries A-only, DM, prompt, W2, removed-mention or task sentinels', async () => {
     const seen = allBytes.join('\n');
     for (const key of ['dm', 'prompt', 'w2', 'mentionA', 'removed', 'sibling'] as const) expect([key, seen.includes(SENTINEL[key])]).toEqual([key, false]);

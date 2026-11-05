@@ -127,6 +127,27 @@ export const agentNotificationPaths = {
       responses: { '200': json({ type: 'object', properties: { channel: ref('AgentNotificationContextChannel') } }), '403': err('access_revoked | relationship_removed | workspace_membership_required'), '404': err('notification_not_found'), '410': err('source_gone'), '503': err('authorization_contention'), '401': authErrors['401'] },
     }),
   },
+  [`${BASE}/{notificationId}/references/threads/{channelId}/{threadId}`]: {
+    get: op('Read a thread a human referenced in the notified text', {
+      description: 'Served only while the notification is live and a human who wrote the reference token currently can read the thread in the same workspace. Every refusal is one byte-identical 404 reference_not_found. Bounded like context; no attachments, no writes.',
+      parameters: [notificationParam, { name: 'channelId', in: 'path', required: true, schema: uuid }, { name: 'threadId', in: 'path', required: true, schema: uuid }],
+      responses: { '200': json({ type: 'object' }), '404': err('reference_not_found | notification_not_found'), '403': err('access_revoked | relationship_removed'), '410': err('source_gone'), '401': authErrors['401'] },
+    }),
+  },
+  [`${BASE}/{notificationId}/references/docs/{id}`]: {
+    get: op('Read a document a human referenced in the notified text', {
+      description: 'Same delegation rules as thread references; returns the document in the notification document-body shape.',
+      parameters: [notificationParam, { name: 'id', in: 'path', required: true, schema: uuid }],
+      responses: { '200': json({ type: 'object' }), '404': err('reference_not_found | notification_not_found'), '403': err('access_revoked | relationship_removed'), '410': err('source_gone'), '401': authErrors['401'] },
+    }),
+  },
+  [`${BASE}/{notificationId}/references/tasks/{id}`]: {
+    get: op('Read a task a human referenced in the notified text', {
+      description: 'Same delegation rules as thread references; returns the task and its newest comments.',
+      parameters: [notificationParam, { name: 'id', in: 'path', required: true, schema: uuid }],
+      responses: { '200': json({ type: 'object' }), '404': err('reference_not_found | notification_not_found'), '403': err('access_revoked | relationship_removed'), '410': err('source_gone'), '401': authErrors['401'] },
+    }),
+  },
   [`${BASE}/{notificationId}/attachments/{storageObjectId}`]: {
     get: op('Download an attachment of the notification trigger/context entity', {
       description: 'Recipient-signed every time; no bearer URL is ever issued by this flow.',

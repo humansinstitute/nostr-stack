@@ -7,6 +7,7 @@ import {
   clearAccessProfile, createOrRecoverSubscription, isNotificationIdentity, listInboxPage, readAccessProfile, readAttachment,
   resolveRecipient, setAccessProfile, verifyAgentNotificationRequest, type StrictAuth,
 } from '../services/agent-notifications';
+import { readReference, type ReferenceTarget } from '../services/agent-notification-references';
 
 /**
  * Strict agent notification inbox routes (docs/contract/agent-notifications-v1.md). Every route verifies a fresh,
@@ -161,6 +162,19 @@ agentNotificationsRouter.get(`${BASE}/:notificationId/context`, async (c) => {
     return c.json(await buildContext(sqlOf(), recipient, c.req.param('notificationId')));
   } catch (error) { return errorResponse(c, error); }
 });
+
+/** Referenced records: a human's reference token in the notification's own text, read as that human could (see the contract). */
+const referenceRoute = (route: string, target: (c: Context) => ReferenceTarget) => async (c: Context) => {
+  try {
+    const { auth } = await strict(c, route);
+    const recipient = await resolveRecipient(sqlOf(), c.req.param('workspaceId')!, auth.userNpub);
+    return c.json(await readReference(sqlOf(), recipient, c.req.param('notificationId')!, target(c)));
+  } catch (error) { return errorResponse(c, error); }
+};
+agentNotificationsRouter.get(`${BASE}/:notificationId/references/threads/:channelId/:threadId`,
+  referenceRoute('reference.thread', (c) => ({ type: 'thread', channelId: c.req.param('channelId')!, threadId: c.req.param('threadId')! })));
+agentNotificationsRouter.get(`${BASE}/:notificationId/references/docs/:id`, referenceRoute('reference.doc', (c) => ({ type: 'doc', id: c.req.param('id')! })));
+agentNotificationsRouter.get(`${BASE}/:notificationId/references/tasks/:id`, referenceRoute('reference.task', (c) => ({ type: 'task', id: c.req.param('id')! })));
 
 agentNotificationsRouter.get(`${BASE}/:notificationId/attachments/:storageObjectId`, async (c) => {
   try {
