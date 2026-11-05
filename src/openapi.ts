@@ -2482,6 +2482,15 @@ export function buildOpenApiDocument(origin: string) {
 
       },
       schemas: {
+        FlightDeckPgGeneralEnsureResponse: {
+          type: 'object', required: ['identity','scope','channel','reused','policy'],
+          properties: {
+            identity: { type: 'object' }, scope: { type: 'object', required: ['id','workspace_id','default_channel_id'], properties: { id: {type:'string',format:'uuid'}, workspace_id: {type:'string',format:'uuid'}, default_channel_id: {type:'string',format:'uuid'} } },
+            channel: { type: 'object', required: ['id','workspace_id','scope_id','kind'], properties: { id: {type:'string',format:'uuid'},workspace_id: {type:'string',format:'uuid'},scope_id: {type:'string',format:'uuid'},kind: {type:'string',enum:['channel']} } },
+            reused: { type: 'boolean' },
+            policy: { type: 'object', required: ['version','kind','group_id','access_level'], properties: { version: {type:'integer',enum:[1]},kind: {type:'string',enum:['all_workspace_members']},group_id: {type:'string',format:'uuid'},access_level: {type:'string',enum:['contribute']} } },
+          },
+        },
         FlightDeckPgChannelMoveAccessActor: {
           type:'object', required:['actor_id','npub','label','permissions'],
           properties:{actor_id:{type:'string',format:'uuid'},npub:{type:'string'},label:{type:'string'},permissions:{type:'array',items:{type:'string'}}},
@@ -4686,6 +4695,23 @@ export function buildOpenApiDocument(origin: string) {
             '401': { description: 'Invalid NIP-98 auth', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
             '403': { description: 'Permission denied', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
             '404': { description: 'Workspace not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+          },
+        },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/general/ensure': {
+        post: {
+          summary: 'Ensure canonical all-member General (current owner only)',
+          description: 'Explicit opt-in; requires current canonical owner membership and workspace.manage. Empty body. Durable workspace identity independent of names; current and future members contribute through Workspace group. No billing or agent command authority. Archived canonical resources return 409; no existing tenant backfill.',
+          security: [{ nip98: [] }],
+          parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', additionalProperties: false } } } },
+          responses: {
+            '200': { description: 'Reused canonical General', content: { 'application/json': { schema: { $ref: '#/components/schemas/FlightDeckPgGeneralEnsureResponse' } } } },
+            '201': { description: 'Created canonical General', content: { 'application/json': { schema: { $ref: '#/components/schemas/FlightDeckPgGeneralEnsureResponse' } } } },
+            '400': { description: 'Expected empty object' },
+            '401': { description: 'NIP-98 required' },
+            '403': { description: 'Canonical owner and workspace.manage required' },
+            '409': { description: 'Workspace default group missing or canonical resources unavailable' },
           },
         },
       },

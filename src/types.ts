@@ -3691,3 +3691,24 @@ export interface FlightDeckPgChannelMoveRequest {
   confirmation_token: string;
   mutation_id: string;
 }
+
+/** Canonical General opt-in response, alongside the existing serialized scope/channel. */
+export interface FlightDeckPgGeneralPolicy {
+  version: 1;
+  kind: 'all_workspace_members';
+  group_id: string;
+  access_level: 'contribute';
+}
+export type FlightDeckPgGeneralEnsureRequest = Record<string, never>;
+
+export interface FlightDeckPgGeneralEnsureResponse {
+  identity: FlightDeckPgIdentityFields;
+  scope: Omit<FlightDeckPgScope, 'created_by_actor_id' | 'archived_at' | 'created_at' | 'updated_at'> & {
+    row_version: number; created_at: string; updated_at: string;
+  };
+  channel: Omit<FlightDeckPgChannel, 'created_by_actor_id' | 'archived_at' | 'created_at' | 'updated_at'> & {
+    participant_npubs: string[] | null; row_version: number; created_at: string; updated_at: string;
+  };
+  reused: boolean;
+  policy: FlightDeckPgGeneralPolicy;
+}

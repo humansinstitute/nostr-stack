@@ -1,3 +1,4 @@
+import { ensureWorkspaceGeneral } from '../services/flightdeck-pg-general';
 import { runFlightDeckPgChannelMove, ChannelMoveError } from '../services/flightdeck-pg-channel-move';
 import { getWorkspaceApp } from '../services/workspace-apps';
 import { MembershipAdminError, previewWorkspaceMemberRemoval, removeWorkspaceMember, setWorkspaceAgentManager, inspectWorkspaceMemberAccess } from '../services/flightdeck-pg-membership-admin';
@@ -3941,6 +3942,23 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/events/stream', async (c) => {
       'Access-Control-Allow-Origin': '*',
     },
   });
+});
+
+flightDeckPgRouter.post('/workspaces/:workspaceId/general/ensure', async (c) => {
+  const auth = await requireNip98AuthResolved(c);
+  if (auth instanceof Response) return auth;
+  const result = await requireFlightDeckPgContext(c, auth.userNpub);
+  if ('response' in result) return result.response;
+  const {context,identity} = result;
+  const body = await readJsonBody(c);
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) return jsonError(c,400,'invalid_body','Expected an empty JSON object',identity);
+  try {
+    const payload = await ensureWorkspaceGeneral(context.workspace.id,auth.userNpub);
+    return c.json({identity,scope:serializeFlightDeckPgScope(payload.scope),channel:serializeFlightDeckPgChannel(payload.channel),reused:payload.reused,policy:payload.policy},payload.reused ? 200 : 201);
+  } catch (error) {
+    if (error instanceof MembershipAdminError) return jsonError(c,error.status,error.code,error.message,identity);
+    throw error;
+  }
 });
 
 flightDeckPgRouter.post('/workspaces/:workspaceId/members', async (c) => {
