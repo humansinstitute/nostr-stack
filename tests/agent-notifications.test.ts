@@ -770,8 +770,9 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
   test('referenced records: a human reference token in the notified text delegates read of exactly that record, as that human; everything else is one 404', async () => {
     const REF = { thread: 'SENTINEL-REF-THREAD-31c1', task: 'SENTINEL-REF-TASK-31c2', hidden: 'SENTINEL-REF-HIDDEN-31c3', w2: 'SENTINEL-REF-W2-31c4', unlinked: 'SENTINEL-REF-UNLINKED-31c5' };
     const refThread = (await post(ch2, `Discussion ${REF.thread}`, { createThread: true })).thread.id as string;
-    await post(ch2, `${REF.thread} second`, { threadId: refThread });
     const unlinkedThread = (await post(ch2, `Discussion ${REF.unlinked}`, { createThread: true })).thread.id as string;
+    // A token inside a referenced record is untrusted text: it must never extend the delegation (no recursive expansion).
+    await post(ch2, `${REF.thread} second @[Nested](mention:chat:${ch2}#${unlinkedThread})`, { threadId: refThread });
     const taskId = (await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch2}/tasks`, 'POST', H, { title: REF.task })).body.task.id as string;
     const [object] = await db`INSERT INTO v4_storage_objects (owner_npub, created_by_npub, content_type, storage_path) VALUES (${npubs[H]!}, ${npubs[H]!}, 'text/markdown', 'x/ref-doc') RETURNING id`;
     const [doc] = await db`INSERT INTO flightdeck_pg_docs (workspace_id, scope_id, channel_id, storage_object_id, title, created_by_actor_id, updated_by_actor_id)
@@ -794,7 +795,7 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     const thread = await ref(`threads/${ch2}/${refThread}`);
     expect(thread.status).toBe(200);
     expect(thread.body.referenced).toBe(true);
-    expect(thread.body.messages.map((m: any) => m.body)).toEqual([`Discussion ${REF.thread}`, `${REF.thread} second`]);
+    expect(thread.body.messages.map((m: any) => m.body)).toEqual([`Discussion ${REF.thread}`, `${REF.thread} second @[Nested](mention:chat:${ch2}#${unlinkedThread})`]);
     expect(thread.text).not.toMatch(/https?:\/\/|content_url|download_url/);
     const task = await ref(`tasks/${taskId}`);
     expect([task.status, task.body.task.title]).toEqual([200, REF.task]);
@@ -821,6 +822,29 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     expect((await ref(`threads/${ch2}/${refThread}`)).status).toBe(404);
     await db`UPDATE flightdeck_pg_permission_grants SET revoked_at = NULL WHERE workspace_id = ${w1} AND principal_actor_id = ${actors[H]!} AND resource_channel_id = ${ch2} AND permission = 'channel.read'`;
     expect((await ref(`threads/${ch2}/${refThread}`)).status).toBe(200);
+  });
+
+  test('referenced records: task text is attributed to the human who wrote it, not to whoever triggered the notification', async () => {
+    const hiddenChannel = (await db`INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name) VALUES(${w1},${scope},'Hidden attribution') RETURNING id`)[0]!.id as string;
+    for (const p of ['channel.read', 'channel.write']) await grant(w1, actors[C]!, hiddenChannel, p);
+    const hiddenThread = (await post(hiddenChannel, 'SENTINEL-ATTRIB-HIDDEN-77a1', { actor: C, createThread: true })).thread.id as string;
+    // H wrote the description and cannot read the hidden thread; C can read it but wrote none of the task text.
+    const task = await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/tasks`, 'POST', H, {
+      title: 'Attribution task', description: `see @[Hidden](mention:chat:${hiddenChannel}#${hiddenThread})`,
+    });
+    expect(task.status).toBe(201);
+    const taskId = task.body.task.id as string;
+    await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${taskId}/assignments`, 'POST', H, { actor_id: actors[A] });
+    const comment = await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${taskId}/comments`, 'POST', C, {
+      body: '@Bot1 please look', mentions: [{ type: 'agent', npub: npubs[A], label: 'Bot1' }],
+    });
+    expect(comment.status).toBe(201);
+    await drain();
+    const n = (await all(A, 'consumer-refs-attrib')).notifications.find((x: any) => x.source?.id === comment.body.comment.id);
+    expect(n).toBeTruthy();
+    const res = await call(`${base()}/${n.id}/references/threads/${hiddenChannel}/${hiddenThread}`, 'GET', A);
+    expect([res.status, res.body.code]).toEqual([404, 'reference_not_found']);
+    expect(res.text).not.toContain('SENTINEL-ATTRIB-HIDDEN-77a1');
   });
 
   test('cross-bot leakage audit: no byte seen by B carries A-only, DM, prompt, W2, removed-mention or task sentinels', async () => {

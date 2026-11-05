@@ -2,7 +2,7 @@ import type { Sql } from './notification-core';
 import { isUuid } from './notification-core';
 import {
   WINDOW_BYTES, WINDOW_MESSAGES, agentNotificationContextPolicy, boundWindow, boundedTranscript, contextIn, docBody, fail,
-  loadOwnNotification, lockChannels, serializeMessage, withAuthorizedSnapshot, type Recipient,
+  loadOwnNotification, lockChannels, lockPrincipalAccess, serializeMessage, withAuthorizedSnapshot, type Recipient,
 } from './agent-notifications';
 
 /**
@@ -38,18 +38,44 @@ export function referenceKeysIn(text: string): Set<string> {
 
 type TextSource = { actorId: string | null | undefined; text: string };
 
-/** Text the notification itself carries, each piece attributed to the actor who wrote it. */
-function referenceSources(context: any, authorActorId: string | null): TextSource[] {
+type AuthoredTable = 'flightdeck_pg_tasks' | 'flightdeck_pg_docs' | 'flightdeck_pg_task_comments' | 'flightdeck_pg_doc_comments' | 'flightdeck_pg_invocations';
+
+/**
+ * Actor who wrote the current text of each row. Only rows whose creator is also their last updater are attributable: once
+ * anyone else has touched the row the text may carry their edit, so it names no writer and delegates nothing.
+ */
+async function soleWriters(t: Sql, w: string, table: AuthoredTable, ids: Array<string | null | undefined>): Promise<Map<string, string>> {
+  const wanted = [...new Set(ids.filter((id): id is string => typeof id === 'string' && isUuid(id)))];
+  if (!wanted.length) return new Map();
+  const rows = table === 'flightdeck_pg_invocations'
+    ? await t<{ id: string; actor: string }[]>`SELECT id, created_by_actor_id AS actor FROM flightdeck_pg_invocations WHERE workspace_id = ${w} AND id = ANY(${wanted}::uuid[])`
+    : await t<{ id: string; actor: string }[]>`SELECT id, created_by_actor_id AS actor FROM ${t(table)} WHERE workspace_id = ${w} AND id = ANY(${wanted}::uuid[]) AND created_by_actor_id = updated_by_actor_id`;
+  return new Map(rows.map((row) => [row.id, row.actor]));
+}
+
+/** Text the notification itself carries, each piece attributed to the actor who actually wrote it (never the notifier). */
+async function referenceSources(t: Sql, w: string, context: any): Promise<TextSource[]> {
   const trigger = context.trigger ?? {};
   const sources: TextSource[] = [];
   const message = trigger.message;
-  if (message) sources.push({ actorId: message.created_by_actor_id, text: String(message.body ?? '') });
-  for (const earlier of context.window?.messages ?? []) sources.push({ actorId: earlier.created_by_actor_id, text: String(earlier.body ?? '') });
-  if (trigger.task) sources.push({ actorId: authorActorId, text: `${trigger.task.title ?? ''}\n${trigger.task.description ?? ''}` });
-  if (trigger.comment) sources.push({ actorId: authorActorId, text: String(trigger.comment.body ?? '') });
-  if (trigger.invocation) sources.push({ actorId: authorActorId, text: String(trigger.invocation.prompt ?? '') });
+  const sole = (m: any) => (m?.created_by_actor_id && m.created_by_actor_id === m.updated_by_actor_id ? m.created_by_actor_id : null);
+  if (message) sources.push({ actorId: sole(message), text: String(message.body ?? '') });
+  for (const earlier of context.window?.messages ?? []) sources.push({ actorId: sole(earlier), text: String(earlier.body ?? '') });
+  const windowComments: any[] = context.window?.comments ?? [];
+  const commentTable: AuthoredTable = trigger.type === 'doc_comment' ? 'flightdeck_pg_doc_comments' : 'flightdeck_pg_task_comments';
+  const [tasks, docs, comments, windowAuthors, invocations] = await Promise.all([
+    soleWriters(t, w, 'flightdeck_pg_tasks', [trigger.task?.id]),
+    soleWriters(t, w, 'flightdeck_pg_docs', [trigger.document?.id]),
+    soleWriters(t, w, commentTable, [trigger.comment?.id]),
+    soleWriters(t, w, 'flightdeck_pg_task_comments', windowComments.map((c) => c.id)),
+    soleWriters(t, w, 'flightdeck_pg_invocations', [trigger.invocation?.id]),
+  ]);
+  if (trigger.task) sources.push({ actorId: tasks.get(trigger.task.id), text: `${trigger.task.title ?? ''}\n${trigger.task.description ?? ''}` });
+  if (trigger.comment) sources.push({ actorId: comments.get(trigger.comment.id), text: String(trigger.comment.body ?? '') });
+  for (const c of windowComments) sources.push({ actorId: windowAuthors.get(c.id), text: String(c.body ?? '') });
+  if (trigger.invocation) sources.push({ actorId: invocations.get(trigger.invocation.id), text: String(trigger.invocation.prompt ?? '') });
   const body = trigger.document?.body;
-  if (body?.base64_data) sources.push({ actorId: authorActorId, text: Buffer.from(String(body.base64_data), 'base64').toString('utf8') });
+  if (body?.base64_data) sources.push({ actorId: docs.get(trigger.document.id), text: Buffer.from(String(body.base64_data), 'base64').toString('utf8') });
   return sources;
 }
 
@@ -119,19 +145,23 @@ export async function readReference(sql: Sql, r: Recipient, notificationId: stri
     // Same liveness, access and relationship checks as the notification's own context.
     const context = await contextIn(t, r, n, agentNotificationContextPolicy());
     const wanted = targetKey(target);
-    const writers = [...new Set(referenceSources(context, n.author_actor_id ?? null)
-      .filter((source) => source.actorId && referenceKeysIn(source.text).has(wanted)).map((source) => source.actorId!))];
+    // Only actors who actually wrote linked text can delegate; never the notifier, never the recipient, never inferred.
+    const writers = [...new Set((await referenceSources(t, w, context))
+      .filter((source) => source.actorId && source.actorId !== r.actorId && referenceKeysIn(source.text).has(wanted)).map((source) => source.actorId!))];
     if (!writers.length) throw refNotFound();
     const resolved = await resolveTarget(t, w, target);
     if (!resolved) throw refNotFound();
     await lockChannels(t, w, [resolved.channelId]);
-    // The delegating human must be a workspace member who can read the target now (never the recipient itself).
+    // Delegators are authorizing principals: serialize their membership/grant/group revocation like the recipient's.
+    const humans = await t<{ id: string; npub: string }[]>`
+      SELECT a.id, a.npub FROM flightdeck_pg_actors a JOIN flightdeck_pg_workspace_memberships m ON m.workspace_id = ${w} AND m.actor_id = a.id
+      WHERE a.id = ANY(${writers}::uuid[]) AND a.kind = 'human' ORDER BY a.id`;
+    for (const human of humans) await lockPrincipalAccess(t, { workspaceId: w, actorId: human.id, npub: human.npub });
+    // At least one delegating human must be able to read the target now.
     const [delegation] = await t<{ ok: boolean }[]>`
       SELECT EXISTS (
-        SELECT 1 FROM flightdeck_pg_actors a
-        JOIN flightdeck_pg_workspace_memberships m ON m.workspace_id = ${w} AND m.actor_id = a.id
-        WHERE a.id = ANY(${writers}::uuid[]) AND a.id <> ${r.actorId} AND a.kind = 'human'
-          AND flightdeck_pg_record_access(${w}::uuid, a.id) @> to_jsonb(${`channel:${resolved.channelId}:${resolved.aclFamily}`}::text)
+        SELECT 1 FROM unnest(${humans.map((h) => h.id)}::uuid[]) AS h(id)
+        WHERE flightdeck_pg_record_access(${w}::uuid, h.id) @> to_jsonb(${`channel:${resolved.channelId}:${resolved.aclFamily}`}::text)
       ) AS ok`;
     if (!delegation?.ok) throw refNotFound();
     return { ok: true, referenced: true, notification_id: n.id, reference: { type: target.type, ...(target.type === 'thread' ? { channel_id: target.channelId, thread_id: target.threadId } : { id: target.id }) },

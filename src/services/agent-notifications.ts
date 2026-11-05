@@ -121,6 +121,36 @@ export async function resolveRecipient(sql: Sql, workspaceId: string, npub: stri
   return { workspaceId: row.workspace_id, actorId: row.actor_id, npub, kind: row.kind!, classified: row.classified, appNpub: row.app_npub };
 }
 
+/** Share-locks the rows that grant a principal access (see withAuthorizedSnapshot); throws if membership or identity changed. */
+export async function lockPrincipalAccess(t: Sql, r: Pick<Recipient, 'workspaceId' | 'actorId' | 'npub'>) {
+  const [member] = await t`SELECT 1 FROM flightdeck_pg_workspace_memberships WHERE workspace_id = ${r.workspaceId} AND actor_id = ${r.actorId} FOR KEY SHARE`;
+  if (!member) throw fail(403, 'workspace_membership_required', 'Actor is not a member of this workspace');
+  const [actor] = await t<{ npub: string }[]>`SELECT npub FROM flightdeck_pg_actors WHERE id = ${r.actorId} FOR SHARE`;
+  if (actor?.npub !== r.npub) throw fail(403, 'identity_rotated', 'The recipient identity was rotated; re-authenticate');
+  await t`
+    WITH RECURSIVE groups(id) AS (
+      SELECT group_id FROM flightdeck_pg_group_memberships WHERE workspace_id = ${r.workspaceId} AND actor_id = ${r.actorId}
+      UNION SELECT e.parent_group_id FROM flightdeck_pg_group_edges e JOIN groups g ON g.id = e.child_group_id WHERE e.workspace_id = ${r.workspaceId}
+    )
+    SELECT 1 FROM flightdeck_pg_group_memberships gm
+    WHERE gm.workspace_id = ${r.workspaceId} AND gm.actor_id = ${r.actorId} FOR KEY SHARE`;
+  await t`
+    WITH RECURSIVE groups(id) AS (
+      SELECT group_id FROM flightdeck_pg_group_memberships WHERE workspace_id = ${r.workspaceId} AND actor_id = ${r.actorId}
+      UNION SELECT e.parent_group_id FROM flightdeck_pg_group_edges e JOIN groups g ON g.id = e.child_group_id WHERE e.workspace_id = ${r.workspaceId}
+    )
+    SELECT 1 FROM flightdeck_pg_group_edges e WHERE e.workspace_id = ${r.workspaceId} AND e.child_group_id IN (SELECT id FROM groups) FOR KEY SHARE`;
+  await t`
+    WITH RECURSIVE groups(id) AS (
+      SELECT group_id FROM flightdeck_pg_group_memberships WHERE workspace_id = ${r.workspaceId} AND actor_id = ${r.actorId}
+      UNION SELECT e.parent_group_id FROM flightdeck_pg_group_edges e JOIN groups g ON g.id = e.child_group_id WHERE e.workspace_id = ${r.workspaceId}
+    )
+    SELECT 1 FROM flightdeck_pg_permission_grants g
+    WHERE g.workspace_id = ${r.workspaceId} AND g.revoked_at IS NULL
+      AND ((g.principal_type = 'actor' AND g.principal_actor_id = ${r.actorId}) OR (g.principal_type = 'group' AND g.principal_group_id IN (SELECT id FROM groups)))
+    FOR SHARE`;
+}
+
 /**
  * Linearizes authorization with revocation: inside a REPEATABLE READ transaction, share-lock the rows that grant the
  * recipient access (membership, actor identity, effective group memberships/edges and live grants). A revocation that
@@ -132,32 +162,7 @@ export async function withAuthorizedSnapshot<T>(sql: Sql, r: Recipient, work: (t
     try {
       return await sql.begin('ISOLATION LEVEL REPEATABLE READ', async (tx) => {
         const t = tx as unknown as Sql;
-        const [member] = await t`SELECT 1 FROM flightdeck_pg_workspace_memberships WHERE workspace_id = ${r.workspaceId} AND actor_id = ${r.actorId} FOR KEY SHARE`;
-        if (!member) throw fail(403, 'workspace_membership_required', 'Actor is not a member of this workspace');
-        const [actor] = await t<{ npub: string }[]>`SELECT npub FROM flightdeck_pg_actors WHERE id = ${r.actorId} FOR SHARE`;
-        if (actor?.npub !== r.npub) throw fail(403, 'identity_rotated', 'The recipient identity was rotated; re-authenticate');
-        await t`
-          WITH RECURSIVE groups(id) AS (
-            SELECT group_id FROM flightdeck_pg_group_memberships WHERE workspace_id = ${r.workspaceId} AND actor_id = ${r.actorId}
-            UNION SELECT e.parent_group_id FROM flightdeck_pg_group_edges e JOIN groups g ON g.id = e.child_group_id WHERE e.workspace_id = ${r.workspaceId}
-          )
-          SELECT 1 FROM flightdeck_pg_group_memberships gm
-          WHERE gm.workspace_id = ${r.workspaceId} AND gm.actor_id = ${r.actorId} FOR KEY SHARE`;
-        await t`
-          WITH RECURSIVE groups(id) AS (
-            SELECT group_id FROM flightdeck_pg_group_memberships WHERE workspace_id = ${r.workspaceId} AND actor_id = ${r.actorId}
-            UNION SELECT e.parent_group_id FROM flightdeck_pg_group_edges e JOIN groups g ON g.id = e.child_group_id WHERE e.workspace_id = ${r.workspaceId}
-          )
-          SELECT 1 FROM flightdeck_pg_group_edges e WHERE e.workspace_id = ${r.workspaceId} AND e.child_group_id IN (SELECT id FROM groups) FOR KEY SHARE`;
-        await t`
-          WITH RECURSIVE groups(id) AS (
-            SELECT group_id FROM flightdeck_pg_group_memberships WHERE workspace_id = ${r.workspaceId} AND actor_id = ${r.actorId}
-            UNION SELECT e.parent_group_id FROM flightdeck_pg_group_edges e JOIN groups g ON g.id = e.child_group_id WHERE e.workspace_id = ${r.workspaceId}
-          )
-          SELECT 1 FROM flightdeck_pg_permission_grants g
-          WHERE g.workspace_id = ${r.workspaceId} AND g.revoked_at IS NULL
-            AND ((g.principal_type = 'actor' AND g.principal_actor_id = ${r.actorId}) OR (g.principal_type = 'group' AND g.principal_group_id IN (SELECT id FROM groups)))
-          FOR SHARE`;
+        await lockPrincipalAccess(t, r);
         return work(t);
       });
     } catch (error: any) {
