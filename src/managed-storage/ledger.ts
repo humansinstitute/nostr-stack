@@ -8,6 +8,8 @@ import { requireCondition } from './contract';
 type Db = ReturnType<typeof getDb>;
 export interface StorageObject {
   id: string;
+  deletion_job: string | null;
+  physical_absent: boolean;
   workspace_id: string;
   delegation_id: string;
   installation_id: string;
@@ -60,9 +62,10 @@ export class StorageLedger {
     return rows[0];
   }
   async usage(grant: StorageGrant, tx = this.db): Promise<{ bytes: number; objects: number }> {
-    const [row] = await tx`SELECT COALESCE(SUM(size_bytes + receipt_bytes),0)::text AS bytes, COUNT(*)::text AS objects
+    const [row] = await tx`SELECT COALESCE(SUM((CASE WHEN physical_absent THEN 0 ELSE size_bytes END) + receipt_bytes),0)::text AS bytes, COUNT(*)::text AS objects
       FROM managed_app_storage_objects WHERE workspace_id=${grant.workspaceId} AND delegation_id=${grant.delegationId}`;
-    const bytes = Number(row!.bytes), objects = Number(row!.objects);
+    const [metadata] = await tx`SELECT COALESCE((SELECT SUM(metadata_bytes) FROM managed_storage_sets WHERE workspace_id=${grant.workspaceId} AND delegation_id=${grant.delegationId}),0) + COALESCE((SELECT SUM(metadata_bytes) FROM managed_storage_previews WHERE workspace_id=${grant.workspaceId} AND delegation_id=${grant.delegationId} AND state='confirmed'),0) AS bytes`;
+    const bytes = Number(row!.bytes) + Number(metadata!.bytes), objects = Number(row!.objects);
     requireCondition(Number.isSafeInteger(bytes) && Number.isSafeInteger(objects), 'storage_usage_invalid', 503);
     return { bytes, objects };
   }
@@ -72,9 +75,12 @@ export class StorageLedger {
       WHERE workspace_id=${grant.workspaceId} AND delegation_id=${grant.delegationId} AND idempotency_key=${input.key} FOR UPDATE`;
     if (existing) {
       owns(existing, grant);
+      requireCondition(!existing.deletion_job, 'storage_object_deleted', 410);
       requireCondition(existing.sha256_hex === input.hash && Number(existing.size_bytes) === input.size, 'storage_idempotency_conflict', 409);
       return existing;
     }
+    await tx`INSERT INTO managed_storage_graph(workspace_id,delegation_id) VALUES(${grant.workspaceId},${grant.delegationId}) ON CONFLICT DO NOTHING`;
+    await tx`UPDATE managed_storage_graph SET revision=revision+1 WHERE workspace_id=${grant.workspaceId} AND delegation_id=${grant.delegationId}`;
     const receiptBytes = Buffer.byteLength(JSON.stringify(input.receipt));
     requireCondition(receiptBytes > 0 && receiptBytes <= 6144, "storage_receipt_invalid");
     const usage = await this.usage(grant, tx);
@@ -89,7 +95,7 @@ export class StorageLedger {
     return this.db<StorageObject[]>`SELECT *, created_at::text AS created_at_cursor FROM managed_app_storage_objects
       WHERE workspace_id=${grant.workspaceId} AND delegation_id=${grant.delegationId}
       AND installation_id=${grant.installationId} AND app_id=${grant.appId} AND app_npub=${grant.appNpub}
-      AND state='complete' AND (created_at,id)>(${after.time}::text::timestamptz,${after.id}::uuid)
+      AND state='complete' AND deletion_job IS NULL AND (created_at,id)>(${after.time}::text::timestamptz,${after.id}::uuid)
       ORDER BY created_at,id LIMIT 51`;
   }
 

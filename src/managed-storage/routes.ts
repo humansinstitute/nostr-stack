@@ -1,3 +1,4 @@
+import { collectionActions, collectionBody, collectionControl } from './collection-routes';
 import { Hono } from 'hono';
 import { getEffectiveRequestUrl } from '../auth';
 import { config } from '../config';
@@ -29,7 +30,7 @@ export function createManagedStorageRouter(service: ManagedStorageService) {
     requireCondition(service.configured(), 'storage_delegation_unsupported', 404);
     return c.json({ protocol: PROTOCOL, max_object_bytes: MAX_OBJECT_BYTES, max_receipt_bytes: 6144, token_ttl_seconds: 60,
       transfer_timeout_seconds: TRANSFER_MS / 1000, billing_modes: ['operator_budget'],
-      features: ['durable_idempotency', 'quota_reservations', 'private_objects', 'immutable_completion', 'revocable_downloads', 'bounded_stream_uploads', 'recovery_status', 'publisher_receipts'] });
+      features: ['durable_idempotency', 'quota_reservations', 'private_objects', 'immutable_completion', 'revocable_downloads', 'bounded_stream_uploads', 'recovery_status', 'publisher_receipts', 'confirmed_collection_deletion'] });
   });
   router.all('/workspaces/:workspaceId/delegations/:delegationId/*', async c => {
     requireCondition(service.configured(), 'storage_delegation_unsupported', 404);
@@ -44,7 +45,7 @@ export function createManagedStorageRouter(service: ManagedStorageService) {
     const id = object?.[1];
     const action = object?.[2] ?? tail;
     if (id) requireCondition(uuid.test(id), 'storage_request_invalid');
-    requireCondition(id || action === 'prepare' || action === 'status', 'storage_operation_not_allowed', 404);
+    requireCondition(id || action === 'prepare' || action === 'status' || collectionActions.includes(action), 'storage_operation_not_allowed', 404);
     const signal = AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(TRANSFER_MS)]);
     if (action === 'upload' || action === 'download') {
       requireCondition(c.req.method === (action === 'upload' ? 'PUT' : 'GET'), 'storage_method_not_allowed', 405);
@@ -61,12 +62,13 @@ export function createManagedStorageRouter(service: ManagedStorageService) {
     const raw = new TextDecoder().decode(await boundedBytes(c.req.raw.body, CONTROL_BYTES, signal));
     let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { throw new StorageDelegationError('storage_request_invalid'); }
-    const body = exactObject(parsed, action === 'prepare' ? [...common, 'idempotency_key', 'sha256_hex', 'size_bytes'] : action === 'status' && !id ? [...common, 'cursor'] : common);
+    const body = collectionActions.includes(action) ? collectionBody(action,parsed,common) : exactObject(parsed, action === 'prepare' ? [...common, 'idempotency_key', 'sha256_hex', 'size_bytes'] : action === 'status' && !id ? [...common, 'cursor'] : common);
     const proof = storageControlProof(c.req.raw, raw);
     const grant = await service.authorize(workspace, delegation, effective.origin, proof.signer);
     requireCondition(body.installation_id === grant.installationId && body.app_id === grant.appId
       && body.revision === grant.revision && body.expected_service_npub === grant.serviceNpub,
     'storage_delegation_denied', 403);
+    if (collectionActions.includes(action)) return c.json(await collectionControl(service,grant,action,body,proof.receipt,signal));
     if (action === 'prepare') {
       requireCondition(Buffer.byteLength(raw) <= 2048, 'storage_receipt_invalid', 413);
       return c.json(await service.prepare(grant, body, proof.receipt));

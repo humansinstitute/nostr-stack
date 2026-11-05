@@ -1,7 +1,10 @@
+import { physicalRemover } from './physical-delete';
 import { config } from '../config';
 import { boundedBytes, requireCondition } from './contract';
 
 export interface StorageBlobs {
+  physicalPolicy?: () => "disabled" | "never_versioned_exclusive_writer";
+  removeVerified?(key: string, signal: AbortSignal): Promise<void>;
   write(key: string, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
   read(key: string, limit: number, signal: AbortSignal): Promise<Uint8Array>;
 }
@@ -17,6 +20,8 @@ export function createStorageBlobs(): StorageBlobs {
   // These internal bucket URLs never leave Tower. fetch supplies cancellable IO;
   // callers receive only Tower's revision-checked, size-bounded stream endpoint.
   return {
+    removeVerified: physicalRemover(),
+    physicalPolicy: () => process.env.MANAGED_STORAGE_PHYSICAL_DELETE_POLICY === "never-versioned-exclusive-writer" ? "never_versioned_exclusive_writer" : "disabled",
     async write(key, bytes, signal) {
       const url = bucket.presign(key, { method: 'PUT', expiresIn: 60, type: 'application/octet-stream' });
       const response = await fetch(url, { method: 'PUT', body: new Uint8Array(bytes), redirect: 'error', signal,

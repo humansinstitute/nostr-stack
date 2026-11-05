@@ -1,3 +1,4 @@
+import { managedStorageCollectionPaths } from './managed-storage/openapi';
 import { workspaceMembershipAdminPaths } from './workspace-membership-admin-openapi';
 import { documentEditPaths } from './document-edit-openapi';
 import { buildNstackConsoleHtml } from './nstack-console';
@@ -4395,6 +4396,7 @@ export function buildOpenApiDocument(origin: string) {
     },
     security: [{ nip98: [] }],
     paths: {
+      ...managedStorageCollectionPaths,
       ...workspaceMembershipAdminPaths,
       ...documentEditPaths,
       ...hostingPaths,

@@ -1,3 +1,4 @@
+export type { CollectionRef as ManagedStorageCollectionRef, CollectionMetadata as ManagedStorageCollectionMetadata } from './managed-storage/collections-contract';
 // ---- Space learning API ----
 
 export type LearningMasteryState = 'developing' | 'demonstrated' | 'remembered';

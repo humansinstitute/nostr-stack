@@ -1,3 +1,4 @@
+import { managedStorageDeletionSql } from './managed-storage-deletion';
 export const managedAppStorageSql = `
 CREATE TABLE IF NOT EXISTS managed_app_storage_objects (
   id UUID PRIMARY KEY,
@@ -34,4 +35,4 @@ BEGIN
 END; $fn$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS managed_app_storage_immutable ON managed_app_storage_objects;
 CREATE TRIGGER managed_app_storage_immutable BEFORE UPDATE ON managed_app_storage_objects FOR EACH ROW EXECUTE FUNCTION managed_app_storage_immutable();
-`;
+` + managedStorageDeletionSql;

@@ -1,3 +1,5 @@
+import { StorageCollections } from './collections';
+import { graphKey } from './collections-contract';
 import { encodeStorageCursor, type PublisherReceipt } from './recovery';
 import { randomBytes } from 'node:crypto';
 import type { getDb } from '../db';
@@ -16,10 +18,11 @@ export interface StorageServiceOptions {
   now?: () => number;
 }
 export class ManagedStorageService {
+  readonly collections: StorageCollections;
   readonly now: () => number;
   private transfers = 0;
   private readonly busy = new Set<string>();
-  constructor(readonly options: StorageServiceOptions) { this.now = options.now ?? Date.now; }
+  constructor(readonly options: StorageServiceOptions) { this.now = options.now ?? Date.now; this.collections = new StorageCollections(this); }
   configured(): boolean { return this.options.grants().length > 0; }
   async authorize(workspace: string, delegation: string, origin: string, signer?: string, db?: Db): Promise<StorageGrant> {
     const grant = this.options.grants().find(g => g.workspaceId === workspace && g.delegationId === delegation);
@@ -29,7 +32,7 @@ export class ManagedStorageService {
     await this.options.ledger.workspace(grant, db);
     return grant;
   }
-  private async recheck(grant: StorageGrant, writes = false, db?: Db): Promise<void> {
+  async recheck(grant: StorageGrant, writes = false, db?: Db): Promise<void> {
     const current = await this.authorize(grant.workspaceId, grant.delegationId, grant.origin, grant.appNpub, db);
     requireCondition(JSON.stringify(current) === JSON.stringify(grant), 'storage_delegation_changed', 403);
     if (writes) requireCondition(!await this.options.creditBlock(grant, db), 'storage_credits_required', 402);
@@ -49,6 +52,7 @@ export class ManagedStorageService {
         ? { 'Content-Type': 'application/octet-stream', 'Content-Length': String(size) } : {}) } };
   }
   private async mint(grant: StorageGrant, row: StorageObject, direction: 'upload' | 'download', tx: Db) {
+    requireCondition(!row.deletion_job, 'storage_object_deleted', 410);
     const token = randomBytes(32).toString('base64url');
     const expiry = new Date(Math.min(this.now() + TOKEN_TTL_MS, Date.parse(grant.expiresAt)));
     if (direction === 'upload') {
@@ -62,6 +66,7 @@ export class ManagedStorageService {
     await this.recheck(grant);
     if (id !== undefined) {
       const row = await this.options.ledger.object(grant, id);
+      requireCondition(!row.deletion_job, 'storage_object_deleted', 410);
       return { ...this.identity(grant, row), publisher_receipt: row.publisher_receipt };
     }
     if (cursor !== undefined) {
@@ -77,6 +82,7 @@ export class ManagedStorageService {
     const usage = await this.options.ledger.usage(grant);
     return { ...this.binding(grant), remaining_bytes: Math.max(0, grant.quotaBytes - usage.bytes),
       remaining_objects: Math.max(0, grant.maxObjects - usage.objects), max_object_bytes: grant.maxObjectBytes, max_receipt_bytes: 6144,
+      physical_delete_policy: this.options.blobs.physicalPolicy?.() ?? 'disabled',
       list_cursor: encodeStorageCursor(grant), billing: grant.billing, budget_mode: 'operator_allocated_unmetered', billing_ok: !await this.options.creditBlock(grant) };
   }
   async prepare(grant: StorageGrant, input: Record<string, unknown>, receipt: PublisherReceipt) {
@@ -96,12 +102,15 @@ export class ManagedStorageService {
   async complete(grant: StorageGrant, id: string, signal: AbortSignal) {
     await this.recheck(grant, true);
     return this.transfer(grant, async () => this.options.ledger.transaction(async tx => {
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${graphKey(grant.workspaceId,grant.delegationId)}))`;
       const row = await this.options.ledger.object(grant, id, tx, true);
+      requireCondition(!row.deletion_job, 'storage_object_deleted', 410);
       requireCondition(row.state !== 'pending', 'storage_upload_incomplete', 409);
       const bytes = await this.options.blobs.read(objectKey(row), Number(row.size_bytes), signal);
       this.verify(row, bytes);
       await this.recheck(grant, true, tx);
       signal.throwIfAborted();
+      await this.collections.bump(grant,tx);
       const [updated] = await tx<StorageObject[]>`UPDATE managed_app_storage_objects SET state='complete', verified_at=NOW(),
         upload_digest=NULL, upload_expires_at=NULL WHERE id=${id} RETURNING *`;
       return this.identity(grant, updated!);
@@ -121,6 +130,7 @@ export class ManagedStorageService {
     requireCondition(bytes.byteLength === Number(row.size_bytes) && digest(bytes) === row.sha256_hex, 'storage_identity_mismatch', 409);
   }
   private token(row: StorageObject, grant: StorageGrant, token: string, direction: 'upload' | 'download') {
+    requireCondition(!row.deletion_job, 'storage_object_deleted', 410);
     requireCondition(row[`${direction}_digest`] === digest(token)
       && row[`${direction}_revision`] === grant.revision
       && (row[`${direction}_expires_at`]?.getTime() ?? 0) > this.now(), 'storage_stream_denied', 403);
@@ -142,12 +152,14 @@ export class ManagedStorageService {
       const bytes = await boundedBytes(request.body, Number(row.size_bytes), signal);
       this.verify(row, bytes);
       return this.options.ledger.transaction(async tx => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${graphKey(grant.workspaceId,grant.delegationId)}))`;
         const locked = await this.options.ledger.object(grant, id, tx, true);
         this.token(locked, grant, token, 'upload');
         await this.recheck(grant, true, tx);
         await this.options.blobs.write(objectKey(locked), bytes, signal);
         await this.recheck(grant, true, tx);
         signal.throwIfAborted();
+        await this.collections.bump(grant,tx);
         await tx`UPDATE managed_app_storage_objects SET state='uploaded',upload_digest=NULL,upload_expires_at=NULL WHERE id=${id}`;
         return { ...this.identity(grant, locked), state: 'uploaded' };
       });
@@ -160,6 +172,8 @@ export class ManagedStorageService {
     return this.transfer(grant, async () => {
       const bytes = await this.options.blobs.read(objectKey(row), Number(row.size_bytes), signal);
       this.verify(row, bytes);
+      const current = await this.options.ledger.object(grant,id);
+      requireCondition(!current.deletion_job, 'storage_object_deleted', 410);
       await this.recheck(grant);
       signal.throwIfAborted();
       return bytes;
