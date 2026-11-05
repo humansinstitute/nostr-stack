@@ -171,17 +171,17 @@ export function insufficientCreditsBody(account: WorkspaceCreditAccount, workspa
   };
 }
 
-export async function getInsufficientCreditsBlock(workspaceOwnerNpub: string) {
-  const links = await getDb()`SELECT w.id FROM hosting_workspace_accounts l JOIN flightdeck_pg_workspaces w ON w.id=l.workspace_id WHERE w.workspace_service_npub=${workspaceOwnerNpub}`;
-  for (const link of links) { const block=await hostingWriteBlock(link.id); if(block) return block; }
+export async function getInsufficientCreditsBlock(workspaceOwnerNpub: string, sqlLike: SqlLike = getDb()) {
+  const links = await sqlLike`SELECT w.id FROM hosting_workspace_accounts l JOIN flightdeck_pg_workspaces w ON w.id=l.workspace_id WHERE w.workspace_service_npub=${workspaceOwnerNpub}`;
+  for (const link of links) { const block=await hostingWriteBlock(link.id, sqlLike); if(block) return block; }
   if (links.length) return null;
   if (config.billing.mode === 'disabled') return null;
-  let account = await refreshAccountState(workspaceOwnerNpub);
+  let account = await refreshAccountState(workspaceOwnerNpub, sqlLike);
   if (!account) return null;
 
   if (finiteNumber(account.balance_credits) <= 0 && !BLOCKING_STATES.has(account.billing_state)) {
     const now = new Date();
-    const [updated] = await getDb()<WorkspaceCreditAccount[]>`
+    const [updated] = await sqlLike<WorkspaceCreditAccount[]>`
       UPDATE workspace_credit_accounts
       SET billing_state = 'read_only_grace',
           depleted_at = COALESCE(depleted_at, ${now}),

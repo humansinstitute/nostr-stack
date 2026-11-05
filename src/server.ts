@@ -1,3 +1,4 @@
+import { managedStorageRouter } from './managed-storage/routes';
 import { consoleAsset } from './nstack-console';
 import { buildAdvancedDashboardHtml } from './openapi';
 import { requireNip98AuthResolved } from './auth';
@@ -149,6 +150,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.route('/api/v4/workspaces', appDbRouter);
   app.route('/api/v4/records', recordsRouter);
   app.route('/api/v4/storage', storageRouter);
+  app.route('/api/v4/managed-app-storage', managedStorageRouter);
   app.route('/api/v4/workspaces', streamRouter);
   app.route('/api/v4/user', userRouter);
   app.route('/api/v4/admin', adminRouter);

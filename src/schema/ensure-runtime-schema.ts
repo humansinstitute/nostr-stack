@@ -1,3 +1,4 @@
+import { managedAppStorageSql } from './managed-app-storage';
 import { reconcileFlightDeckPgDmDefaults } from '../services/flightdeck-pg-dm-defaults';
 import { hostingBillingV1Sql } from './hosting-billing-v1';
 import { driveV1Sql } from './drive-v1';
@@ -4412,6 +4413,7 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await sql.unsafe(managedAppStorageSql);
   await sql.unsafe(driveV1Sql);
   await sql.unsafe(learningV1Sql);
   await seedCurriculum(sql);

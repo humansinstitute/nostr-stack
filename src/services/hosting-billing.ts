@@ -112,8 +112,8 @@ export async function hostingStatus(workspaceId:string,db:Db=getDb(),now=new Dat
     coverage:'objects_and_logical_pg_rows',measurements:hours,stripe:stripeAvailability()};
 }
 export function stripeAvailability(){return {configured:Boolean(process.env.STRIPE_SECRET_KEY&&process.env.STRIPE_WEBHOOK_SECRET&&process.env.HOSTING_STRIPE_RETURN_URLS),mode:process.env.HOSTING_STRIPE_MODE||'test',live_rollout_blocked:true};}
-export async function hostingWriteBlock(workspaceId:string) {
-  const [a]=await getDb()`SELECT a.* FROM hosting_workspace_accounts l JOIN hosting_accounts a ON a.id=l.account_id WHERE l.workspace_id=${workspaceId}`;
+export async function hostingWriteBlock(workspaceId:string, db:Db=getDb()) {
+  const [a]=await db`SELECT a.* FROM hosting_workspace_accounts l JOIN hosting_accounts a ON a.id=l.account_id WHERE l.workspace_id=${workspaceId}`;
   if(!a||!a.depleted_at)return null;
   const promo=new Date(a.promo_expires_at)>new Date()?BigInt(a.promo_units):0n;
   return BigInt(a.paid_units)+promo<=0n?{code:'hosting_balance_exhausted',error:'Hosting balance exhausted',status:402,grace_ends_at:new Date(new Date(a.depleted_at).getTime()+21*86400000).toISOString(),automatic_deletion:false}:null;
