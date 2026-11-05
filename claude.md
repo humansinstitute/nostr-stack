@@ -53,7 +53,7 @@ It does not own:
 - SSE real-time updates: `src/routes/stream.ts`, `src/sse-hub.ts`
 - storage ACLs and blob metadata: `src/routes/storage.ts`, `src/services/storage.ts`
 - admin and table viewer: `src/routes/admin.ts`, `src/admin-token.ts`
-- strict agent notification inbox and notification-only ceiling: `src/routes/agent-notifications.ts`, `src/services/agent-notifications.ts`, `src/services/agent-notification-projector.ts`, `src/schema/agent-notifications-v1.sql`, contract `docs/contract/agent-notifications-v1.md`
+- strict agent notification inbox and notification-only delivery classification: `src/routes/agent-notifications.ts`, `src/services/agent-notifications.ts`, `src/services/agent-notification-projector.ts`, `src/schema/agent-notifications-v1.sql`, contract `docs/contract/agent-notifications-v1.md`
 
 ## Cross-app boundaries
 

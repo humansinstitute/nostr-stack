@@ -190,7 +190,8 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
       expect(context.status).toBe(200);
       expect(context.body.trigger.message.body).toBe('bounded work for human-labelled identity');
       expect((await call(`${base()}?cursor=${encodeURIComponent(sub.body.cursor)}`, 'GET', A)).status).toBe(400);
-      expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/sync`, 'GET', C)).status).toBe(403);
+      // Classification is delivery-only: ordinary reads stay authorized by the member's ACL.
+      expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/sync`, 'GET', C, undefined, false)).status).toBe(200);
       expect((await call(path, 'DELETE', C)).body.code).toBe('ceiling_lift_forbidden');
       expect((await db`SELECT kind FROM flightdeck_pg_actors WHERE id = ${actors[C]!}`)[0]!.kind).toBe('human');
     } finally {
@@ -600,16 +601,14 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
   });
 
   // --------------------------------------------------------------------------------------------------- ceiling
-  test('workspace-scoped ceiling: W1 classification binds only W1 resources; another tenant never affects W2; no global scope', async () => {
+  test('classification is per workspace and delivery-only: W1 drops the legacy audience; API access stays ACL-authorized everywhere; no global scope', async () => {
     const w1path = `${base()}/access-profile`;
     expect((await call(w1path, 'PUT', H, { actor_npub: npubs[A], scope: 'global' })).body.code).toBe('validation_error');
     expect((await call(w1path, 'PUT', H, { actor_npub: npubs[A] })).status).toBe(200);
     invalidateCeilingCache();
-    expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/sync`, 'GET', A)).body.code).toBe('agent_notification_upgrade_required');
-    // A W1 admin cannot block A in W2 (nor on non-workspace routes).
+    expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/sync`, 'GET', A, undefined, false)).status).toBe(200);
     expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w2}/channels/${w2ch}/messages`, 'GET', A, undefined, false)).status).toBe(200);
-    // Unattributable multi-workspace routes are denied safely (default deny) rather than leaking W1 through them.
-    expect((await legacy('/api/v4/flightdeck-pg/workspaces', 'GET', A, undefined, false)).body.code).toBe('agent_notification_upgrade_required');
+    expect((await legacy('/api/v4/flightdeck-pg/workspaces', 'GET', A, undefined, false)).status).toBe(200);
     // Classified A was removed from the legacy audience it had in W1.
     expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/event-subscription-agents`, 'GET', H)).body.audience_npubs).toEqual([]);
     expect((await call(`${w1path}?actor_npub=${npubs[A]}`, 'DELETE', A)).body.code).toBe('ceiling_lift_forbidden');
@@ -618,143 +617,47 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/messages?thread_id=${threadId}`, 'GET', A, undefined, false)).status).toBe(200);
   });
 
-  test('fail closed: undeterminable classification (DB error, missing schema) refuses authenticated requests; fixture injection is explicit', async () => {
-    const empty = `agent_notif_noschema_${process.pid}_${Date.now()}`;
-    const admin = postgres({ ...connection, database: 'postgres' });
-    await admin.unsafe(`CREATE DATABASE ${empty}`); await admin.end();
-    const bare = postgres({ ...connection, database: empty, max: 2 });
-    try {
-      const path = `/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/messages?thread_id=${threadId}`;
-      const request = (target: ReturnType<typeof createApp>, actor: number) => {
-        const event = finalizeEvent({ kind: 27235, created_at: Math.floor(Date.now() / 1000), content: '', tags: [['u', `http://localhost${path}`], ['method', 'GET']] }, secrets[actor]!);
-        return target.request(path, { headers: { Authorization: `Nostr ${Buffer.from(JSON.stringify(event)).toString('base64')}` } });
-      };
-      invalidateCeilingCache();
-      // Schema not installed (missing table) => never treated as "unclassified".
-      const noSchema = createApp({ agentCeiling: databaseCeilingProvider(() => bare as any) });
-      for (const actor of [H, B]) {
-        const response = await request(noSchema, actor);
-        expect([actor, response.status, (await response.json() as any).code]).toEqual([actor, 503, 'authorization_unavailable']);
-      }
-      // Any provider failure => 503 (no admission).
-      const failing = createApp({ agentCeiling: { profileFor: async () => { throw new Error('db down'); } } });
-      expect((await request(failing, H)).status).toBe(503);
-      // Unauthenticated public routes are unaffected.
-      expect((await failing.request('/health')).status).toBe(200);
-      // Explicit fixture provider: unclassified legacy fixtures behave as before.
-      expect((await request(createApp({ agentCeiling: unclassifiedFixtureCeiling }), H)).status).toBe(200);
-    } finally {
-      await bare.end();
-      const cleanup = postgres({ ...connection, database: 'postgres' });
-      await cleanup.unsafe(`DROP DATABASE IF EXISTS ${empty} WITH (FORCE)`); await cleanup.end();
-      invalidateCeilingCache();
-    }
+  test('the classification provider is never on the request path: an unavailable provider refuses nothing the ACL authorizes', async () => {
+    const path = `/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/messages?thread_id=${threadId}`;
+    const request = (target: ReturnType<typeof createApp>, actor: number) => {
+      const event = finalizeEvent({ kind: 27235, created_at: Math.floor(Date.now() / 1000), content: '', tags: [['u', `http://localhost${path}`], ['method', 'GET']] }, secrets[actor]!);
+      return target.request(path, { headers: { Authorization: `Nostr ${Buffer.from(JSON.stringify(event)).toString('base64')}` } });
+    };
+    const failing = createApp({ agentCeiling: { profileFor: async () => { throw new Error('db down'); } } });
+    for (const actor of [H, B]) expect([actor, (await request(failing, actor)).status]).toEqual([actor, 200]);
+    expect((await request(createApp({ agentCeiling: unclassifiedFixtureCeiling }), H)).status).toBe(200);
+    // Still ACL-checked: a non-member is refused regardless of classification state.
+    expect((await request(failing, H2)).status).toBe(403);
   });
 
-  test('binding-scoped writes for a classified bot: originating thread/task only; identical 403 for unbound and nonexistent ids; no readback', async () => {
+  test('a classified bot reads and writes outside its notifications by its ACL; ungranted, DM and cross-workspace stay refused', async () => {
     expect((await call(`${base()}/access-profile`, 'PUT', B, {})).status).toBe(200);
     invalidateCeilingCache();
+    // ACL reads and writes are not inbox delivery: excluded from the inbox leakage audit below.
+    const write = async (path: string, body: Record<string, unknown>) => legacy(path, 'POST', B, body, false);
+    const read = async (path: string) => legacy(path, 'GET', B, undefined, false);
     const msgPath = `/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/messages`;
-    const write = async (path: string, body: Record<string, unknown>) => legacy(path, 'POST', B, body);
-    const reply = (thread: string | null, text: string) => ({ body: text, ...(thread ? { thread_id: thread } : {}), message_signature: messageSignature({ body: text, actor: B, workspaceId: w1, channelId: ch1, threadId: thread }) });
-    expect((await write(msgPath, reply(threadId, 'B replying in its thread'))).status).toBe(201);
-    const sibling = await write(msgPath, reply(siblingThreadId, 'B into sibling'));
-    const missing = await write(msgPath, reply(randomUUID(), 'B into nowhere'));
-    // B was addressed top-level in ch1 earlier (bound); ch2 holds no notification for B, so top-level there is refused.
-    const topLevel = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch2}/messages`, { body: 'B top level', message_signature: messageSignature({ body: 'B top level', actor: B, workspaceId: w1, channelId: ch2 }) });
-    for (const refused of [sibling, missing, topLevel]) expect([refused.status, refused.body.code]).toEqual([403, 'agent_notification_upgrade_required']);
-    expect(JSON.stringify(sibling.body)).toBe(JSON.stringify(missing.body));
-    expect((await write(msgPath, { ...reply(threadId, 'new'), create_thread: true })).status).toBe(403);
-    // Task bound via B's comment mention; a different task (sentinel title) is refused before any handler reads it.
-    expect((await write(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${boundTaskId}/comments`, { body: 'B on bound task' })).status).toBe(201);
-    const otherTask = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${otherTaskId}/comments`, { body: 'B on other task' });
-    const otherState = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${otherTaskId}/state`, { state: 'done' });
-    const ghostTask = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${randomUUID()}/comments`, { body: 'ghost' });
-    for (const refused of [otherTask, otherState, ghostTask]) expect(refused.status).toBe(403);
-    expect(JSON.stringify(otherTask.body)).toBe(JSON.stringify(ghostTask.body));
-    // Edit leases only on the notified record; doc edits only on notified docs.
-    const leaseBound = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/edit-leases/acquire`, { entity_type: 'task', entity_id: boundTaskId, field_path: 'description' });
-    expect(leaseBound.status).not.toBe(403);
-    const leaseOther = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/edit-leases/acquire`, { entity_type: 'task', entity_id: otherTaskId, field_path: 'description' });
-    expect([leaseOther.status, leaseOther.body.code]).toEqual([403, 'agent_notification_upgrade_required']);
-    expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/docs/${randomUUID()}`, 'PATCH', B, { title: 'x' })).status).toBe(403);
-    // Requested work products only in a channel holding a live notification; uploads only while one exists; only own uploads.
-    const taskInBound = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/tasks`, { title: 'B follow-up task' });
-    expect(taskInBound.status).toBe(201);
-    const taskElsewhere = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch2}/tasks`, { title: 'B elsewhere' });
-    expect([taskElsewhere.status, taskElsewhere.body.code]).toEqual([403, 'agent_notification_upgrade_required']);
-    const docElsewhere = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch2}/docs`, { title: 'B doc elsewhere' });
-    expect(docElsewhere.status).toBe(403);
-    const prepared = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/storage/prepare`, { file_name: 'x.txt', content_type: 'text/plain', size_bytes: 1 });
-    expect(prepared.status).not.toBe(403);
+    const reply = (channel: string, thread: string | null, text: string) => ({ body: text, ...(thread ? { thread_id: thread } : {}), message_signature: messageSignature({ body: text, actor: B, workspaceId: w1, channelId: channel, threadId: thread }) });
+    expect((await write(msgPath, reply(ch1, siblingThreadId, 'B into sibling'))).status).toBe(201);
+    expect((await write(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch2}/messages`, reply(ch2, null, 'B top level elsewhere'))).status).toBe(201);
+    expect((await write(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${otherTaskId}/comments`, { body: 'B on other task' })).status).toBe(201);
+    expect((await write(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch2}/tasks`, { title: 'B elsewhere' })).status).toBe(201);
+    for (const path of [`/api/v4/flightdeck-pg/workspaces/${w1}/sync`, `/api/v4/flightdeck-pg/workspaces/${w1}/events`,
+      `/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${otherTaskId}`, `${msgPath}?thread_id=${siblingThreadId}`, '/api/v4/flightdeck-pg/workspaces']) {
+      expect([path, (await read(path)).status]).toEqual([path, 200]);
+    }
+    // ACL refusals are unchanged: the H/A DM, W2 (not a member), a nonexistent task, another creator's storage object.
+    expect((await read(`/api/v4/flightdeck-pg/workspaces/${w1}/me`)).status).toBe(403); // no workspace.read grant
+    const dmRead = await read(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${dm}/messages`);
+    expect(dmRead.status).toBe(403);
+    expect(JSON.stringify(dmRead.body)).not.toContain(SENTINEL.dm);
+    expect((await read(`/api/v4/flightdeck-pg/workspaces/${w2}/channels/${w2ch}/messages`)).status).toBe(403);
+    expect((await write(`/api/v4/flightdeck-pg/workspaces/${w2}/channels/${w2ch}/tasks`, { title: 'cross workspace' })).status).toBe(403);
+    expect((await write(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${randomUUID()}/comments`, { body: 'ghost' })).status).toBe(404);
     const [foreign] = await db`INSERT INTO v4_storage_objects (owner_npub, created_by_npub, content_type, storage_path) VALUES (${npubs[H]!}, ${npubs[H]!}, 'text/plain', 'x/foreign') RETURNING id`;
-    expect((await legacy(`/api/v4/storage/${foreign!.id}/complete`, 'POST', B, {})).status).toBe(403);
-    expect((await write(`/api/v4/flightdeck-pg/workspaces/${w1}/reactions`, { target_type: 'message', target_id: mentionMessageId, emoji: 'eyes' })).status).toBe(403);
-    // Broad reads refused; humans unaffected.
-    for (const path of [`/api/v4/flightdeck-pg/workspaces/${w1}/sync`, `/api/v4/flightdeck-pg/workspaces/${w1}/events`, `/api/v4/flightdeck-pg/workspaces/${w1}/me`,
-      `/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${otherTaskId}`, `/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/messages?thread_id=${threadId}`]) {
-      expect([path, (await legacy(path, 'GET', B)).status]).toEqual([path, 403]);
-    }
-    const streamPath = `/api/v4/flightdeck-pg/workspaces/${w1}/events/stream?cursor=`;
-    const tokenEvent = finalizeEvent({ kind: 27235, created_at: Math.floor(Date.now() / 1000), content: '', tags: [['u', `http://localhost${streamPath}`], ['method', 'GET']] }, secrets[B]!);
-    expect((await app.request(`${streamPath}&token=${encodeURIComponent(Buffer.from(JSON.stringify(tokenEvent)).toString('base64'))}`)).status).toBe(403);
-    expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/sync`, 'GET', H)).status).toBe(200);
-    expect((await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/events`, 'GET', C)).status).toBe(200);
-    // The bot cannot lift its own ceiling.
+    expect((await legacy(`/api/v4/storage/${foreign!.id}/complete`, 'POST', B, {}, false)).status).toBe(404); // storage ACL: no oracle
+    // The bot still cannot lift its own classification.
     expect((await call(`${base()}/access-profile?actor_npub=${npubs[B]}`, 'DELETE', B)).body.code).toBe('ceiling_lift_forbidden');
-  });
-
-  test('write binding uses the same active-subscription floor as reads: retained pre-floor notifications authorize nothing', async () => {
-    const write = async (path: string, body: Record<string, unknown>) => legacy(path, 'POST', B, body);
-    // B is bound to boundTaskId via a live comment mention: allowed.
-    expect((await write(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${boundTaskId}/comments`, { body: 'within floor' })).status).toBe(201);
-    const rows = await db`SELECT id, source_created_at FROM flightdeck_pg_agent_notifications WHERE recipient_actor_id = ${actors[B]!}`;
-    // Retained but older than every B subscription's floor (e.g. 7-day retention window, 24h activation floor).
-    await db`UPDATE flightdeck_pg_agent_notifications SET source_created_at = NOW() - INTERVAL '6 days' WHERE recipient_actor_id = ${actors[B]!}`;
-    try {
-      const refusedComment = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${boundTaskId}/comments`, { body: 'pre-floor' });
-      const refusedTask = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/tasks`, { title: 'pre-floor output' });
-      const refusedUpload = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/storage/prepare`, { file_name: 'x.txt', content_type: 'text/plain', size_bytes: 1 });
-      const msgBody = 'pre-floor reply';
-      const refusedReply = await write(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/messages`, { body: msgBody, thread_id: threadId, message_signature: messageSignature({ body: msgBody, actor: B, workspaceId: w1, channelId: ch1, threadId }) });
-      for (const [name, res] of [['comment', refusedComment], ['task', refusedTask], ['upload', refusedUpload], ['reply', refusedReply]] as const) {
-        expect([name, res.status, res.body.code]).toEqual([name, 403, 'agent_notification_upgrade_required']);
-        expect(JSON.stringify(res.body)).not.toContain(SENTINEL.task);
-      }
-    } finally {
-      for (const row of rows) await db`UPDATE flightdeck_pg_agent_notifications SET source_created_at = ${row.source_created_at} WHERE id = ${row.id}`;
-    }
-  });
-
-  test('review: percent-encoded / non-canonical paths and unattributable routes are refused for a classified bot (default deny)', async () => {
-    // B is classified in W1 (previous test). The attacker signs the exact encoded URL, so NIP-98 itself verifies.
-    const ws = w1;
-    const encodedUuid = `%${ws.charCodeAt(0).toString(16)}${ws.slice(1)}`;
-    const nonCanonical = [
-      `/api/v4/flightdeck-pg/workspaces/${encodedUuid}/sync`,
-      `/api/v4/flightdeck%2Dpg/workspaces/${ws}/sync`,
-      `/api/v4/flightdeck-pg/workspaces/${ws}/channels/${ch1}/messages%3Fthread_id=${threadId}`,
-      `/api/v4/flightdeck-pg//workspaces/${ws}/sync`,
-      `/api/v4/storage/%${randomUUID().slice(0, 2)}${randomUUID().slice(2)}/content`,
-    ];
-    for (const path of nonCanonical) {
-      const res = await legacy(path, 'GET', B);
-      expect([path, res.status, res.body.code]).toEqual([path, 403, 'agent_notification_upgrade_required']);
-    }
-    const [unlinked] = await db`INSERT INTO v4_storage_objects (owner_npub, created_by_npub, content_type, storage_path, sha256_hex, completed_at)
-      VALUES ('npub1unrelatedowner', 'npub1unrelatedowner', 'text/plain', 'x/unlinked', ${'ab'.repeat(32)}, NOW()) RETURNING id`;
-    const unattributable = [
-      '/api/v4/groups/keys', '/api/v4/groups', '/api/v4/graph/nodes', '/api/v4/user/workspace-keys', '/api/v4/flightdeck-pg/workspaces',
-      '/api/v4/workspaces', '/api/v4/records', `/api/v4/storage/${unlinked!.id}/content`, `/api/v4/storage/${unlinked!.id}`, `/${'ab'.repeat(32)}`,
-      `/%61${'b' + 'ab'.repeat(31)}`,
-    ];
-    for (const path of unattributable) {
-      const res = await legacy(path, 'GET', B);
-      expect([path, res.status]).toEqual([path, 403]);
-    }
-    // The inbox and bound writes still work; humans are unaffected by any of the above.
-    expect((await all(B, 'post-review')).notifications.length).toBeGreaterThan(0);
-    for (const path of [`/api/v4/flightdeck-pg/workspaces/${ws}/sync`, '/api/v4/flightdeck-pg/workspaces']) expect((await legacy(path, 'GET', H)).status).toBe(200);
   });
 
   test('classified bots are excluded from human inbox projection', async () => {
@@ -767,87 +670,7 @@ describe.skipIf(!port || port === 5432)('strict agent notification inbox against
     expect(await count(C)).toBeGreaterThan(cBefore);
   });
 
-  test('referenced records: a human reference token in the notified text delegates read of exactly that record, as that human; everything else is one 404', async () => {
-    const REF = { thread: 'SENTINEL-REF-THREAD-31c1', task: 'SENTINEL-REF-TASK-31c2', hidden: 'SENTINEL-REF-HIDDEN-31c3', w2: 'SENTINEL-REF-W2-31c4', unlinked: 'SENTINEL-REF-UNLINKED-31c5' };
-    const refThread = (await post(ch2, `Discussion ${REF.thread}`, { createThread: true })).thread.id as string;
-    const unlinkedThread = (await post(ch2, `Discussion ${REF.unlinked}`, { createThread: true })).thread.id as string;
-    // A token inside a referenced record is untrusted text: it must never extend the delegation (no recursive expansion).
-    await post(ch2, `${REF.thread} second @[Nested](mention:chat:${ch2}#${unlinkedThread})`, { threadId: refThread });
-    const taskId = (await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch2}/tasks`, 'POST', H, { title: REF.task })).body.task.id as string;
-    const [object] = await db`INSERT INTO v4_storage_objects (owner_npub, created_by_npub, content_type, storage_path) VALUES (${npubs[H]!}, ${npubs[H]!}, 'text/markdown', 'x/ref-doc') RETURNING id`;
-    const [doc] = await db`INSERT INTO flightdeck_pg_docs (workspace_id, scope_id, channel_id, storage_object_id, title, created_by_actor_id, updated_by_actor_id)
-      VALUES (${w1}, ${scope}, ${ch2}, ${object!.id}, 'Referenced doc title', ${actors[H]!}, ${actors[H]!}) RETURNING id`;
-    // A private channel only C can read, and a thread in the other workspace.
-    const hiddenChannel = (await db`INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name) VALUES(${w1},${scope},'Hidden') RETURNING id`)[0]!.id as string;
-    for (const p of ['channel.read', 'channel.write']) await grant(w1, actors[C]!, hiddenChannel, p);
-    const hiddenThread = (await post(hiddenChannel, `Hidden ${REF.hidden}`, { actor: C, createThread: true })).thread.id as string;
-    const w2Thread = (await post(w2ch, `Foreign ${REF.w2}`, { actor: H2, createThread: true, workspace: w2 })).thread.id as string;
-
-    const token = (kind: string, id: string) => `@[Link](mention:${kind}:${id})`;
-    const trigger = await post(ch1, `@Bot1 read ${token('chat', `${ch2}#${refThread}`)} ${token('task', taskId)} ${token('document', doc!.id)} `
-      + `${token('chat', `${hiddenChannel}#${hiddenThread}`)} ${token('chat', `${w2ch}#${w2Thread}`)}`, { mentions: [A], createThread: true });
-    await drain();
-    const inbox = await all(A, 'consumer-refs');
-    const n = inbox.notifications.find((x: any) => x.source?.id === trigger.message.id);
-    expect(n).toBeTruthy();
-    const ref = (path: string, actor = A, notification = n.id) => call(`${base()}/${notification}/references/${path}`, 'GET', actor);
-
-    const thread = await ref(`threads/${ch2}/${refThread}`);
-    expect(thread.status).toBe(200);
-    expect(thread.body.referenced).toBe(true);
-    expect(thread.body.messages.map((m: any) => m.body)).toEqual([`Discussion ${REF.thread}`, `${REF.thread} second @[Nested](mention:chat:${ch2}#${unlinkedThread})`]);
-    expect(thread.text).not.toMatch(/https?:\/\/|content_url|download_url/);
-    const task = await ref(`tasks/${taskId}`);
-    expect([task.status, task.body.task.title]).toEqual([200, REF.task]);
-    const document = await ref(`docs/${doc!.id}`);
-    expect([document.status, document.body.document.title]).toEqual([200, 'Referenced doc title']);
-
-    // Not named by any token, in the hidden channel (the author cannot read it), in another workspace, nonexistent, or malformed.
-    const refused = [
-      await ref(`threads/${ch2}/${unlinkedThread}`), await ref(`threads/${hiddenChannel}/${hiddenThread}`), await ref(`threads/${w2ch}/${w2Thread}`),
-      await ref(`tasks/${randomUUID()}`), await ref(`docs/${randomUUID()}`), await ref(`tasks/${otherTaskId}`), await ref('threads/not-a-uuid/also-not'),
-    ];
-    for (const result of refused) expect([result.status, result.body.code]).toEqual([404, 'reference_not_found']);
-    expect(new Set(refused.map((r) => r.text)).size).toBe(1);
-    for (const sentinel of [REF.unlinked, REF.hidden, REF.w2]) expect(refused.map((r) => r.text).join('')).not.toContain(sentinel);
-    // Another recipient cannot use A's notification, and a token written by an agent delegates nothing.
-    expect((await ref(`threads/${ch2}/${refThread}`, B)).status).toBe(404);
-    const botText = await post(ch1, `@Bot2 ${token('task', otherTaskId)}`, { actor: A, mentions: [B], createThread: true });
-    await drain();
-    const botNotification = (await all(B, 'consumer-refs-bot')).notifications.find((x: any) => x.source?.id === botText.message.id);
-    expect(botNotification).toBeTruthy();
-    expect((await ref(`tasks/${otherTaskId}`, B, botNotification.id)).status).toBe(404);
-    // Revoking the author's read access ends the delegation immediately.
-    await db`UPDATE flightdeck_pg_permission_grants SET revoked_at = NOW() WHERE workspace_id = ${w1} AND principal_actor_id = ${actors[H]!} AND resource_channel_id = ${ch2} AND permission = 'channel.read'`;
-    expect((await ref(`threads/${ch2}/${refThread}`)).status).toBe(404);
-    await db`UPDATE flightdeck_pg_permission_grants SET revoked_at = NULL WHERE workspace_id = ${w1} AND principal_actor_id = ${actors[H]!} AND resource_channel_id = ${ch2} AND permission = 'channel.read'`;
-    expect((await ref(`threads/${ch2}/${refThread}`)).status).toBe(200);
-  });
-
-  test('referenced records: task text is attributed to the human who wrote it, not to whoever triggered the notification', async () => {
-    const hiddenChannel = (await db`INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name) VALUES(${w1},${scope},'Hidden attribution') RETURNING id`)[0]!.id as string;
-    for (const p of ['channel.read', 'channel.write']) await grant(w1, actors[C]!, hiddenChannel, p);
-    const hiddenThread = (await post(hiddenChannel, 'SENTINEL-ATTRIB-HIDDEN-77a1', { actor: C, createThread: true })).thread.id as string;
-    // H wrote the description and cannot read the hidden thread; C can read it but wrote none of the task text.
-    const task = await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/channels/${ch1}/tasks`, 'POST', H, {
-      title: 'Attribution task', description: `see @[Hidden](mention:chat:${hiddenChannel}#${hiddenThread})`,
-    });
-    expect(task.status).toBe(201);
-    const taskId = task.body.task.id as string;
-    await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${taskId}/assignments`, 'POST', H, { actor_id: actors[A] });
-    const comment = await legacy(`/api/v4/flightdeck-pg/workspaces/${w1}/tasks/${taskId}/comments`, 'POST', C, {
-      body: '@Bot1 please look', mentions: [{ type: 'agent', npub: npubs[A], label: 'Bot1' }],
-    });
-    expect(comment.status).toBe(201);
-    await drain();
-    const n = (await all(A, 'consumer-refs-attrib')).notifications.find((x: any) => x.source?.id === comment.body.comment.id);
-    expect(n).toBeTruthy();
-    const res = await call(`${base()}/${n.id}/references/threads/${hiddenChannel}/${hiddenThread}`, 'GET', A);
-    expect([res.status, res.body.code]).toEqual([404, 'reference_not_found']);
-    expect(res.text).not.toContain('SENTINEL-ATTRIB-HIDDEN-77a1');
-  });
-
-  test('cross-bot leakage audit: no byte seen by B carries A-only, DM, prompt, W2, removed-mention or task sentinels', async () => {
+  test('inbox leakage audit: no inbox byte seen by B carries A-only, DM, prompt, W2, removed-mention or task sentinels', async () => {
     const seen = allBytes.join('\n');
     for (const key of ['dm', 'prompt', 'w2', 'mentionA', 'removed', 'sibling'] as const) expect([key, seen.includes(SENTINEL[key])]).toEqual([key, false]);
   });

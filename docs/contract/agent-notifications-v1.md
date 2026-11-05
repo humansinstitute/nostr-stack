@@ -45,7 +45,7 @@ All routes are under `/api/v4/flightdeck-pg/workspaces/{ws}/agent-notifications`
 | `GET /{id}/references/threads/{channel_id}/{thread_id}`, `…/references/docs/{id}`, `…/references/tasks/{id}` | A record a human referenced in the notified text (see Referenced records). |
 | `GET /{id}/attachments/{storage_object_id}` | Bytes of a trigger or transcript attachment. Never a URL. |
 | `POST /{id}/ack {subscription_id, outcome, code?}` | Outcome: `handled`, `suppressed`, `source_gone` or `failed_permanent`. Idempotent per (notification, subscription). `source_gone` is accepted only when Tower confirms it (`409 source_present` otherwise). |
-| `GET/PUT/DELETE /access-profile` | Notification-only classification (the authorization ceiling). |
+| `GET/PUT/DELETE /access-profile` | Notification-only classification (delivery profile; never an API ceiling). |
 
 ## Envelope (exact key set)
 
@@ -150,26 +150,7 @@ Status codes:
 - `403 access_revoked` or `403 relationship_removed`: authorization. These are never acked past as handled.
 - Unknown and foreign ids return a byte-identical `404 notification_not_found`.
 
-## Referenced records
-
-A notification-only agent cannot follow a link in chat on its own: its ceiling admits only the notified record. A human can delegate a read of one more record by writing a reference token in text the notification already carries:
-
-- `@[label](mention:chat:{channel_id}#{thread_id})` (a thread), `mention:doc:{id}` or `mention:document:{id}`, `mention:task:{id}`.
-- The token must appear in the trigger or in the bounded context window: the trigger message or earlier window messages, the trigger task title/description or comment, an invocation prompt, or a document trigger body. Each piece of text delegates only on behalf of the actor who wrote it: messages and comments by their creator, and task text, document bodies and invocation prompts only while their creator is also their last updater (once another actor has edited the row, its text names no writer and delegates nothing). The notifying author is never assumed to be the writer.
-- The route is `GET /{notification_id}/references/threads/{channel_id}/{thread_id}`, `…/docs/{id}` or `…/tasks/{id}`, signed like every inbox route by the recipient.
-
-The read is served only when all of these hold in one locked snapshot:
-
-1. The notification is the recipient's own, inside an active subscription floor, and its source access and canonical relationship are still `ok` (same checks as context). A `self_mention` notification delegates nothing.
-2. A token naming exactly that record was written by an actor with kind `human`, who is a workspace member and not the recipient. Agent-written tokens delegate nothing.
-3. The record is in the same workspace, not deleted, and its channel is not archived.
-4. At least one such human currently holds record access to the record's channel ACL key (`message` for threads, `doc`, `task`). Revoking that access ends the delegation on the next request.
-
-Anything else is `404 reference_not_found`, byte-identical for unreferenced, foreign-workspace, deleted, inaccessible, nonexistent and malformed ids. The route is no existence oracle.
-
-Responses are bounded like context: a thread returns the effective transcript (newest 20 messages / 32 KiB, oldest-first, `truncated`), a task returns the task and its 20 newest comments, a document returns `docBody` (exact bytes, base64, `body_too_large` over 2 MiB). No attachment descriptors or URLs are included, and the route grants no write. A reference grants no further references: tokens inside a referenced record are not followed. The delegating human's membership, group and grant rows are share-locked like the recipient's, so their revocation that commits after our snapshot forces a retry; one that starts later waits for the response to serialize (bytes already in flight, as with context).
-
-## Authorization ceiling (`access-profile`)
+## Notification-only classification (`access-profile`)
 
 A classification row is per (workspace, actor). There is no identity-wide or global scope in v1.
 
@@ -178,121 +159,15 @@ A classification row is per (workspace, actor). There is no identity-wide or glo
 | Set | The eligible member itself, or a `workspace.manage` holder for another eligible member in that workspace |
 | Lift | A `workspace.manage` holder who is not restricted in that workspace; never the bot itself |
 
-For a classified identity the ceiling is **default deny**. In order:
+Classification is a **delivery profile**, not an API ceiling. It decides what Tower pushes to the identity:
 
-1. Only canonical paths are considered. Any `%` encoding, empty segment (`//`), dot segment or backslash is refused, so the ceiling and the router always see the same path.
-2. The agent inbox routes are allowed; they self-enforce strict recipient auth.
-3. Requests attributable only to workspaces where the identity is not classified are allowed, so another tenant's admin can never take away the bot's access to its own workspace.
-4. Requests touching a classified workspace are allowed only when notification-bound.
-5. Everything not attributable to a workspace is refused, for example group keys, graph, user routes, multi-workspace lists, unlinked storage objects, `/api/v4/records` without an owner, and blobs that resolve nowhere.
+- the identity receives notifications only through this addressed-only inbox;
+- it never joins a legacy visibility audience (see below) and is excluded from human inbox projection;
+- an audience member classified while a manager event stream is open is reported as rejected and drops out of that stream.
 
-A request is attributed to its workspace by:
+It never refuses a request. Every API, CLI or Blossom request signed by the identity is authorized by the route's ordinary ACL for the verified signer (workspace membership, groups, grants, record access), exactly like any other agent identity. Unauthorized and cross-workspace requests are refused by those same ACL checks. Signing restrictions live with the signer (Autopilot's per-bot signing policy); exact-request NIP-98 binding (URL, method, payload hash, freshness, single use on inbox routes) is unchanged.
 
-- the FD/WApp path workspace;
-- `/api/v4/storage/{id}` via the object's links and owner;
-- a Blossom blob via the object's sha256;
-- `/api/v4/workspaces/{owner}`;
-- the `/api/v4/records` owner or workspace-service parameters.
-
-**Fail closed.** The ceiling reads classifications through an injected provider. The production provider (`databaseCeilingProvider`) refuses any authenticated request whose classification cannot be determined: a database error or a missing table returns `503 authorization_unavailable`. It never treats an error as "unclassified". There is no classification cache: every authenticated request reads the small, indexed classification rows, so a committed classification applies to the very next request on every Tower process. Workspace-key aliases resolve through the same resolver the routes use, so the ceiling and the handler always agree on the acting identity. Production constructs the app with this provider explicitly and serves traffic only after the runtime schema is ensured. Test fixtures without the runtime schema inject `unclassifiedFixtureCeiling` explicitly.
-
-**Open connections.** The ceiling also holds for the lifetime of a connection it admitted. Before delivering anything further, a long-lived read re-runs the same ceiling decision. It uses the original request's route and workspace attribution and the identity bound when the route authenticated the connection: the verified signer and the identity it resolved to. NIP-98 is not re-verified. Both identities are checked, so removing or rotating a workspace-key alias after connect never turns a classified agent into an unrestricted one. The check uses the same provider, so it also fails closed (`authorization_unavailable`). A connection stops exactly when a new one would be refused. The first re-check runs after the route's own awaited setup, as the last read before the stream starts, so a classification committed during setup gets the ceiling's refusal (`403`/`503`, same body) instead of a `connected` frame, audience metadata or advisory replay:
-
-| Connection | Re-decided | On refusal |
-|---|---|---|
-| `GET /api/v4/flightdeck-pg/workspaces/{id}/events/stream` | before each poll, and again as the last read before a loaded batch is emitted | one `flightdeck_pg.error` frame `{error, code, retryable, required_capability?}`, then close |
-| the same stream with `audience_npub` | additionally, an audience member classified while a batch loads drops that batch without advancing the cursor; the next poll re-resolves the audience without it. `flightdeck_pg.audience_changed` is emitted only together with a batch that passed the final check | `flightdeck_pg.audience_changed` on a later poll |
-| `GET /api/v4/workspaces/{owner}/stream` (advisory) | before each delivery; events queued during a check share the next check | one `event: error` frame `{error, code}`, then close |
-| Blossom `GET /{sha256}` (authenticated, private) | before each further chunk, together with the storage ACL | the body errors with `storage_access_revoked` |
-
-In-flight bound: emission after the final check is synchronous, but the check does not share a lock with the classification write. After a classification commits, a connection can therefore still deliver at most the one batch (event stream), queued batch (advisory stream) or chunk (Blossom) whose check read state before the commit. Nothing checked afterwards is sent, and bytes already handed to the client cannot be recalled. Unclassified identities see no new frames or behaviour. `/api/v4/storage/{id}/content` returns its whole body in one buffered response, so there is no later chunk to withhold.
-
-A bound request returns `403 agent_notification_upgrade_required` (`retryable:false`) before any handler runs, unless it is one of:
-
-- this inbox;
-- a write bound to a **live** notification of the bot: current access, canonical relationship `ok`, and inside an active subscription's 24h floor (the same eligibility as reads, so retained pre-floor rows bind nothing).
-
-Bound writes (each still subject to its normal route ACL):
-
-| Write | Bound when |
-|---|---|
-| `POST channels/{ch}/messages` | A message-sourced notification exists in that channel/thread. `create_thread` is refused. |
-| `PUT agent-activities/{id}` | The body's channel/thread matches a bound message notification. |
-| `POST response-activities` | The target is a bound thread, task, doc or source. |
-| `POST tasks/{id}/comments`, `POST tasks/{id}/state` | The task is bound. |
-| `POST docs/{id}/comments`, `PATCH docs/{id}` | The doc is bound. |
-| `POST edit-leases/acquire`, `POST edit-leases/{id}/renew\|release` | The bound task/doc, and the bot's own lease. |
-| `GET edit-leases?entity_type=document&entity_id={id}` (protocol negotiation) | The doc is bound or receipted. The response shows the edit protocols and only the bot's own lease (`lease: null` while another editor holds one). |
-| `POST channels/{ch}/(docs\|tasks\|files\|audio-notes)` | Requested work products, created only in a channel where the bot holds a live notification. With `origin_notification_id`, that exact origin must be live in this channel (the create then mints a work receipt). A file create carrying `metadata.text_attachment_lineage` is refused (it could adopt and return another creator's canonical file); the refusal is the generic one, before any lineage lookup. |
-| Receipted reads/updates (see Work receipts) | The bot holds a receipt for that entity whose origin is live. |
-| `POST storage/prepare` | Only while the bot holds a live notification in the workspace. |
-| `PUT /api/v4/storage/{id}`, `POST /api/v4/storage/{id}/complete` | Only the bot's own uncompleted upload. |
-
-Bytes become visible only by linking them to a bound write, such as a reply's attachments, a channel file or a document body. Every storage object a classified bound write references (`storage_object_id`, `metadata.attachments[*].storage_object_id`) must be the bot's OWN upload by the server-owned `created_by_npub` (signer or acting identity). Otherwise the write gets the generic refusal before any handler lookup. A human's orphaned or tombstoned object, another bot's upload or an unknown id is never adopted, and the refusal is identical for all of them.
-
-Unbound and nonexistent ids get byte-identical refusals, so there is no existence or readback oracle.
-
-Other effects of classification:
-
-- The bot is removed from this workspace's visibility audiences, and audience registration rejects it (`notification_only_agent`).
-- Classified identities receive no human inbox items in that workspace.
-- Every classification change is audited in `flightdeck_pg_agent_notification_audit`.
-
-Write responses are minimal for a classified identity in that workspace. Every admitted write's JSON body omits the workspace-wide event-sequence echoes (`outbox`, `mention_outbox`, `view_state_outbox`, `thread_outbox`, `trigger_outbox`) and mutable activity metadata (`attention`, `activity_version`) wherever they appear. A message create returns its own message (with its channel/thread routing ids) but not the current thread descriptor. Reads, including notification context, are not changed by this rule. Humans, and the same identity in workspaces where it is not classified, get full responses.
-
-Error bodies for classified callers:
-
-- mention errors collapse unknown and inaccessible identities into `mention_unavailable`;
-- an audio-note target that is unknown, in another channel, or in a thread the caller did not name answers `404 audio_note_target_not_found` (the caller must name the target's thread itself, so the created note never discloses it); a named `thread_id` that is unknown or in another channel answers `404 audio_note_thread_not_found`;
-- a receipted lease conflict is a bare `409 edit_lease_held`, without holder, lease id or expiry;
-- an agent-activity collision omits the existing row.
-
-Supported agent-activity ids are UUIDs and Autopilot's 32 lowercase hex.
-
-Residual existence oracles (ids only, no content), recorded for review:
-
-- task create/update relationship validation (`metadata.parent_task_id`, `predecessor_task_ids`) answers unknown and inaccessible ids alike ("Related task unavailable"), but distinguishes a readable related task from an unavailable one;
-- a notification-bound doc comment's `parent_comment_id` is validated only by foreign key, so an unknown id fails differently from a known one, and the id may belong to another doc;
-- file create `folder_scope_mismatch` versus an unknown folder;
-- idempotency conflicts (`idempotency_conflict`) reveal that the caller's own `client_request_id` was used before.
-
-None returns another record's body or metadata.
-
-Idempotent writes never grant reads of changed existing output. For a classified caller:
-
-- a task-create replay (`client_request_id`) returns the existing task only while the caller's own live receipt covers exactly its current `row_version` (without `attention`/`activity_version`, with `work_receipt`);
-- a message replay returns the caller's own message only while nobody else has edited it, and without the current thread descriptor;
-- an agent-activity id collision answers 409 without the existing row (`current`).
-
-Otherwise the replay gets the generic `403 agent_notification_upgrade_required` with no content. Human replay semantics are unchanged.
-
-Notifications with `reason: "self_mention"` never bind a write. An `origin_notification_id` named on a message must be live in that exact thread.
-
-## Forgejo sign-in for notification-only identities
-
-`POST /api/v4/git/oidc/authorize/complete` (exact method and path) is admitted for a classified identity. It only proves the signer's identity to the registered OIDC client. The route itself verifies the one-time request id, nonce, `aud`, expiry, payload hash and the Forgejo allowed-login list, and Forgejo owns repository rights. Nothing else under `/api/v4/git` is admitted, and nothing that reads workspace data.
-
-## WApp publishing repair for notification-only identities
-
-A classified identity may use exactly `GET …/wapp-publishing-grants/{wapp_installation_id}` and `POST …/wapp-publishing-grants/{wapp_installation_id}/rotate`, and only through an explicit owner delegation:
-
-- its latest delegation from the workspace owner is `wapp.manage`, unrevoked, and inside `valid_from`/`expires_at`;
-- every non-empty filter covers the installation's real (hydrated) facts: installation id, app id, destination scopes and channels, grant capabilities, registered open origins, Autopilot origin. An empty filter keeps its explicit wildcard meaning. A filtered fact with no recorded value fails closed.
-
-`workspace.manage` alone never admits a classified identity, at the ceiling or in the route (the route re-checks the same predicate and never takes its `workspace.manage` branch). The grant list, PUT, disable and revoke stay refused. Otherwise the request gets the generic refusal, identical for unknown installations. Rotation keeps all existing validation: the current-key match, the nonce/expiry window and stale-key protection.
-
-## Learning for notification-only identities
-
-Learning routes carry no workspace attribution, so a classified identity is otherwise refused there. It may use exactly:
-
-`GET /api/v4/learning/curriculum`, `GET …/curriculum/traverse`, `GET …/mastery`, `GET …/recall/due`, `POST …/plans`, `POST …/lessons`, `POST …/assessments`, `POST …/recall`
-
-and only when:
-
-- the `x-learning-grant-id` header names the grant, AND the NIP-98 event carries the equal signed tag `["learning_grant_id", "<id>"]`, since the header alone is outside the signature;
-- that grant is an active delegation of the acting identity (workspace-key aliases resolve as in the routes). It is read under the learning RLS role with the same predicate as the routes: grantee = actor, not revoked, `can_read`, and `can_write` for POST.
-
-The route then applies the same grant in its own RLS transaction. Implicit learner selection never applies to a classified identity. Profile, delegations, plan/lesson history, views, overlay, evidence, submissions, reviews and `research/*` stay refused. Notifications and receipts never confer learning access. Humans and unclassified identities are unchanged: the header stays optional and no tag is needed.
+The classification provider reads rows on every lookup (no cache) and fails closed for audience decisions: a lookup error never adds a classified identity to an audience. Test fixtures without the runtime schema inject `unclassifiedFixtureCeiling` explicitly.
 
 ## Deliberate self-address
 
@@ -319,22 +194,9 @@ A create of a doc, task, file or audio note that names `origin_notification_id` 
 "work_receipt": { "entity_type": "doc", "entity_id": "…", "receipt_row_version": 3, "origin_notification_id": "…", "body_sha256_hex": "…", "version_id": null }
 ```
 
-The key is absent without an origin. A task create replayed with the same `client_request_id` returns the original receipt. Text-attachment lineage creates are refused for classified identities (see Bound writes), so no lineage file is ever adopted or minted through them.
+The key is absent without an origin. A task create replayed with the same `client_request_id` returns the original receipt.
 
-For a classified bot a live receipt (origin still live) admits only that entity, only at the receipted version, checked in the ceiling AND in the handler transaction:
-
-| Route | Through a receipt |
-|---|---|
-| `GET docs/{id}`, `GET docs/{id}/body` | the receipted `row_version` only |
-| `PATCH docs/{id}` | base `row_version` = current = receipt; no channel move; never a recovery save; the receipt advances to the version written |
-| `POST edit-leases/acquire` (doc/task), `renew`, `release` | at the receipted version; no takeover |
-| `GET tasks/{id}`, `POST tasks/{id}/state` | the receipted `row_version` only; the read returns the task row without assignment enrichment; a state change advances the receipt |
-| `POST tasks/{id}/comments`, `POST docs/{id}/comments` | append-only on the unchanged receipted entity; top-level only (no `parent_comment_id`); the response carries only the new comment |
-| `GET files/{id}`, `GET files/{id}/object` | the receipted `row_version` only |
-| `GET files/{id}/versions/{v}/object` | only the receipted version `v` |
-| `GET audio-notes/{id}`, `GET audio-notes/{id}/media` | the receipted `row_version` only |
-
-Docs, files and audio notes are also compared by content sha256, so a body or object swapped without a version change is a different version. Any other version answers `409 {"error":"work_output_changed","code":"work_output_changed","retryable":false}` with no content. A successful receipted update returns the advanced `work_receipt` (compare-and-set; a receipt that does not advance fails the update with 409). For an unrestricted caller holding its own receipt, the receipt follows its update only when it still matched the replaced version; otherwise `work_receipt` is absent. A human edit therefore freezes the output until a new eligible notification binds it. Updates serialize on the receipt row. Minting and receipted updates hold the origin's notification, the recipient's active subscriptions, the channel/scope and the origin source message FOR SHARE, so a concurrent revocation either commits first (and is observed) or waits. Comment reads, other entities and storage/Blossom routes are never reachable through a receipt. Through a receipt the bot observes the version it wrote and nothing that moves independently of it. Every content change bumps `row_version`, but comments and other activity do not. So `attention` (last activity actor, comment/mention activity ids) and `activity_version` are omitted from receipted doc/task reads, lease acquire and update responses. Receipted write responses (updates, own comments) also omit the activity counters and the outbox echoes (`outbox`, `mention_outbox`, `view_state_outbox`), whose `row_version` is the workspace-wide event sequence. A later unnotified human comment therefore leaves every receipted read byte-identical. Human and notification-bound responses are unchanged. Requests admitted through an ordinary notification binding keep the existing policy.
+A receipt is provenance for the bot's own output. It grants nothing: reads and updates of the entity are authorized by the route's ordinary ACL. For a caller holding its own receipt, the receipt follows an update only when it still matched the replaced version; otherwise `work_receipt` is absent.
 
 ## Legacy visibility audience (transition)
 
@@ -351,8 +213,7 @@ Unclassified legacy bots remain an acknowledged exposure during the staged trans
 
 - Delegated manager fan-in. There is no delegation route, so classified bots cannot be delegated.
 - Approval and flow-step notifications. They have no PG outbox events.
-- Reactions and generic storage reads by classified bots.
-- Any identity-wide (global) ceiling.
+- Any identity-wide (global) classification.
 
 ### Exact DM activation facts
 

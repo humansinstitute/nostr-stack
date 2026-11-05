@@ -29,10 +29,10 @@ import { wappActivityFlightDeckRouter, wappActivityPublisherRouter } from './rou
 import { wappManagementRouter } from './routes/wapp-management';
 import { buildNstackServiceDiscovery } from './services/nstack-discovery';
 import { agentNotificationsRouter } from './routes/agent-notifications';
-import { databaseCeilingProvider, enforceNotificationCeiling, isRestrictedWrite, rememberCeilingAdmission, restrictedWriteResponseBody, type AgentCeilingProvider } from './services/agent-notifications';
+import { databaseCeilingProvider, rememberCeilingAdmission, type AgentCeilingProvider } from './services/agent-notifications';
 
 export type CreateAppOptions = {
-  /** Classification source for the notification-only ceiling (fail closed). Defaults to the database provider. */
+  /** Classification source for delivery audiences (fail closed). Defaults to the database provider. */
   agentCeiling?: AgentCeilingProvider;
 };
 
@@ -47,22 +47,12 @@ export function createApp(options: CreateAppOptions = {}) {
     allowMethods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   }));
 
-  // Authorization ceiling for notification-only agent identities: refuses every route outside the agent inbox and the
-  // minimal responder writes, before any handler runs. Unclassified identities (all humans) are unaffected.
+  // Notification-only classification is a delivery profile (addressed-only inbox, no visibility audiences). It never
+  // refuses a request: every route authorizes the verified signer by its own ACL. The injected provider only answers
+  // audience checks.
   app.use('*', async (c, next) => {
-    const refused = await enforceNotificationCeiling(c.req.raw, agentCeiling);
-    if (refused) return refused;
-    // Long-lived reads re-run this same decision before delivering more (see openReadRefusal).
     rememberCeilingAdmission(c.req.raw, agentCeiling);
     await next();
-    // Restricted (classified-workspace) writes get minimal JSON bodies; everything else is returned as produced.
-    if (!isRestrictedWrite(c.req.raw) || !c.res.headers.get('content-type')?.includes('application/json')) return;
-    const original = await c.res.clone().json().catch(() => undefined);
-    const minimal = original === undefined ? undefined : restrictedWriteResponseBody(c.req.raw, original);
-    if (minimal === undefined) return;
-    const headers = new Headers(c.res.headers);
-    headers.delete('content-length');
-    c.res = new Response(JSON.stringify(minimal), { status: c.res.status, headers });
   });
 
   app.get('/health', (c) => {

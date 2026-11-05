@@ -8,9 +8,6 @@ import { resolveWsKeyNpub } from './user-workspace-keys';
 import { normalizeFlightDeckPgChannelMetadata } from './flightdeck-pg-agent-direct';
 import { flightDeckPgCanonicalDocVersionId, listEffectiveFlightDeckPgThreadMessages, serializeFlightDeckPgDocVersionIdentity } from './flightdeck-pg-api';
 import { getStorageObjectContent } from './storage';
-import { explicitGrantAllows } from '../learning/authorization';
-import { explicitWappDelegationAllows } from './wapp-management';
-import { activeWorkReceipt, liveOrigin, parseOriginNotificationId, rememberReceiptAdmission, type ReceiptEntityType } from './agent-work-receipts';
 
 /**
  * Strict agent notification inbox (contract: docs/contract/agent-notifications-v1.md).
@@ -187,12 +184,12 @@ export async function lockChannels(t: Sql, workspaceId: string, channelIds: Arra
 }
 
 // ------------------------------------------------------------------------------------------------------------------
-// Authorization ceiling for notification-only agents (per workspace + principal; fail closed).
+// Notification-only classification (per workspace + principal). Delivery profile only: never an API ceiling.
 // ------------------------------------------------------------------------------------------------------------------
 type CeilingProfile = { actorId: string; workspaces: Set<string> };
 
 /**
- * Classification source for the ceiling. Production uses the database provider, which FAILS CLOSED: any lookup error
+ * Classification source for delivery audiences. Production uses the database provider, which FAILS CLOSED: any lookup error
  * (including a missing table / schema not ready) refuses the request instead of treating the identity as unrestricted.
  * Legacy test fixtures without the runtime schema must inject `unclassifiedFixtureCeiling` explicitly.
  */
@@ -221,7 +218,7 @@ export function databaseCeilingProvider(sql: () => Sql = () => getDb()): AgentCe
       try {
         const direct = await lookupProfile(sql(), signerNpub);
         if (direct) return direct;
-        // Same resolver the routes use (resolveNip98Signer): the ceiling and the handler always agree on the acting
+        // Same resolver the routes use (resolveNip98Signer): classification and the handler always agree on the acting
         // identity, so a workspace-key alias can never act as a classified agent while escaping its classification.
         const user = await resolveWsKeyNpub(signerNpub);
         return user && user !== signerNpub ? await lookupProfile(sql(), user) : null;
@@ -235,473 +232,20 @@ export function databaseCeilingProvider(sql: () => Sql = () => getDb()): AgentCe
 /** TEST FIXTURES ONLY: suites whose databases do not carry the runtime schema and contain no agent classification. */
 export const unclassifiedFixtureCeiling: AgentCeilingProvider = { profileFor: async () => null };
 
-/** A tag value of the claimed (not yet verified) NIP-98 event; the route's verification later covers it. */
-function claimedEventTag(request: Request, name: string): string | null {
-  const header = request.headers.get('authorization');
-  const queryToken = new URL(request.url).searchParams.get('token');
-  const token = header?.startsWith('Nostr ') ? header.slice(6).trim() : queryToken;
-  if (!token) return null;
-  try {
-    const event = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));
-    const values = Array.isArray(event?.tags) ? event.tags.filter((t: unknown) => Array.isArray(t) && t[0] === name) : [];
-    return values.length === 1 && typeof values[0][1] === 'string' ? values[0][1] : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Claimed signer of a NIP-98 (27235) or Blossom (24242) authorization, from the header or a `token` query parameter. */
-export function claimedSignerNpub(request: Request): string | null {
-  const header = request.headers.get('authorization');
-  const queryToken = new URL(request.url).searchParams.get('token');
-  const token = header?.startsWith('Nostr ') ? header.slice(6).trim() : queryToken;
-  if (!token) return null;
-  try {
-    const event = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));
-    if ((event?.kind !== 27235 && event?.kind !== 24242) || typeof event.pubkey !== 'string' || !/^[0-9a-f]{64}$/.test(event.pubkey)) return null;
-    return nip19.npubEncode(event.pubkey);
-  } catch {
-    return null;
-  }
-}
-
-const UUID_SEG = '([0-9a-fA-F-]{36})';
-const FD_WS = new RegExp(`^/api/v4/flightdeck-pg/workspaces/${UUID_SEG}(?:/|$)`);
-const WAPP_WS = new RegExp(`^/api/v4/wapp-activity/workspaces/${UUID_SEG}(?:/|$)`);
-const STORAGE_OBJECT = new RegExp(`^/api/v4/storage/${UUID_SEG}(?:/|$)`);
-const OWNER_WS = /^\/api\/v4\/workspaces\/(npub1[0-9a-z]+)(?:\/|$)/;
-const BLOB = /^\/([0-9a-f]{64})(?:\.[A-Za-z0-9]{1,10})?$/;
-
-/** Which workspaces a request targets: ids, or null when the route is not attributable to any workspace. */
-async function targetWorkspaces(sql: Sql, request: Request, path: string, body: () => Promise<any>): Promise<string[] | null> {
-  let m = FD_WS.exec(path) ?? WAPP_WS.exec(path);
-  if (m) return [m[1]!.toLowerCase()];
-  const byOwner = async (npubs: string[]) => npubs.length
-    ? (await sql<{ id: string }[]>`SELECT id FROM flightdeck_pg_workspaces WHERE workspace_owner_npub = ANY(${npubs}::text[]) OR workspace_service_npub = ANY(${npubs}::text[])`).map((row) => row.id)
-    : [];
-  const byObject = async (where: { id?: string; sha?: string }) => {
-    const objects = where.id
-      ? await sql<{ id: string; owner_npub: string }[]>`SELECT id, owner_npub FROM v4_storage_objects WHERE id = ${where.id}`
-      : await sql<{ id: string; owner_npub: string }[]>`SELECT id, owner_npub FROM v4_storage_objects WHERE sha256_hex = ${where.sha!}`;
-    if (!objects.length) return [];
-    const linked = await sql<{ workspace_id: string }[]>`SELECT DISTINCT workspace_id FROM flightdeck_pg_storage_links WHERE storage_object_id = ANY(${objects.map((o) => o.id)}::uuid[])`;
-    return [...new Set([...linked.map((row) => row.workspace_id), ...await byOwner(objects.map((o) => o.owner_npub))])];
-  };
-  if ((m = STORAGE_OBJECT.exec(path))) return byObject({ id: m[1]! });
-  if ((m = OWNER_WS.exec(path))) return byOwner([m[1]!]);
-  if ((m = BLOB.exec(path))) return byObject({ sha: m[1]! });
-  if (path === '/api/v4/storage/prepare' || path.startsWith('/api/v4/records')) {
-    const url = new URL(request.url);
-    const parsed = request.method === 'GET' ? {} : await body();
-    const owners = [url.searchParams.get('owner_npub'), url.searchParams.get('workspace_service_npub'), parsed?.owner_npub, parsed?.workspace_service_npub, parsed?.workspace_owner_npub]
-      .filter((v): v is string => typeof v === 'string' && v.startsWith('npub1'));
-    return byOwner(owners);
-  }
-  return null;
-}
-
-/** Notification-bound writes for a classified agent. Anything else is refused before any handler runs. */
-async function bindingAllows(sql: Sql, request: Request, actorId: string, workspaceId: string, method: string, path: string, body: () => Promise<any>): Promise<boolean> {
-  const rest = path.slice(`/api/v4/flightdeck-pg/workspaces/${workspaceId}`.length);
-  if (/^\/agent-notifications(\/|$)/.test(rest)) return true; // routes self-enforce strict recipient auth
-  // Storage referenced by any bound write (a created doc/file/audio body, a doc body swap, message attachments) must
-  // be the bot's OWN upload, by the server-owned creator field. Linking an existing object would otherwise adopt
-  // another creator's (orphaned, tombstoned or group-readable) bytes. Refused before any handler lookup.
-  if (method !== 'GET' && !await onlyOwnUploads(sql, request, await body())) return false;
-  const bound = async (column: 'thread' | 'task_id' | 'doc_id' | 'any', value: string | null, channelId?: string) => {
-    const [row] = await sql<{ ok: boolean }[]>`
-      SELECT EXISTS (
-        SELECT 1 FROM flightdeck_pg_agent_notifications n
-        WHERE n.workspace_id = ${workspaceId} AND n.recipient_actor_id = ${actorId}
-          AND ${ACTIVE_FLOOR}
-          AND n.reason <> 'self_mention'
-          AND flightdeck_pg_record_access(n.workspace_id, n.recipient_actor_id) @> to_jsonb(n.acl_key)
-          AND flightdeck_pg_agent_notification_relation(n.id) = 'ok'
-          AND CASE ${column}
-            WHEN 'thread' THEN n.source_type = 'message' AND n.channel_id = ${channelId ?? null}::uuid AND n.thread_id IS NOT DISTINCT FROM ${value}::uuid
-            WHEN 'task_id' THEN n.task_id = ${value}::uuid
-            WHEN 'doc_id' THEN n.doc_id = ${value}::uuid
-            ELSE ${value}::uuid IN (n.thread_id, n.task_id, n.doc_id, n.source_id)
-          END
-      ) AS ok`;
-    return Boolean(row?.ok);
-  };
-  // Same eligibility as reads: only notifications inside an active subscription's floor can bind a write or output.
-  const ACTIVE_FLOOR = sql`EXISTS (SELECT 1 FROM flightdeck_pg_agent_notification_subscriptions s WHERE s.workspace_id = n.workspace_id
-    AND s.recipient_actor_id = n.recipient_actor_id AND s.revoked_at IS NULL AND s.floor_at <= n.source_created_at)`;
-  const liveIn = async (channelId: string | null) => {
-    const [row] = await sql<{ ok: boolean }[]>`
-      SELECT EXISTS (SELECT 1 FROM flightdeck_pg_agent_notifications n WHERE n.workspace_id = ${workspaceId} AND n.recipient_actor_id = ${actorId}
-        AND ${ACTIVE_FLOOR}
-        AND n.reason <> 'self_mention'
-        AND (${channelId}::uuid IS NULL OR n.channel_id = ${channelId}::uuid)
-        AND flightdeck_pg_record_access(n.workspace_id, n.recipient_actor_id) @> to_jsonb(n.acl_key)
-        AND flightdeck_pg_agent_notification_relation(n.id) = 'ok') AS ok`;
-    return Boolean(row?.ok);
-  };
-  const id = (value: unknown) => (typeof value === 'string' && isUuid(value) ? value : null);
-  // A receipt admits only the receipted entity, and only while its origin is live; the handler then version-guards it.
-  const receipted = async (entityType: ReceiptEntityType, entityId: string) => {
-    const receipt = await activeWorkReceipt(sql, { workspaceId, actorId, entityType, entityId });
-    if (!receipt) return false;
-    rememberReceiptAdmission(request, receipt);
-    return true;
-  };
-  // A named origin must itself be live at the written location (absent: no requirement; malformed: refused).
-  const originAt = async (b: any, channelId: string, threadId?: string | null) => {
-    const origin = parseOriginNotificationId(b);
-    if (origin === undefined) return true;
-    return origin !== null && liveOrigin(sql, { workspaceId, actorId, notificationId: origin, channelId, ...(threadId !== undefined ? { threadId } : {}) });
-  };
-  let m: RegExpExecArray | null;
-  if (method === 'POST' && (m = new RegExp(`^/channels/${UUID_SEG}/messages$`).exec(rest))) {
-    const b = await body();
-    if (!b || b.create_thread) return false;
-    const threadId = b.thread_id == null ? null : id(b.thread_id);
-    if (b.thread_id != null && !threadId) return false;
-    return await bound('thread', threadId, m[1]!) && await originAt(b, m[1]!, threadId);
-  }
-  // Comments through a receipt are append-only own output; the handler requires the receipted version (no reads).
-  if (method === 'POST' && (m = new RegExp(`^/tasks/${UUID_SEG}/comments$`).exec(rest))) return await bound('task_id', m[1]!) || receipted('task', m[1]!);
-  if (method === 'POST' && (m = new RegExp(`^/tasks/${UUID_SEG}/state$`).exec(rest))) return await bound('task_id', m[1]!) || receipted('task', m[1]!);
-  if (method === 'POST' && (m = new RegExp(`^/docs/${UUID_SEG}/comments$`).exec(rest))) {
-    if (await bound('doc_id', m[1]!)) return true;
-    const b = await body();
-    return b?.parent_comment_id == null && receipted('doc', m[1]!);
-  }
-  // WApp publishing repair: one installation's grant read and publisher rotation, only through an explicit owner
-  // wapp.manage delegation judged on the installation's real facts (never workspace.manage; no list, no edits).
-  if ((method === 'GET' && (m = /^\/wapp-publishing-grants\/([^/]{1,128})$/.exec(rest)))
-    || (method === 'POST' && (m = /^\/wapp-publishing-grants\/([^/]{1,128})\/rotate$/.exec(rest)))) {
-    return explicitWappDelegationAllows({ workspaceId, actorId, wappInstallationId: m[1]! }, sql as any);
-  }
-  // Receipted reads: the bot's own work output at the version it wrote (comments are never receipted).
-  if (method === 'GET' && (m = new RegExp(`^/docs/${UUID_SEG}(?:/body)?$`).exec(rest))) return receipted('doc', m[1]!);
-  if (method === 'GET' && (m = new RegExp(`^/tasks/${UUID_SEG}$`).exec(rest))) return receipted('task', m[1]!);
-  if (method === 'GET' && (m = new RegExp(`^/files/${UUID_SEG}(?:/object|/versions/${UUID_SEG}/object)?$`).exec(rest))) return receipted('file', m[1]!);
-  if (method === 'GET' && (m = new RegExp(`^/audio-notes/${UUID_SEG}(?:/media)?$`).exec(rest))) return receipted('audio_note', m[1]!);
-  // Supported activity id shapes: a UUID, or Autopilot's 32 lowercase hex (truncated sha256). Ownership stays with the
-  // upsert's identity check (another publisher's id is a 409 without its row).
-  if (method === 'PUT' && new RegExp(`^/agent-activities/(?:${UUID_SEG}|[0-9a-f]{32})$`).test(rest)) {
-    const b = await body();
-    const channelId = id(b?.channel_id);
-    const threadId = b?.thread_id == null || b?.thread_id === '' ? null : id(b.thread_id);
-    if (!channelId || (b?.thread_id && !threadId)) return false;
-    return bound('thread', threadId, channelId);
-  }
-  // Lease renew/resume for the bot's OWN activity row only, under the same thread binding as its PUT. The row's
-  // immutable channel/thread come from Tower, never the request; another publisher's row is refused (no oracle).
-  if (method === 'POST' && (m = new RegExp(`^/agent-activities/(${UUID_SEG}|[0-9a-f]{32})/lease$`).exec(rest))) {
-    const [activity] = await sql<{ channel_id: string; thread_id: string | null }[]>`
-      SELECT channel_id, thread_id FROM flightdeck_pg_agent_activities
-      WHERE workspace_id = ${workspaceId} AND activity_id = ${m[1]!} AND publisher_actor_id = ${actorId}`;
-    if (!activity) return false;
-    return bound('thread', activity.thread_id, activity.channel_id);
-  }
-  if (method === 'POST' && rest === '/response-activities') {
-    const b = await body();
-    const target = id(b?.target_id ?? b?.thread_id ?? b?.parent_comment_id);
-    return target ? bound('any', target) : false;
-  }
-  // Document/task work: body edits under an edit lease on the notified record only.
-  if (method === 'PATCH' && (m = new RegExp(`^/docs/${UUID_SEG}$`).exec(rest))) return await bound('doc_id', m[1]!) || receipted('doc', m[1]!);
-  // Edit-protocol negotiation before acquire (document only): same predicate as acquire; the route shows a classified
-  // caller only the protocols and its own lease.
-  if (method === 'GET' && rest === '/edit-leases') {
-    const q = new URL(request.url).searchParams;
-    const type = String(q.get('entity_type') ?? '').toLowerCase();
-    const entity = id(q.get('entity_id'));
-    if (!entity || (type !== 'doc' && type !== 'document')) return false;
-    return await bound('doc_id', entity) || receipted('doc', entity);
-  }
-  if (method === 'POST' && rest === '/edit-leases/acquire') {
-    const b = await body();
-    const entity = id(b?.entity_id);
-    const type = String(b?.entity_type ?? '').toLowerCase();
-    if (!entity) return false;
-    if (type === 'doc' || type === 'document') return await bound('doc_id', entity) || receipted('doc', entity);
-    if (type === 'task') return await bound('task_id', entity) || receipted('task', entity);
-    return false;
-  }
-  if (method === 'POST' && (m = new RegExp(`^/edit-leases/${UUID_SEG}/(renew|release)$`).exec(rest))) {
-    const [lease] = await sql<{ entity_type: string; entity_id: string }[]>`
-      SELECT entity_type, entity_id FROM flightdeck_pg_edit_leases WHERE workspace_id = ${workspaceId} AND id = ${m[1]!} AND holder_actor_id = ${actorId}`;
-    if (!lease) return false;
-    return lease.entity_type === 'task'
-      ? await bound('task_id', lease.entity_id) || receipted('task', lease.entity_id)
-      : await bound('doc_id', lease.entity_id) || receipted('doc', lease.entity_id);
-  }
-  // Requested work products (documents, tasks, files, audio) may be created only in a channel where the bot holds a
-  // live notification (current access and canonical relationship). The created record is the bot's own output.
-  // With an explicit origin (minting a receipt) that exact origin must be live in this channel.
-  if (method === 'POST' && (m = new RegExp(`^/channels/${UUID_SEG}/(docs|tasks|files|audio-notes)$`).exec(rest))) {
-    const b = await body();
-    // A text-attachment lineage file create can adopt (and return) another creator's canonical file: refused before
-    // any lineage lookup, with the same refusal as any unbound write (no existence oracle).
-    if (m[2] === 'files' && b?.metadata && typeof b.metadata === 'object' && b.metadata.text_attachment_lineage !== undefined) return false;
-    return parseOriginNotificationId(b) === undefined ? liveIn(m[1]!) : originAt(b, m[1]!);
-  }
-  // Uploads (attachments, file bytes, document bodies) only while the bot holds a live notification in this workspace;
-  // the bytes become visible only by linking them to a bound write above or to a bound reply.
-  if (method === 'POST' && rest === '/storage/prepare') return liveIn(null);
-  return false;
-}
-
-/** Storage object ids a write body references: top-level storage_object_id and metadata.attachments[*]. null = malformed. */
-function referencedStorageIds(b: any): string[] | null {
-  if (!b || typeof b !== 'object') return [];
-  const ids: string[] = [];
-  const add = (value: unknown) => {
-    if (value === undefined || value === null || value === '') return true;
-    if (typeof value !== 'string' || !isUuid(value.trim())) return false;
-    ids.push(value.trim().toLowerCase());
-    return true;
-  };
-  if (!add(b.storage_object_id)) return null;
-  const attachments = b.metadata && typeof b.metadata === 'object' ? b.metadata.attachments : undefined;
-  if (Array.isArray(attachments)) for (const a of attachments) if (!add(a && typeof a === 'object' ? a.storage_object_id : a)) return null;
-  return [...new Set(ids)];
-}
-
-async function onlyOwnUploads(sql: Sql, request: Request, b: any): Promise<boolean> {
-  const ids = referencedStorageIds(b);
-  if (ids === null) return false;
-  if (!ids.length) return true;
-  const signer = claimedSignerNpub(request);
-  if (!signer) return false;
-  const acting = (await resolveWsKeyNpub(signer)) ?? signer;
-  const [row] = await sql<{ n: number }[]>`
-    SELECT COUNT(*)::int AS n FROM v4_storage_objects WHERE id = ANY(${ids}::uuid[]) AND created_by_npub = ANY(${[signer, acting]}::text[])`;
-  return Number(row?.n ?? 0) === ids.length;
-}
-
-/** Uploading bytes into / completing an object the bot itself just prepared (never reading or touching others'). */
-async function ownUploadAllowed(sql: Sql, method: string, path: string, npubs: string[]) {
-  const m = new RegExp(`^/api/v4/storage/${UUID_SEG}(/complete)?$`).exec(path);
-  if (!m || !((method === 'PUT' && !m[2]) || (method === 'POST' && m[2]))) return false;
-  const [row] = await sql<{ ok: boolean }[]>`
-    SELECT EXISTS (SELECT 1 FROM v4_storage_objects WHERE id = ${m[1]!} AND created_by_npub = ANY(${npubs}::text[]) AND completed_at IS NULL) AS ok`;
-  return Boolean(row?.ok);
-}
-
-const INBOX_ROUTE = new RegExp(`^/api/v4/flightdeck-pg/workspaces/${UUID_SEG}/agent-notifications(?:/|$)`);
-
-const GIT_OIDC_COMPLETE = '/api/v4/git/oidc/authorize/complete';
-
-// Learning has no workspace attribution. A classified identity may use only this reviewed route+method set, and only
-// with an explicitly selected grant it holds (never implicit learner selection, never notification/receipt-derived).
-const LEARNING_ROUTE = /^\/api\/v4\/learning(?:\/|$)/;
-const LEARNING_GRANT_ROUTES: Record<string, 'read' | 'write'> = {
-  'GET /api/v4/learning/curriculum': 'read',
-  'GET /api/v4/learning/curriculum/traverse': 'read',
-  'GET /api/v4/learning/mastery': 'read',
-  'GET /api/v4/learning/recall/due': 'read',
-  'POST /api/v4/learning/plans': 'write',
-  'POST /api/v4/learning/lessons': 'write',
-  'POST /api/v4/learning/assessments': 'write',
-  'POST /api/v4/learning/recall': 'write',
-};
-
-/**
- * The grant is named by `x-learning-grant-id` AND by a signed `learning_grant_id` tag of the NIP-98 event (the header
- * alone is outside the signature). It must be an active delegation of the acting identity (workspace-key aliases
- * resolve as in the routes), with write access for POST. The route then applies the same grant in its RLS transaction.
- */
-async function learningGrantAllows(request: Request, method: string, path: string, signer: string): Promise<boolean> {
-  const need = LEARNING_GRANT_ROUTES[`${method} ${path}`];
-  if (!need) return false;
-  const grantId = request.headers.get('x-learning-grant-id');
-  if (!grantId || claimedEventTag(request, 'learning_grant_id') !== grantId) return false;
-  const acting = (await resolveWsKeyNpub(signer)) ?? signer;
-  return explicitGrantAllows(getDb(), acting, grantId, need === 'write');
-}
-
-/**
- * A classified identity may only use plain canonical paths: the ceiling and the router must see the same path.
- * Percent-encoding (the router decodes it), empty segments and dot segments are refused outright.
- */
-export function isCanonicalRequestPath(path: string) {
-  return !path.includes('%') && !path.includes('//') && !/(^|\/)\.{1,2}(\/|$)/.test(path) && !path.includes('\\');
-}
-
-const refuseCeiling = () => Response.json({
-  error: 'agent_notification_upgrade_required',
-  code: 'agent_notification_upgrade_required',
-  message: 'This identity is a notification-only agent here. Use the agent-notifications API (capability agent_notifications.v1).',
-  retryable: false,
-  required_capability: AGENT_NOTIFICATION_CAPABILITY,
-}, { status: 403 });
-
-/**
- * Hono middleware body. Unclassified identities (every human, and legacy bots) pass untouched.
- * For an identity classified in one or more workspaces the ceiling is DEFAULT DENY:
- * - only canonical paths are considered at all;
- * - the agent inbox routes are allowed (they self-enforce strict recipient auth);
- * - requests attributable ONLY to workspaces where the identity is not classified are allowed (no cross-tenant denial);
- * - requests touching a classified workspace are allowed only when notification-bound (or the bot's own upload);
- * - everything not attributable to a workspace (group keys, graph, user, workspace lists, unlinked storage, legacy
- *   records without an owner, blobs that resolve nowhere) is refused.
- * When classification cannot be determined the request is refused (fail closed), never admitted.
- */
-export async function enforceNotificationCeiling(request: Request, provider: AgentCeilingProvider, sql: Sql = getDb()): Promise<Response | null> {
-  const signer = claimedSignerNpub(request);
-  if (!signer) return null;
-  const method = request.method.toUpperCase();
-  if (method === 'OPTIONS') return null;
-  let profile: CeilingProfile | null;
-  try {
-    profile = await provider.profileFor(signer);
-  } catch (error) {
-    console.error('[agent-notifications] ceiling classification unavailable; refusing request:', error instanceof Error ? error.message : error);
-    return Response.json({ error: 'authorization_unavailable', code: 'authorization_unavailable', message: 'Authorization state is unavailable; retry later', retryable: true }, { status: 503 });
-  }
-  return ceilingDecision(request, profile, signer, sql);
-}
-
-// Requests admitted under a classified workspace's restrictions (bound writes/receipted reads there).
-const restrictedRequests = new WeakSet<Request>();
-
-const WRITE_BOOKKEEPING_KEYS = new Set(['outbox', 'mention_outbox', 'view_state_outbox', 'thread_outbox', 'trigger_outbox', 'attention', 'activity_version']);
-
-/**
- * Minimal write responses for a restricted (classified-workspace) write: no workspace-wide event sequence (outbox
- * echoes) and no mutable activity metadata anywhere in the body, and a message create returns its own message (with
- * its routing ids) but not the current thread descriptor. Reads, including notification context, are unaffected.
- */
-/** Cheap synchronous check: only these responses are parsed and minimized. */
-export function isRestrictedWrite(request: Request) {
-  const method = request.method.toUpperCase();
-  return restrictedRequests.has(request) && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS'
-    && !INBOX_ROUTE.test(new URL(request.url).pathname);
-}
-
-export function restrictedWriteResponseBody(request: Request, body: unknown): unknown | undefined {
-  if (!isRestrictedWrite(request)) return undefined;
-  const method = request.method.toUpperCase();
-  const path = new URL(request.url).pathname;
-  const strip = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(strip);
-    if (!value || typeof value !== 'object') return value;
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([k]) => !WRITE_BOOKKEEPING_KEYS.has(k)).map(([k, v]) => [k, strip(v)]));
-  };
-  const stripped = strip(body) as Record<string, unknown>;
-  if (method === 'POST' && /\/channels\/[^/]+\/messages$/.test(path) && stripped && typeof stripped === 'object') delete stripped.thread;
-  return stripped;
-}
-
-/**
- * Whether the ceiling admitted this request under the restrictions of its (classified) target workspace. Handlers use
- * this to make responses less specific; a bot classified elsewhere but unrestricted here is never affected.
- */
-export function isRestrictedRequest(request: Request) {
-  return restrictedRequests.has(request);
-}
-
-/** The ceiling decision once the identity's classification is known (shared by admission and open connections). */
-async function ceilingDecision(request: Request, profile: CeilingProfile | null, signer: string, sql: Sql): Promise<Response | null> {
-  if (!profile) return null;
-  const method = request.method.toUpperCase();
-  const path = new URL(request.url).pathname;
-  if (!isCanonicalRequestPath(path)) return refuseCeiling();
-  if (INBOX_ROUTE.test(path)) return null;
-  // Forgejo sign-in is an independent authority: this exact completion step only proves the signer's identity to the
-  // registered OIDC client, and the route itself verifies the one-time request id, nonce, aud, expiry, payload hash
-  // and the allowed-login list. No other git route, and nothing that reads workspace data, is admitted.
-  if (method === 'POST' && path === GIT_OIDC_COMPLETE) return null;
-  if (LEARNING_ROUTE.test(path)) {
-    try {
-      return await learningGrantAllows(request, method, path, signer) ? null : refuseCeiling();
-    } catch {
-      return Response.json({ error: 'authorization_unavailable', code: 'authorization_unavailable', message: 'Authorization state is unavailable; retry later', retryable: true }, { status: 503 });
-    }
-  }
-  let parsedBody: Promise<any> | null = null;
-  const body = () => (parsedBody ??= request.clone().text().then((text) => { try { return text ? JSON.parse(text) : {}; } catch { return null; } }));
-  let targets: string[] | null;
-  try {
-    targets = await targetWorkspaces(sql, request, path, body);
-  } catch {
-    return Response.json({ error: 'authorization_unavailable', code: 'authorization_unavailable', message: 'Authorization state is unavailable; retry later', retryable: true }, { status: 503 });
-  }
-  if (!targets || targets.length === 0) return refuseCeiling(); // unattributable: default deny
-  const classifiedTargets = targets.filter((ws) => profile!.workspaces.has(ws));
-  if (!classifiedTargets.length) return null; // only workspaces where this identity is unrestricted
-  if (classifiedTargets.length === 1 && FD_WS.exec(path)?.[1]?.toLowerCase() === classifiedTargets[0]
-    && await bindingAllows(sql, request, profile.actorId, classifiedTargets[0]!, method, path, body)) {
-    restrictedRequests.add(request);
-    return null;
-  }
-  if (await ownUploadAllowed(sql, method, path, [signer])) return null;
-  return refuseCeiling();
-}
-
 // ------------------------------------------------------------------------------------------------------------------
-// Long-lived reads (event streams, blob downloads): the ceiling decision must hold for the connection's lifetime.
+// Classification provider association. Classification governs delivery only (visibility audiences, human inbox
+// projection, the strict inbox); it never refuses an API request the route's own ACL authorizes.
 // ------------------------------------------------------------------------------------------------------------------
-const admittedBy = new WeakMap<Request, AgentCeilingProvider>();
+const providerOf = new WeakMap<Request, AgentCeilingProvider>();
 
-/** Called by the ceiling middleware: the provider that admitted this request re-decides for its open connection. */
+/** Called by the app middleware: the injected classification provider answers audience checks for this request. */
 export function rememberCeilingAdmission(request: Request, provider: AgentCeilingProvider) {
-  admittedBy.set(request, provider);
+  providerOf.set(request, provider);
 }
 
-export type OpenReadRefusal = { code: string; retryable: boolean; required_capability?: string };
-/** The identity a route authenticated at connect: the verified signer and the identity it acts as (its alias target). */
-export type OpenReadIdentity = { signerNpub: string; actingNpub: string };
-
-/**
- * Re-run the ceiling for an open connection: the original request's route and workspace attribution, and the identity
- * bound when the route authenticated it. NIP-98 is not re-verified. Both the signer and the acting identity are
- * checked, so a workspace-key alias removed or rotated after connect can never turn a classified agent into an
- * unrestricted one. Returns null while a new connection would still be admitted, otherwise its refusal (including
- * `authorization_unavailable` when classification cannot be determined).
- * Call before delivering each further batch or chunk. After a classification commits, a connection can still deliver
- * at most the one batch/chunk whose check read state before that commit; nothing checked afterwards is sent.
- */
-export async function openReadRefusal(request: Request, identity: OpenReadIdentity, sql?: Sql): Promise<OpenReadRefusal | null> {
-  const provider = admittedBy.get(request) ?? databaseCeilingProvider();
-  const unavailable = { code: 'authorization_unavailable', retryable: true };
-  let profile: CeilingProfile | null = null;
-  try {
-    const [acting, signer] = await Promise.all([
-      provider.profileFor(identity.actingNpub),
-      identity.signerNpub === identity.actingNpub ? null : provider.profileFor(identity.signerNpub),
-    ]);
-    if (acting || signer) {
-      profile = { actorId: (acting ?? signer)!.actorId, workspaces: new Set([...(acting?.workspaces ?? []), ...(signer?.workspaces ?? [])]) };
-    }
-  } catch {
-    return unavailable;
-  }
-  let refused: Response | null;
-  try {
-    refused = await ceilingDecision(request, profile, identity.signerNpub, sql ?? getDb());
-  } catch {
-    return unavailable;
-  }
-  if (!refused) return null;
-  const body = await refused.json().catch(() => null) as { code?: string; retryable?: boolean; required_capability?: string } | null;
-  return {
-    code: body?.code ?? 'agent_notification_upgrade_required',
-    retryable: Boolean(body?.retryable),
-    ...(body?.required_capability ? { required_capability: body.required_capability } : {}),
-  };
-}
-
-/** The response a connection gets when its setup re-check refuses it: the same status and body as the ceiling. */
-export function openReadRefusalResponse(refusal: OpenReadRefusal) {
-  return Response.json({
-    error: refusal.code,
-    ...refusal,
-    message: refusal.code === 'authorization_unavailable'
-      ? 'Authorization state is unavailable; retry later'
-      : 'This identity is a notification-only agent here. Use the agent-notifications API (capability agent_notifications.v1).',
-  }, { status: refusal.code === 'authorization_unavailable' ? 503 : 403 });
-}
-
-/** Whether `npub` is notification-only in `workspaceId`, from the provider that admitted `request` (fails by throwing). */
+/** Whether `npub` is notification-only in `workspaceId` (delivery audiences only), from the request's provider (fails by throwing). */
 export async function classifiedInWorkspace(request: Request, npub: string, workspaceId: string) {
-  const provider = admittedBy.get(request) ?? databaseCeilingProvider();
+  const provider = providerOf.get(request) ?? databaseCeilingProvider();
   return Boolean((await provider.profileFor(npub))?.workspaces.has(workspaceId));
 }
 
@@ -1205,7 +749,7 @@ export async function acknowledge(sql: Sql, r: Recipient, notificationId: string
 }
 
 // ------------------------------------------------------------------------------------------------------------------
-// Access profile (ceiling) management.
+// Access profile (delivery classification) management.
 // ------------------------------------------------------------------------------------------------------------------
 export async function readAccessProfile(sql: Sql, workspaceId: string, actorId: string) {
   const [here] = await sql<{ profile: string }[]>`

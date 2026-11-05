@@ -12,7 +12,7 @@ const [{ createApp }, { config }, { getDb }, { ensureRuntimeSchema }, { startHos
   import('./services/notification-worker'),
 ]);
 
-// The notification-only ceiling uses the database provider (fail closed); traffic is served only after the schema below.
+// Delivery classification uses the database provider (fail closed); traffic is served only after the schema below.
 const { databaseCeilingProvider } = await import('./services/agent-notifications');
 const app = createApp({ agentCeiling: databaseCeilingProvider() });
 
