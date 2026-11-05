@@ -31,7 +31,8 @@ BEGIN
     WHERE g.workspace_id=OLD.workspace_id AND g.group_id=OLD.group_id) THEN
     RAISE EXCEPTION 'General includes every current workspace member; remove workspace membership instead';
   END IF;
-  RETURN OLD;
+  IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS flightdeck_pg_general_member_keep ON flightdeck_pg_group_memberships;

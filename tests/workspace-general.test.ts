@@ -86,3 +86,16 @@ test('requires canonical owner authority, valid empty body and correct workspace
   await sql`UPDATE flightdeck_pg_permission_grants SET revoked_at=NOW() WHERE workspace_id=${f.workspace.id} AND permission='workspace.manage'`;
   expect((await f.request()).status).toBe(403);
 });
+
+
+test('unrelated group membership updates remain effective before and after General opt-in',async()=>{
+  for(const enrolled of [false,true]) {
+    const f=await fixture(),m=await member(f);
+    if(enrolled) expect((await f.request()).status).toBe(201);
+    const groups=await sql`INSERT INTO flightdeck_pg_groups(workspace_id,name,kind) VALUES(${f.workspace.id},'Custom A','custom'),(${f.workspace.id},'Custom B','custom') RETURNING *`;
+    await sql`INSERT INTO flightdeck_pg_group_memberships(workspace_id,group_id,actor_id) VALUES(${f.workspace.id},${groups[0].id},${m.id})`;
+    const [updated]=await sql`UPDATE flightdeck_pg_group_memberships SET group_id=${groups[1].id} WHERE workspace_id=${f.workspace.id} AND group_id=${groups[0].id} AND actor_id=${m.id} RETURNING group_id`;
+    expect(updated.group_id).toBe(groups[1].id);
+    expect((await sql`SELECT 1 FROM flightdeck_pg_group_memberships WHERE workspace_id=${f.workspace.id} AND group_id=${groups[1].id} AND actor_id=${m.id}`).length).toBe(1);
+  }
+});
