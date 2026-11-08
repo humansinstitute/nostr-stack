@@ -8102,7 +8102,7 @@ export async function listFlightDeckPgTaskComments(
     WHERE tc.workspace_id = ${input.workspaceId}
       AND tc.task_id = ${input.taskId}
       AND tc.deleted_at IS NULL
-      AND (${input.afterCreatedAt ?? null}::timestamptz IS NULL OR (tc.created_at,tc.id)>(${input.afterCreatedAt ?? null}::timestamptz,${input.afterId ?? null}::uuid))
+      AND (${input.afterCreatedAt ?? null}::text::timestamptz IS NULL OR (tc.created_at,tc.id)>(${input.afterCreatedAt ?? null}::text::timestamptz,${input.afterId ?? null}::uuid))
     ORDER BY tc.created_at ASC, tc.id ASC
     LIMIT ${input.limit}
   `;
@@ -8254,7 +8254,7 @@ export async function listFlightDeckPgDocComments(
     WHERE dc.workspace_id = ${input.workspaceId}
       AND dc.doc_id = ${input.docId}
       AND dc.deleted_at IS NULL
-      AND (${input.afterCreatedAt ?? null}::timestamptz IS NULL OR (dc.created_at,dc.id)>(${input.afterCreatedAt ?? null}::timestamptz,${input.afterId ?? null}::uuid))
+      AND (${input.afterCreatedAt ?? null}::text::timestamptz IS NULL OR (dc.created_at,dc.id)>(${input.afterCreatedAt ?? null}::text::timestamptz,${input.afterId ?? null}::uuid))
     ORDER BY dc.created_at ASC, dc.id ASC
     LIMIT ${input.limit}
   `;

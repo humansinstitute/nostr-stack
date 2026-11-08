@@ -577,6 +577,32 @@ describe('Flight Deck PG API routes', () => {
     }
   });
 
+  test('new document body returns a coherent canonical base for a leased edit', async () => {
+    const { workspaceId } = await seedWorkspace('npub1documentbaserepairfixture');
+    const root = `/api/v4/flightdeck-pg/workspaces/${workspaceId}`;
+    const scope = await requestJson(`${root}/scopes`, 'POST', ownerSecret, { name: 'Document base', kind: 'project' });
+    const channel = await requestJson(`${root}/scopes/${scope.json.scope.id}/channels`, 'POST', ownerSecret, { name: 'Documents', type: 'docs' });
+    const initial = await createCompletedDocStorageObject({ workspaceId, fileName: 'initial.md', content: 'Initial body' });
+    const created = await requestJson(`${root}/channels/${channel.json.channel.id}/docs`, 'POST', ownerSecret, { title: 'Base fixture', storage_object_id: initial.id });
+    expect(created.res.status).toBe(201);
+    const docId = created.json.doc.id;
+    const path = `${root}/docs/${docId}`;
+    const read = await requestJson(`${path}/body`, 'GET', ownerSecret);
+    expect(read.res.status).toBe(200);
+    expect(read.json.canonical_version).toEqual({ version_id: `${docId}:1`, row_version: 1, storage_object_id: initial.id, body_sha256_hex: initial.sha256Hex, size_bytes: initial.bytes.byteLength });
+    expect(read.json.doc.storage_object_id).toBe(read.json.canonical_version.storage_object_id);
+    expect(read.json.body.sha256_hex).toBe(read.json.canonical_version.body_sha256_hex);
+    const lease = await requestJson(`${root}/edit-leases/acquire`, 'POST', ownerSecret, { entity_type: 'document', entity_id: docId });
+    expect(lease.res.status).toBe(201);
+    const next = await createCompletedDocStorageObject({ workspaceId, fileName: 'next.md', content: 'Edited body' });
+    const saved = await requestJson(path, 'PATCH', ownerSecret, { row_version: read.json.doc.row_version, base_version_id: read.json.canonical_version.version_id, base_body_sha256_hex: read.json.canonical_version.body_sha256_hex, lease_token: lease.json.lease.lease_token, storage_object_id: next.id });
+    expect(saved.res.status).toBe(200);
+    const after = await requestJson(`${path}/body`, 'GET', ownerSecret);
+    expect(after.json.body.base64_data).toBe(Buffer.from(next.bytes).toString('base64'));
+    expect(after.json.canonical_version.body_sha256_hex).toBe(next.sha256Hex);
+    expect(after.json.canonical_version.row_version).toBeGreaterThan(read.json.canonical_version.row_version);
+  });
+
   test('comment mentions preserve actor types, permissions, routing payloads and reloads', async () => {
     const { workspaceId } = await seedWorkspace('npub1workspacecommentmentions');
     const root = `/api/v4/flightdeck-pg/workspaces/${workspaceId}`;
@@ -3230,6 +3256,13 @@ describe('Flight Deck PG API routes', () => {
     expect(docBodyRead.json.doc.body.storage_object.content_type).toBe('text/markdown');
     expect(docBodyRead.json.doc.body.storage_object.size_bytes).toBe(docBytes.byteLength);
     expect(docBodyRead.json.doc.body.storage_object.sha256_hex).toBe(sha256Hex(docBytes));
+    expect(docBodyRead.json.canonical_version).toEqual({
+      version_id: `${docId}:${docBodyRead.json.doc.row_version}`,
+      row_version: docBodyRead.json.doc.row_version,
+      storage_object_id: docStorageObject.id,
+      body_sha256_hex: sha256Hex(docBytes),
+      size_bytes: docBytes.byteLength,
+    });
     expect(docBodyRead.json.body.object_id).toBe(docStorageObject.id);
     expect(docBodyRead.json.body.content_type).toBe('text/markdown');
     expect(docBodyRead.json.body.size_bytes).toBe(docBytes.byteLength);

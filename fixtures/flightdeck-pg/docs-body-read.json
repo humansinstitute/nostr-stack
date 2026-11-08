@@ -5,7 +5,10 @@
   "method": "GET",
   "required_nip98_actor": "workspace_member",
   "required_app_npub": "npub17qr2rr2k20zwmaferler5c0s8lur6gm73q8wvyv8l20n0xsz3c9q7m7fll",
-  "required_permissions": ["doc.read", "channel.read"],
+  "required_permissions": [
+    "doc.read",
+    "channel.read"
+  ],
   "stable_identity_fields": [
     "tower_service_npub",
     "workspace_service_npub",
@@ -16,13 +19,25 @@
   "request_shape": null,
   "response_shape": {
     "type": "object",
-    "required": ["identity", "doc", "body"],
+    "required": [
+      "identity",
+      "doc",
+      "body",
+      "canonical_version"
+    ],
     "properties": {
       "identity": "FlightDeckPgIdentityFields",
       "doc": "canonical doc metadata row with Tower storage object metadata and body route",
       "body": {
         "type": "object",
-        "required": ["object_id", "content_type", "size_bytes", "sha256_hex", "encoding", "base64_data"],
+        "required": [
+          "object_id",
+          "content_type",
+          "size_bytes",
+          "sha256_hex",
+          "encoding",
+          "base64_data"
+        ],
         "properties": {
           "object_id": "Tower v4 storage object UUID",
           "content_type": "MIME type recorded on the storage object",
@@ -31,6 +46,17 @@
           "encoding": "base64",
           "base64_data": "base64 encoded opaque bytes"
         }
+      },
+      "canonical_version": {
+        "type": "object",
+        "required": [
+          "version_id",
+          "row_version",
+          "storage_object_id",
+          "body_sha256_hex",
+          "size_bytes"
+        ],
+        "description": "Authoritative canonical document identity matching doc row and body bytes; retain as the optimistic concurrency base."
       }
     }
   },

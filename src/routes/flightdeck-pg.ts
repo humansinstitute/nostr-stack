@@ -7802,6 +7802,13 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/docs/:docId/body', async (c) =>
     doc: receiptView(c, 'doc', doc.id, serializeFlightDeckPgDoc(doc, {
       storageObject: serializeFlightDeckPgStorageObjectMetadata(readable.storageObject),
     })),
+    canonical_version: serializeFlightDeckPgDocVersionIdentity({
+      version_id: flightDeckPgCanonicalDocVersionId(doc.id, doc.row_version),
+      row_version: doc.row_version,
+      storage_object_id: doc.storage_object_id,
+      body_sha256_hex: readable.storageObject.sha256_hex,
+      size_bytes: Number(readable.storageObject.size_bytes),
+    }),
     body: {
       object_id: readable.storageObject.id,
       content_type: readable.storageObject.content_type,
