@@ -1,3 +1,4 @@
+import { loadUnifiedPushConfig, sendUnifiedPush, classifyUnifiedPushResult, type UnifiedPushSender } from './notification-unifiedpush';
 import { channelActivityAllowed } from './notification-channel-preferences';
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db';
@@ -21,7 +22,7 @@ export const alertsEnabled = () => (Bun.env.NOTIF_ALERTS ?? 'on').toLowerCase() 
 
 export const alertStatus = {
   running: false, lastTickAt: null as string | null, lastError: null as string | null,
-  sent: 0, suppressed: 0, failed: 0, dead: 0, breakerOpenUntil: 0,
+  sent: 0, suppressed: 0, failed: 0, dead: 0, breakerOpenUntil: 0, unifiedpushBreakerOpenUntil: 0,
 };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -72,18 +73,18 @@ type ItemFacts = {
 export async function enqueueAlerts(tx: Sql, itemId: string, refold: boolean): Promise<number> {
   if (!alertsEnabled()) return 0;
   const readiness = loadApnsConfig();
-  if (!readiness.ready) return 0;
-  const config = readiness.config;
+  const unified = loadUnifiedPushConfig();
+  if (!readiness.ready && !unified.ready) return 0;
   const [item] = await tx<ItemFacts[]>`SELECT * FROM flightdeck_pg_notification_items WHERE id = ${itemId}`;
   if (!item || item.removed_at || item.read_at || item.dismissed_at || item.archived_at || item.status !== 'active') return 0;
   if (item.expires_at && new Date(item.expires_at).getTime() <= Date.now()) return 0;
   if (!await channelActivityAllowed(tx, { workspaceId: item.workspace_id, actorId: item.recipient_actor_id }, item.acl_channel_id, item.source_app_id, item.category)) return 0;
 
-  const candidates = await tx<{ transport_id: string; client_app_id: string; environment: string; bundle_id: string; registered_origin: string | null }[]>`
-    SELECT t.id AS transport_id, i.client_app_id, t.environment, t.bundle_id, t.registered_origin
+  const candidates = await tx<{ kind: string; transport_id: string; client_app_id: string; environment: string; bundle_id: string; registered_origin: string | null }[]>`
+    SELECT t.kind, t.id AS transport_id, i.client_app_id, t.environment, t.bundle_id, t.registered_origin
     FROM flightdeck_pg_notification_transports t
     JOIN flightdeck_pg_notification_installations i ON i.id = t.installation_id
-    WHERE t.kind = 'apns' AND t.status = 'active' AND t.lease_expires_at > NOW() AND t.actor_id = ${item.recipient_actor_id}
+    WHERE t.kind IN ('apns', 'unifiedpush') AND t.status = 'active' AND t.lease_expires_at > NOW() AND t.actor_id = ${item.recipient_actor_id}
       AND i.actor_id = ${item.recipient_actor_id} AND i.status = 'active' AND i.permission_state = 'granted'
       AND ${item.workspace_id}::uuid = ANY(i.enrolled_workspace_ids)`;
   if (!candidates.length) return 0;
@@ -93,8 +94,10 @@ export async function enqueueAlerts(tx: Sql, itemId: string, refold: boolean): P
   const deadline = new Date(Math.min(Date.now() + DEADLINE_MS, item.expires_at ? new Date(item.expires_at).getTime() : Infinity));
   let queued = 0;
   for (const c of candidates) {
-    if (!config.environments.has(c.environment as 'sandbox' | 'production') || !config.topics.has(c.bundle_id)) continue;
-    if (!config.publicOrigin && !c.registered_origin?.startsWith('https://')) continue;
+    if (c.kind === 'apns' && (!readiness.ready || !readiness.config.environments.has(c.environment as 'sandbox' | 'production') || !readiness.config.topics.has(c.bundle_id))) continue;
+    if (c.kind === 'unifiedpush' && !unified.ready) continue;
+    const publicOrigin = c.kind === 'apns' ? (readiness.ready ? readiness.config.publicOrigin : null) : (unified.ready ? unified.config.publicOrigin : null);
+    if (!publicOrigin && !c.registered_origin?.startsWith('https://')) continue;
     if (!audienceAllows(item.audience_client_apps, c.client_app_id)) continue;
     if (resolveAlertRule(rules, item.source_app_id, item.category, c.client_app_id, fallback).mode !== 'on') continue;
     const [last] = await tx<{ generation: number; state: string }[]>`
@@ -131,7 +134,7 @@ export function backoffMs(attempt: number, random = Math.random()) {
   return Math.round(base * (0.8 + random * 0.4));
 }
 
-async function claim(sql: Sql, owner: string, limit: number): Promise<Claimed[]> {
+async function claim(sql: Sql, owner: string, limit: number, kinds: string[]): Promise<Claimed[]> {
   return sql.begin(async (raw) => {
     const tx = raw as unknown as Sql;
     // A crashed worker leaves `leased` rows (and possibly a write-ahead attempt): both are recovered here.
@@ -141,7 +144,8 @@ async function claim(sql: Sql, owner: string, limit: number): Promise<Claimed[]>
     return tx<Claimed[]>`
       WITH due AS (
         SELECT id FROM flightdeck_pg_notification_alerts
-        WHERE (state IN ('pending', 'failed') AND next_attempt_at <= NOW() AND not_before <= NOW()) OR (state = 'leased' AND lease_until < NOW())
+        WHERE transport_id IN (SELECT id FROM flightdeck_pg_notification_transports WHERE kind = ANY(${kinds}::text[]))
+          AND ((state IN ('pending', 'failed') AND next_attempt_at <= NOW() AND not_before <= NOW()) OR (state = 'leased' AND lease_until < NOW()))
         ORDER BY next_attempt_at, created_at LIMIT ${limit} FOR UPDATE SKIP LOCKED
       )
       UPDATE flightdeck_pg_notification_alerts a SET state = 'leased', lease_owner = ${owner}, lease_until = NOW() + make_interval(secs => ${LEASE_MS / 1000})
@@ -163,16 +167,16 @@ async function settle(sql: Sql, alert: Claimed, owner: string, outcome: Settle):
   return rows.length > 0;
 }
 
-type Gate = { ok: true; item: ItemFacts; transport: any; installation: any; config: ApnsConfig; preview: string | null } | { ok: false; reason: string };
+type Gate = { ok: true; item: ItemFacts; transport: any; installation: any; config: { publicOrigin: string | null }; preview: string | null } | { ok: false; reason: string };
 
 /**
  * Late checks, after claim and before the provider call. Everything that could have changed since creation is read fresh:
  * transport lease/status/owner, enrollment, membership, item state, record access, source grant, audience and alert rules.
  */
-async function gate(sql: Sql, alert: Claimed, config: ApnsConfig): Promise<Gate> {
+async function gate(sql: Sql, alert: Claimed, config: ApnsConfig | null): Promise<Gate> {
   const [row] = await sql<any[]>`
-    SELECT t.address, t.status AS t_status, t.lease_expires_at, t.actor_id AS t_actor, t.environment, t.bundle_id, t.preview AS t_preview, t.registered_origin,
-           i.status AS i_status, i.actor_id AS i_actor, i.permission_state, i.enrolled_workspace_ids, i.client_app_id
+    SELECT t.kind, t.webpush_keys, t.address, t.status AS t_status, t.lease_expires_at, t.actor_id AS t_actor, t.environment, t.bundle_id, t.preview AS t_preview, t.registered_origin,
+           i.status AS i_status, i.actor_id AS i_actor, i.permission_state, i.enrolled_workspace_ids, i.client_app_id, i.platform
     FROM flightdeck_pg_notification_transports t JOIN flightdeck_pg_notification_installations i ON i.id = t.installation_id
     WHERE t.id = ${alert.transport_id}`;
   if (!row) return { ok: false, reason: 'transport_gone' };
@@ -181,8 +185,14 @@ async function gate(sql: Sql, alert: Claimed, config: ApnsConfig): Promise<Gate>
   if (row.t_actor !== alert.recipient_actor_id || row.i_actor !== alert.recipient_actor_id) return { ok: false, reason: 'transport_owner_changed' };
   if (row.i_status !== 'active' || !row.enrolled_workspace_ids.includes(alert.workspace_id)) return { ok: false, reason: 'not_enrolled' };
   if (row.permission_state !== 'granted') return { ok: false, reason: 'permission_not_granted' };
-  if (!config.environments.has(row.environment)) return { ok: false, reason: 'environment_not_enabled' };
-  if (!config.topics.has(row.bundle_id)) return { ok: false, reason: 'bundle_not_allowed' };
+  const unified = loadUnifiedPushConfig();
+  if (row.kind === 'unifiedpush') {
+    if (!unified.ready) return { ok: false, reason: unified.reason };
+    if (row.client_app_id !== 'ambulando' || row.platform !== 'android') return { ok: false, reason: 'audience_mismatch' };
+  } else {
+    if (!config || !config.environments.has(row.environment)) return { ok: false, reason: 'environment_not_enabled' };
+    if (!config.topics.has(row.bundle_id)) return { ok: false, reason: 'bundle_not_allowed' };
+  }
   if (new Date(alert.deadline_at).getTime() <= Date.now()) return { ok: false, reason: 'deadline_passed' };
 
   const [member] = await sql`SELECT 1 FROM flightdeck_pg_workspace_memberships WHERE workspace_id = ${alert.workspace_id} AND actor_id = ${alert.recipient_actor_id}`;
@@ -207,7 +217,7 @@ async function gate(sql: Sql, alert: Claimed, config: ApnsConfig): Promise<Gate>
   const resolved = resolveAlertRule(rules, item.source_app_id, item.category, row.client_app_id, fallback);
   if (resolved.mode !== 'on') return { ok: false, reason: 'alert_rule_off' };
   const preview = row.t_preview === 'full' && resolved.preview === 'full' ? 'full' : null;
-  return { ok: true, item, transport: row, installation: row, config, preview };
+  return { ok: true, item, transport: row, installation: row, config: row.kind === 'unifiedpush' && unified.ready ? unified.config : config!, preview };
 }
 
 async function buildContent(sql: Sql, alert: Claimed, g: Extract<Gate, { ok: true }>) {
@@ -229,16 +239,17 @@ async function buildContent(sql: Sql, alert: Claimed, g: Extract<Gate, { ok: tru
   const presentation = item.presentation as { title?: string; body?: string };
   const opaque = opaqueIds(await cursorSecret(sql), alert.workspace_id, item.id, item.group_key);
   const [ws] = await sql<{ tower_service_npub: string | null }[]>`SELECT tower_service_npub FROM flightdeck_pg_workspaces WHERE id = ${alert.workspace_id}`;
+  if (transport.kind === 'unifiedpush' && !ws?.tower_service_npub) return null;
   return {
     clientAppId: installation.client_app_id,
     towerServiceNpub: ws?.tower_service_npub ?? null,
     workspaceId: alert.workspace_id, itemId: item.id, changeSeq: Number(item.change_seq), sourceAppId: item.source_app_id, category: item.category,
     ...opaque, coreSource: core, ids, badge, origin,
-    preview: g.preview === 'full' ? { title: plainText(presentation.title, 120), body: plainText(presentation.body, 120) } : null,
+    preview: transport.kind !== 'unifiedpush' && g.preview === 'full' ? { title: plainText(presentation.title, 120), body: plainText(presentation.body, 120) } : null,
   };
 }
 
-async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: ApnsConfig, sender: ApnsSender, stats: AlertBatchStats, beforeSend?: (alert: { id: string }) => void | Promise<void>) {
+async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: ApnsConfig | null, sender: ApnsSender, unifiedSender: UnifiedPushSender, stats: AlertBatchStats, beforeSend?: (alert: { id: string }) => void | Promise<void>) {
   const g = await gate(sql, alert, config);
   if (!g.ok) {
     if (await settle(sql, alert, owner, { state: 'suppressed', reason: g.reason })) { stats.suppressed += 1; alertStatus.suppressed += 1; }
@@ -267,14 +278,28 @@ async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: Apns
   let errorClass: string | null = null;
   let retryAfterMs: number | null = null;
   try {
-    const result = await sender(config, {
-      environment: g.transport.environment, deviceToken: g.transport.address, topic: g.transport.bundle_id,
-      collapseId: marked[0]!.collapse_key, expiration: Math.floor(new Date(alert.deadline_at).getTime() / 1000), body: JSON.stringify(buildApnsPayload(content)),
-    });
-    outcome = classifyApnsResult(result);
-    providerStatus = result.status;
-    errorClass = result.reason ?? (outcome === 'sent' ? null : `http_${result.status}`);
-    retryAfterMs = result.retryAfterMs;
+    if (g.transport.kind === 'unifiedpush') {
+      const state = loadUnifiedPushConfig();
+      if (!state.ready) throw new Error('unifiedpush_unavailable');
+      const result = await unifiedSender(state.config, {
+        endpoint: g.transport.address, keys: g.transport.webpush_keys,
+        expiration: Math.floor(new Date(alert.deadline_at).getTime() / 1000),
+        body: JSON.stringify({ fd: { v: 1, notification_id: content.itemId, workspace_id: content.workspaceId, change_seq: content.changeSeq, origin: content.origin, tower_service_npub: content.towerServiceNpub }, title: 'New notification', body: '' }),
+      });
+      outcome = classifyUnifiedPushResult(result.status);
+      providerStatus = result.status;
+      errorClass = outcome === 'sent' ? null : `http_${result.status}`;
+      retryAfterMs = result.retryAfterMs;
+    } else {
+      const result = await sender(config!, {
+        environment: g.transport.environment, deviceToken: g.transport.address, topic: g.transport.bundle_id,
+        collapseId: marked[0]!.collapse_key, expiration: Math.floor(new Date(alert.deadline_at).getTime() / 1000), body: JSON.stringify(buildApnsPayload(content)),
+      });
+      outcome = classifyApnsResult(result);
+      providerStatus = result.status;
+      errorClass = result.reason ?? (outcome === 'sent' ? null : `http_${result.status}`);
+      retryAfterMs = result.retryAfterMs;
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
     errorClass = /timeout/i.test(message) ? 'timeout' : message === 'apns_no_response' ? 'no_response' : 'network_error';
@@ -300,8 +325,8 @@ async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: Apns
   }
   if (outcome === 'credential') {
     // A credential problem is Tower's, not the alert's: open the breaker, keep the attempt budget, retry after it resets.
-    alertStatus.breakerOpenUntil = Date.now() + BREAKER_MS;
-    resetApnsJwtCache();
+    if (g.transport.kind === 'unifiedpush') alertStatus.unifiedpushBreakerOpenUntil = Date.now() + BREAKER_MS;
+    else { alertStatus.breakerOpenUntil = Date.now() + BREAKER_MS; resetApnsJwtCache(); }
     await sql`UPDATE flightdeck_pg_notification_alerts SET attempt_count = attempt_count - 1 WHERE id = ${alert.id}`;
     if (await settle(sql, alert, owner, { state: 'failed', reason: 'provider_credential', nextInMs: BREAKER_MS, providerStatus, errorClass })) { stats.retried += 1; alertStatus.failed += 1; }
     return;
@@ -321,24 +346,25 @@ async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: Apns
 }
 
 /** Claims due alerts and delivers them. Safe to run from several processes: `SKIP LOCKED` leases give each alert one sender. */
-export async function processAlertBatch(opts: { sql?: Sql; limit?: number; sender?: ApnsSender; owner?: string; beforeSend?: (alert: { id: string }) => void | Promise<void> } = {}): Promise<AlertBatchStats> {
+export async function processAlertBatch(opts: { sql?: Sql; limit?: number; sender?: ApnsSender; unifiedSender?: UnifiedPushSender; owner?: string; beforeSend?: (alert: { id: string }) => void | Promise<void> } = {}): Promise<AlertBatchStats> {
   const sql = opts.sql ?? getDb();
   const owner = opts.owner ?? `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
   const stats: AlertBatchStats = { claimed: 0, sent: 0, suppressed: 0, retried: 0, dead: 0, skipped: 0 };
   const readiness = loadApnsConfig();
-  if (!readiness.ready) return stats;
-  if (Date.now() < alertStatus.breakerOpenUntil) return stats;
+  const unified = loadUnifiedPushConfig();
+  const kinds = [...(readiness.ready && Date.now() >= alertStatus.breakerOpenUntil ? ['apns'] : []), ...(unified.ready && Date.now() >= alertStatus.unifiedpushBreakerOpenUntil ? ['unifiedpush'] : [])];
+  if (!kinds.length) return stats;
   // Never claim more than run at once: a claimed-but-waiting alert would burn its lease behind slow provider calls.
-  const alerts = await claim(sql, owner, Math.min(opts.limit ?? PARALLEL, PARALLEL));
+  const alerts = await claim(sql, owner, Math.min(opts.limit ?? PARALLEL, PARALLEL), kinds);
   stats.claimed = alerts.length;
   const sender = opts.sender ?? sendApns;
   for (let i = 0; i < alerts.length; i += PARALLEL) {
     await Promise.all(alerts.slice(i, i + PARALLEL).map(async (alert) => {
       try {
-        await dispatchOne(sql, alert, owner, readiness.config, sender, stats, opts.beforeSend);
+        await dispatchOne(sql, alert, owner, readiness.ready ? readiness.config : null, sender, opts.unifiedSender ?? sendUnifiedPush, stats, opts.beforeSend);
       } catch (error) {
         // Unexpected failure: give the alert back with a backoff rather than leaving it leased.
-        alertStatus.lastError = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+        alertStatus.lastError = 'alert_worker_error';
         await settle(sql, alert, owner, { state: 'failed', reason: 'worker_error', nextInMs: backoffMs(Math.max(1, alert.attempt_count)) });
         stats.retried += 1;
       }
@@ -353,7 +379,9 @@ export async function alertStats(sql: Sql, workspaceId: string) {
   const [oldest] = await sql<{ age: number | null }[]>`
     SELECT EXTRACT(EPOCH FROM NOW() - MIN(created_at))::int AS age FROM flightdeck_pg_notification_alerts WHERE workspace_id = ${workspaceId} AND state IN ('pending', 'failed', 'leased')`;
   const readiness = loadApnsConfig();
+  const unified = loadUnifiedPushConfig();
   return {
+    transport_status: { unifiedpush: unified.ready ? { ready: true, breaker_open: Date.now() < alertStatus.unifiedpushBreakerOpenUntil } : { ready: false, reason: unified.reason } },
     by_state: Object.fromEntries(rows.map((r) => [r.state, r.n])), oldest_pending_age_s: oldest?.age ?? null,
     provider: readiness.ready ? { ready: true } : { ready: false, reason: readiness.reason },
     worker: { ...alertStatus, enabled: alertsEnabled(), breaker_open: Date.now() < alertStatus.breakerOpenUntil },
@@ -389,7 +417,7 @@ export function startAlertWorker(sql: Sql = getDb()) {
       alertStatus.lastTickAt = new Date().toISOString();
       alertStatus.lastError = null;
     } catch (error) {
-      alertStatus.lastError = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+      alertStatus.lastError = 'alert_worker_error';
       console.error('[notifications] alert tick failed:', alertStatus.lastError);
     } finally {
       busy = false;

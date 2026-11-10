@@ -3474,7 +3474,7 @@ export interface NotificationApnsRegistrationInputV1 {
 }
 export interface NotificationPushRegistrationV1 {
   installation: { installation_id: string; client_app_id: string; platform: PushPlatform; permission_state: PushPermissionState; status: 'active' | 'revoked'; enrolled_workspace_ids: string[] };
-  device: { installation_id: string; kind: 'apns'; environment: ApnsEnvironmentV1; bundle_id: string; preview: 'generic' | 'full'; status: 'active' | 'stale' | 'revoked'; token_suffix: string; lease_expires_at: string };
+  device: { installation_id: string; kind: 'apns'; environment: ApnsEnvironmentV1; bundle_id: string; preview: 'generic' | 'full'; status: 'active' | 'stale' | 'revoked'; token_suffix: string; lease_expires_at: string } | { installation_id: string; kind: 'unifiedpush'; environment: null; bundle_id: null; preview: 'generic'; status: 'active' | 'stale' | 'revoked'; lease_expires_at: string };
   delivery: { ready: boolean; reason?: string };
 }
 /** Visible APNs alert. `fd` is routing only; no private content unless a full preview was explicitly allowed. */
@@ -3712,4 +3712,17 @@ export interface FlightDeckPgGeneralEnsureResponse {
   };
   reused: boolean;
   policy: FlightDeckPgGeneralPolicy;
+}
+
+/** Android Ambulando transport. Endpoint/keys are write-only; generic previews only. */
+export interface NotificationUnifiedPushBodyV1 {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  preview?: 'generic';
+  lease_seconds?: number;
+}
+export interface NotificationUnifiedPushEnvelopeV1 {
+  fd: { v: 1; notification_id: string; workspace_id: string; change_seq: number; origin: string; tower_service_npub: string };
+  title: string;
+  body: string;
 }

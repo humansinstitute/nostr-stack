@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS flightdeck_pg_notification_transports (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   installation_id UUID NOT NULL REFERENCES flightdeck_pg_notification_installations(id) ON DELETE CASCADE,
   actor_id UUID NOT NULL REFERENCES flightdeck_pg_actors(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL CHECK (kind IN ('apns', 'webpush', 'fcm')),
+  kind TEXT NOT NULL CHECK (kind IN ('apns', 'webpush', 'fcm', 'unifiedpush')),
   address TEXT NOT NULL,
   address_hash TEXT NOT NULL,
   environment TEXT CHECK (environment IN ('sandbox', 'production')),
@@ -77,3 +77,8 @@ CREATE TABLE IF NOT EXISTS flightdeck_pg_notification_alert_attempts (
   latency_ms INTEGER,
   PRIMARY KEY (alert_id, attempt_no)
 );
+
+-- Upgrade existing registries without changing APNs data or constraints.
+ALTER TABLE flightdeck_pg_notification_transports ADD COLUMN IF NOT EXISTS webpush_keys JSONB;
+ALTER TABLE flightdeck_pg_notification_transports DROP CONSTRAINT IF EXISTS flightdeck_pg_notification_transports_kind_check;
+ALTER TABLE flightdeck_pg_notification_transports ADD CONSTRAINT flightdeck_pg_notification_transports_kind_check CHECK (kind IN ('apns', 'webpush', 'fcm', 'unifiedpush'));

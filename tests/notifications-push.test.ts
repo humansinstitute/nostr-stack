@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import postgres from 'postgres';
 import http2 from 'node:http2';
-import { createHash, generateKeyPairSync, randomBytes, randomUUID, verify } from 'node:crypto';
+import { createHash, createECDH, generateKeyPairSync, randomBytes, randomUUID, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { setDb } from '../src/db';
@@ -128,6 +128,71 @@ describe.skipIf(!port || port === 5432)('notification push delivery against disp
   });
   beforeEach(() => { configure(); resetApnsJwtCache(); });
 
+  test('UnifiedPush registry ownership, encrypted sender inputs, retries, late checks and independent circuit', async () => {
+    const envNames = ['UNIFIEDPUSH_VAPID_PUBLIC_KEY','UNIFIEDPUSH_VAPID_PRIVATE_KEY','UNIFIEDPUSH_VAPID_SUBJECT','UNIFIEDPUSH_ALLOWED_ORIGINS'];
+    const saved = envNames.map(n => process.env[n]);
+    const keys = createECDH('prime256v1'); keys.generateKeys();
+    Object.assign(process.env, { UNIFIEDPUSH_VAPID_PUBLIC_KEY: keys.getPublicKey().toString('base64url'), UNIFIEDPUSH_VAPID_PRIVATE_KEY: keys.getPrivateKey().toString('base64url'), UNIFIEDPUSH_VAPID_SUBJECT: 'mailto:test@example.com', UNIFIEDPUSH_ALLOWED_ORIGINS: 'https://push.example' });
+    try {
+      await freshBob();
+      const id = randomUUID(), other = randomUUID();
+      const enrollment = { client_app_id: 'ambulando', platform: 'android', permission_state: 'granted' };
+      expect((await n(`/installations/${id}`, 'PUT', 2, enrollment)).status).toBe(200);
+      const input = { endpoint: 'https://push.example/private-endpoint', keys: { p256dh: keys.getPublicKey().toString('base64url'), auth: randomBytes(16).toString('base64url') }, preview: 'generic' };
+      const put = (installation: string, actor: number, value = input) => n(`/installations/${installation}/transports/unifiedpush`, 'PUT', actor, value);
+      await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,permission) VALUES(${w1},'actor',${actors[2]!},'workspace','workspace.read')`;
+      const descriptor = await call(`${base()}/descriptor`, 'GET', 2);
+      expect(descriptor.status).toBe(200); expect(descriptor.body.notifications.transport_status.unifiedpush).toMatchObject({ready:true,vapid_public_key:keys.getPublicKey().toString('base64url')});
+      const registered = await put(id,2); expect(registered.status).toBe(200); expect(registered.body.delivery.ready).toBe(true);
+      expect(registered.text).not.toContain('private-endpoint'); expect(registered.text).not.toContain(input.keys.auth); expect(registered.text).not.toContain('token_suffix');
+      expect((await put(id,3)).body.code).toBe('installation_owned');
+      expect((await n(`/installations/${other}`, 'PUT', 3, enrollment)).status).toBe(200);
+      expect((await put(other,3)).body.code).toBe('transport_owned');
+      // One endpoint per installation, and a moved endpoint cannot carry pending alerts to its next installation.
+      const renewed = await put(id,2); expect(renewed.status).toBe(200);
+      unconfigure(); // UnifiedPush must work with APNs absent.
+      await ping();
+      const calls: any[] = [];
+      const sender = async (_config: any, value: any) => { calls.push(value); return {status:201,retryAfterMs:null}; };
+      expect((await processAlertBatch({sql:db,unifiedSender:sender})).sent).toBe(1);
+      const payload = JSON.parse(calls[0].body); expect(payload.fd).toMatchObject({v:1,workspace_id:w1,origin:'https://tower.example',tower_service_npub:'tower-push'});
+      expect(calls[0].body).not.toContain('secret body'); expect(payload.title).toBe('New notification');
+      await ping();
+      expect((await processAlertBatch({sql:db,unifiedSender:async()=>({status:429,retryAfterMs:1000})})).retried).toBe(1);
+      await db`UPDATE flightdeck_pg_notification_alerts SET next_attempt_at=NOW() WHERE state='failed'`;
+      expect((await processAlertBatch({sql:db,unifiedSender:async()=>({status:410,retryAfterMs:null})})).dead).toBe(1);
+      expect((await db`SELECT status FROM flightdeck_pg_notification_transports WHERE kind='unifiedpush' AND installation_id=${id}`)[0]!.status).toBe('stale');
+      await put(id,2); await ping();
+      await db`UPDATE flightdeck_pg_notification_items SET read_at=NOW() WHERE id IN (SELECT item_id FROM flightdeck_pg_notification_alerts WHERE state='pending')`;
+      expect((await processAlertBatch({sql:db,unifiedSender:sender})).suppressed).toBe(1);
+      for (const mutation of ['permission', 'lease', 'enrollment', 'audience', 'membership', 'acl']) {
+        await ping();
+        if(mutation==='permission') await db`UPDATE flightdeck_pg_notification_installations SET permission_state='denied' WHERE id=${id}`;
+        if(mutation==='lease') await db`UPDATE flightdeck_pg_notification_transports SET lease_expires_at=NOW()-INTERVAL '1 second' WHERE installation_id=${id}`;
+        if(mutation==='enrollment') await db`UPDATE flightdeck_pg_notification_installations SET enrolled_workspace_ids='{}' WHERE id=${id}`;
+        if(mutation==='audience') await db`UPDATE flightdeck_pg_notification_items SET audience_client_apps=ARRAY['other'] WHERE id IN (SELECT item_id FROM flightdeck_pg_notification_alerts WHERE state='pending')`;
+        if(mutation==='membership') await db`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${w1} AND actor_id=${actors[2]!}`;
+        if(mutation==='acl') await db`DELETE FROM flightdeck_pg_permission_grants WHERE workspace_id=${w1} AND principal_actor_id=${actors[2]!}`;
+        const before=calls.length; const checked = await processAlertBatch({sql:db,unifiedSender:sender}); expect({mutation,suppressed:checked.suppressed}).toEqual({mutation,suppressed:1}); expect(calls.length).toBe(before);
+        if(mutation==='membership') { await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${w1},${actors[2]!},'member')`; await grant(actors[2]!,ch1,'channel.read'); }
+        if(mutation==='acl') await grant(actors[2]!,ch1,'channel.read');
+        await n(`/installations/${id}`,'PUT',2,enrollment); await put(id,2);
+      }
+      await ping(); expect((await processAlertBatch({sql:db,unifiedSender:async()=>({status:403,retryAfterMs:null})})).retried).toBe(1);
+      expect(alertStatus.unifiedpushBreakerOpenUntil).toBeGreaterThan(Date.now()); expect(alertStatus.breakerOpenUntil).toBe(0);
+      configure(); const apns = await register(2,randomUUID(),token()); expect(apns.status).toBe(200); await ping();
+      expect((await processAlertBatch({sql:db,sender:sendOk})).sent).toBeGreaterThan(0);
+      expect((await n(`/installations/${id}/transports/unifiedpush`,'DELETE',2)).status).toBe(200);
+    } finally {
+      envNames.forEach((n,i)=> { if(saved[i]===undefined) delete process.env[n]; else process.env[n]=saved[i]; });
+      await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${w1},${actors[2]!},'member') ON CONFLICT DO NOTHING`;
+      await db`DELETE FROM flightdeck_pg_permission_grants WHERE workspace_id=${w1} AND principal_actor_id=${actors[2]!}`;
+      await grant(actors[2]!,ch1,'channel.read');
+      alertStatus.unifiedpushBreakerOpenUntil=0;
+      await db`DELETE FROM flightdeck_pg_notification_alerts`; await db`UPDATE flightdeck_pg_notification_transports SET status='revoked'`;
+    }
+  });
+
   test('schema is idempotent; an upgraded database starts with no alerts', async () => {
     await ensureRuntimeSchema(db); await ensureRuntimeSchema(db);
     expect((await db`SELECT COUNT(*)::int AS c FROM flightdeck_pg_notification_alerts`)[0]!.c).toBe(0);
@@ -135,7 +200,7 @@ describe.skipIf(!port || port === 5432)('notification push delivery against disp
 
   test('without provider config: registry works, readiness is explicit, nothing is queued or sent', async () => {
     unconfigure();
-    expect(transportAdvertisement()).toMatchObject({ alerts: false, transports: ['apns'], transport_status: { apns: { ready: false, reason: 'provider_not_configured' } } });
+    expect(transportAdvertisement()).toMatchObject({ alerts: false, transports: ['apns', 'unifiedpush'], transport_status: { apns: { ready: false, reason: 'provider_not_configured' } } });
     const installation = randomUUID();
     const res = await register(2, installation, token());
     expect(res.status).toBe(200);

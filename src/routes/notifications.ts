@@ -1,3 +1,4 @@
+import { parseUnifiedPushInput } from '../services/notification-unifiedpush';
 import { getChannelPreferences, putChannelPreference } from '../services/notification-channel-preferences';
 import type { Context, Hono } from 'hono';
 import { requireNip98AuthResolved } from '../auth';
@@ -13,7 +14,7 @@ import {
   getProducerEvent, grantSummary, ingestProducerEvent, listSources, resolveProducerGrant, setSourceStatus, upsertSource, type SourceInput,
 } from '../services/notification-producers';
 import {
-  parseApnsInput, parseInstallationInput, putApnsTransport, putInstallation, removeEnrollment, revokeTransport,
+  parseApnsInput, parseInstallationInput, putApnsTransport, putUnifiedPushTransport, putInstallation, removeEnrollment, revokeTransport,
 } from '../services/notification-registry';
 import { queueStats } from '../services/notification-worker';
 
@@ -270,14 +271,19 @@ export function registerNotificationRoutes(router: Hono) {
 
   const transportKind = (c: Context) => {
     const kind = c.req.param('kind');
-    if (kind === 'apns') return kind;
+    if (kind === 'apns' || kind === 'unifiedpush') return kind;
     if (kind === 'webpush' || kind === 'fcm') throw new NotificationError(400, 'transport_not_implemented', `Transport ${kind} is not implemented on this Tower`);
-    throw new NotificationError(400, 'validation_error', 'kind must be apns, webpush or fcm');
+    throw new NotificationError(400, 'validation_error', 'kind must be apns, unifiedpush, webpush or fcm');
   };
 
   router.put(`${base}/installations/:installationId/transports/:kind`, pushConsumer(async (ctx) => {
-    transportKind(ctx.c);
+    const kind = transportKind(ctx.c);
     const { body } = await readBody(ctx.c);
+    if (kind === 'unifiedpush') {
+      onlyKeys(body, ['endpoint', 'keys', 'preview', 'lease_seconds']);
+      const result = await putUnifiedPushTransport(ctx.sql, registrant(ctx), parseUnifiedPushInput(body), { implicit: null, origin: requestOrigin(ctx.c) });
+      return ctx.c.json({ identity: ctx.identity, ...result });
+    }
     onlyKeys(body, APNS_KEYS);
     const result = await putApnsTransport(ctx.sql, registrant(ctx), parseApnsInput(body), { implicit: null, origin: requestOrigin(ctx.c) });
     return ctx.c.json({ identity: ctx.identity, ...result });

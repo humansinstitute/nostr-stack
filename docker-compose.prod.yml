@@ -216,6 +216,10 @@ services:
       GIT_OIDC_REDIRECT_URI: ${GIT_OIDC_REDIRECT_URI:-}
       # APNs push provider (optional). Unset = provider_not_configured: Tower stays healthy and the inbox/registry keep working.
       # Key custody: APNS_AUTH_KEY_FILE must point under /run/tower-apns-secrets (read-only mount of TOWER_APNS_SECRETS_DIR).
+      UNIFIEDPUSH_VAPID_PUBLIC_KEY: ${UNIFIEDPUSH_VAPID_PUBLIC_KEY:-}
+      UNIFIEDPUSH_VAPID_PRIVATE_KEY: ${UNIFIEDPUSH_VAPID_PRIVATE_KEY:-}
+      UNIFIEDPUSH_VAPID_SUBJECT: ${UNIFIEDPUSH_VAPID_SUBJECT:-}
+      UNIFIEDPUSH_ALLOWED_ORIGINS: ${UNIFIEDPUSH_ALLOWED_ORIGINS:-}
       APNS_KEY_ID: ${APNS_KEY_ID:-}
       APNS_TEAM_ID: ${APNS_TEAM_ID:-}
       APNS_TOPIC: ${APNS_TOPIC:-}

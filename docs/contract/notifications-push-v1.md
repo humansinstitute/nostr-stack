@@ -9,6 +9,8 @@ All routes live under `/api/v4/flightdeck-pg`, are NIP-98 authenticated, require
 The owner of every row is the **verified NIP-98 actor** — never a body field. The public client label (`client_app_id`) is
 presentation routing only and is not an attestation.
 
+Android UnifiedPush is specified in [UnifiedPush transport v1](notifications-unifiedpush-v1.md), including independent configuration and SSRF controls.
+
 ## 1. Registry routes
 
 Workspace-scoped (canonical):
@@ -17,7 +19,7 @@ Workspace-scoped (canonical):
 |---|---|
 | `PUT /workspaces/:w/notifications/installations/:installationId` | Register/update an installation for the caller and **enroll workspace `w`**. |
 | `DELETE /workspaces/:w/notifications/installations/:installationId` | Remove workspace `w` from the enrollment. When no workspace remains, the installation and all its transports are `revoked`. `404 installation_not_found` when the caller has no active row. |
-| `PUT /workspaces/:w/notifications/installations/:installationId/transports/:kind` | Register/renew a transport (`kind` = `apns`). Requires `w` enrolled (PUT the installation first). |
+| `PUT /workspaces/:w/notifications/installations/:installationId/transports/:kind` | Register/renew a transport (`kind` = `apns` or `unifiedpush`). Requires `w` enrolled (PUT the installation first). |
 | `DELETE /workspaces/:w/notifications/installations/:installationId/transports/:kind` | Revoke the transport (all workspaces: a push address is installation-wide). `404` when none active. |
 
 Compatibility alias (the path shipped Apple clients call; installation is created implicitly):

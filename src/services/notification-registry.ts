@@ -1,3 +1,4 @@
+import { loadUnifiedPushConfig, type UnifiedPushInput } from './notification-unifiedpush';
 import { createHash } from 'node:crypto';
 import { NotificationError, type Sql } from './notification-core';
 import { loadApnsConfig, normalizeApnsEnvironment, type ApnsEnvironment } from './notification-apns';
@@ -85,7 +86,7 @@ export function serializeInstallation(row: InstallationRow) {
 export function serializeTransport(row: TransportRow) {
   return {
     installation_id: row.installation_id, kind: row.kind, environment: row.environment, bundle_id: row.bundle_id, preview: row.preview,
-    status: row.status, token_suffix: row.address.slice(-6), lease_expires_at: iso(row.lease_expires_at),
+    status: row.status, ...(row.kind === 'apns' ? { token_suffix: row.address.slice(-6) } : {}), lease_expires_at: iso(row.lease_expires_at),
   };
 }
 
@@ -119,7 +120,7 @@ export async function putInstallation(sql: Sql, r: Registrant, input: Installati
     const tx = raw as unknown as Sql;
     const installation = await upsertInstallation(tx, r, input, { client_app_id: input.client_app_id!, platform: input.platform! });
     const [transport] = await tx<TransportRow[]>`SELECT * FROM flightdeck_pg_notification_transports WHERE installation_id = ${installation.id} AND kind = 'apns' AND status = 'active'`;
-    return { installation: serializeInstallation(installation), delivery: deliveryState(installation, transport ?? null) };
+    return { installation: serializeInstallation(installation), delivery: installation.platform === 'android' ? unifiedPushDeliveryState(installation, null) : deliveryState(installation, transport ?? null) };
   });
 }
 
@@ -225,19 +226,79 @@ export async function putApnsTransport(
   });
 }
 
+export async function putUnifiedPushTransport(
+  sql: Sql, r: Registrant, input: UnifiedPushInput, opts: { implicit: null; origin: string | null },
+) {
+  const hash = createHash('sha256').update(input.endpoint).digest('hex');
+  const origin = opts.origin?.startsWith('https://') ? opts.origin : null;
+  return sql.begin(async (raw) => {
+    const tx = raw as unknown as Sql;
+    let installation: InstallationRow;
+    const [installationRow] = await tx<InstallationRow[]>`SELECT * FROM flightdeck_pg_notification_installations WHERE id = ${r.installationId} FOR UPDATE`;
+    if (!installationRow || installationRow.status !== 'active') throw new NotificationError(404, 'installation_not_found', 'Register the installation first');
+    if (installationRow.actor_id !== r.actorId) throw new NotificationError(409, 'installation_owned', 'Installation id belongs to another actor');
+    if (!installationRow.enrolled_workspace_ids.includes(r.workspaceId)) throw new NotificationError(409, 'workspace_not_enrolled', 'Installation is not enrolled in this workspace');
+    if (installationRow.platform !== 'android' || installationRow.client_app_id !== 'ambulando') throw bad('UnifiedPush requires an android/ambulando installation');
+    installation = installationRow;
+
+    const [existing] = await tx<TransportRow[]>`SELECT * FROM flightdeck_pg_notification_transports WHERE kind = 'unifiedpush' AND address_hash = ${hash} FOR UPDATE`;
+    if (existing && existing.actor_id !== r.actorId) {
+      const live = existing.status === 'active' && new Date(existing.lease_expires_at).getTime() > Date.now();
+      if (live) {
+        await tx`INSERT INTO flightdeck_pg_notification_audit (workspace_id, signer_npub, action, outcome, error_code) VALUES (${r.workspaceId}, ${r.signerNpub}, 'transport_register', 'rejected', 'transport_owned')`;
+        throw new NotificationError(409, 'transport_owned', 'This device token is registered to another actor');
+      }
+    }
+
+    // One active transport per installation: the new registration supersedes the old one.
+    const superseded = await tx<{ id: string }[]>`
+      UPDATE flightdeck_pg_notification_transports SET status = 'revoked', updated_at = NOW()
+      WHERE installation_id = ${installation.id} AND kind = 'unifiedpush' AND status = 'active' AND id IS DISTINCT FROM ${existing?.id ?? null}::uuid RETURNING id`;
+    await suppressPending(tx, { transportIds: superseded.map((t) => t.id) }, 'transport_revoked');
+
+    let row: TransportRow;
+    if (existing) {
+      // Pending alerts addressed to a previous owner or installation must not follow the token.
+      if (existing.actor_id !== r.actorId || existing.installation_id !== installation.id) await suppressPending(tx, { transportIds: [existing.id] }, 'transport_owner_changed');
+      [row] = await tx<TransportRow[]>`
+        UPDATE flightdeck_pg_notification_transports SET
+          installation_id = ${installation.id}, actor_id = ${r.actorId}, address = ${input.endpoint}, environment = ${null}, bundle_id = ${null}, webpush_keys = ${tx.json(input.keys)},
+          preview = ${input.preview}, registered_origin = ${origin}, lease_expires_at = NOW() + make_interval(secs => ${input.lease_seconds}),
+          status = 'active', failure_count = 0, updated_at = NOW()
+        WHERE id = ${existing.id} RETURNING *`;
+    } else {
+      [row] = await tx<TransportRow[]>`
+        INSERT INTO flightdeck_pg_notification_transports (installation_id, actor_id, kind, address, address_hash, environment, bundle_id, preview, registered_origin, lease_expires_at, webpush_keys)
+        VALUES (${installation.id}, ${r.actorId}, 'unifiedpush', ${input.endpoint}, ${hash}, ${null}, ${null}, ${input.preview}, ${origin}, NOW() + make_interval(secs => ${input.lease_seconds}), ${tx.json(input.keys)})
+        RETURNING *`;
+    }
+    return { installation: serializeInstallation(installation), device: serializeTransport(row!), delivery: unifiedPushDeliveryState(installation, origin) };
+  });
+}
+
 /** Content-free transport readiness for the workspace descriptor. */
 export function transportAdvertisement() {
+  const unifiedpush = loadUnifiedPushConfig();
   const readiness = loadApnsConfig();
   return {
-    transports: ['apns'],
-    alerts: readiness.ready,
+    transports: ['apns', 'unifiedpush'],
+    alerts: readiness.ready || unifiedpush.ready,
     // false: each transport must have registered over https (delivery.reason=origin_unavailable otherwise)
-    public_origin_configured: readiness.ready && readiness.config.publicOrigin !== null,
+    public_origin_configured: (readiness.ready && readiness.config.publicOrigin !== null) || (unifiedpush.ready && unifiedpush.config.publicOrigin !== null),
     transport_status: {
+      unifiedpush: unifiedpush.ready ? { ready: true, reason: null, vapid_public_key: unifiedpush.config.publicKey } : { ready: false, reason: unifiedpush.reason, vapid_public_key: null },
       apns: readiness.ready
         ? { ready: true, environments: [...readiness.config.environments] }
         : { ready: false, reason: readiness.reason, environments: [] as string[] },
     },
     push_envelope_v: 1,
   };
+}
+
+export function unifiedPushDeliveryState(installation: Pick<InstallationRow, 'permission_state'>, origin: string | null) {
+  const state = loadUnifiedPushConfig();
+  if (!state.ready) return { ready: false, reason: state.reason };
+  if (installation.permission_state !== 'granted') return { ready: false, reason: 'permission_not_granted' };
+  if (!state.config.publicOrigin && !origin?.startsWith('https://')) return { ready: false, reason: 'origin_unavailable' };
+  return { ready: true };
 }
