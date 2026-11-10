@@ -132,3 +132,6 @@ its error and branch semantics, and the separate runtime activation check.
 [Concurrent document sessions v1](docs/contract/document-concurrent-edit-v1.md)
 adds opt-in concurrent human/bot editors with persistent peer tokens, existing
 CAS/recovery saves, capability negotiation and explicit legacy-mode fencing.
+
+[Android FCM notifications v1](docs/contract/notifications-fcm-v1.md) defines the default
+Android push transport, protected Firebase configuration and generic OS alert contract.

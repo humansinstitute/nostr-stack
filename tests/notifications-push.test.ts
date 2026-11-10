@@ -128,6 +128,79 @@ describe.skipIf(!port || port === 5432)('notification push delivery against disp
   });
   beforeEach(() => { configure(); resetApnsJwtCache(); });
 
+  test('FCM ownership, token refresh, generic hint, late read/revocation checks and independent circuit', async () => {
+    const names = ['FCM_SERVICE_ACCOUNT_JSON','FCM_SERVICE_ACCOUNT_JSON_FILE','FCM_PROJECT_ID','FCM_SENDER_ID','FCM_ANDROID_PACKAGE'];
+    const saved = names.map(n => process.env[n]);
+    const key = generateKeyPairSync('rsa', {modulusLength:2048});
+    delete process.env.FCM_SERVICE_ACCOUNT_JSON_FILE;
+    Object.assign(process.env, {FCM_PROJECT_ID:'test-project',FCM_SENDER_ID:'123456789',FCM_ANDROID_PACKAGE:'studio.example.test',FCM_SERVICE_ACCOUNT_JSON:JSON.stringify({type:'service_account',project_id:'test-project',client_email:['sender','test-project.iam.gserviceaccount.com'].join('@'),private_key:key.privateKey.export({type:'pkcs8',format:'pem'}).toString()})});
+    try {
+      await freshBob();
+      // Retire APNs so this test can prove FCM works with no Apple configuration.
+      await db`UPDATE flightdeck_pg_notification_transports SET status='revoked'`;
+      unconfigure();
+      const id = randomUUID(), other = randomUUID();
+      const enrollment = {client_app_id:'ambulando',platform:'android',permission_state:'granted'};
+      const input = {device_token:'private-fcm-device-token-123456',project_id:'test-project',sender_id:'123456789',package_name:'studio.example.test'};
+      const put = (installation=id, actor=2, value=input) => n(`/installations/${installation}/transports/fcm`,'PUT',actor,value);
+      expect((await n(`/installations/${id}`,'PUT',2,enrollment)).status).toBe(200);
+      const registered = await put();expect(registered.status).toBe(200);expect(registered.body.delivery.ready).toBe(true);
+      expect(registered.text).not.toContain(input.device_token);expect(registered.text).not.toContain('token_suffix');
+      expect((await put(id,3)).body.code).toBe('installation_owned');
+      expect((await n(`/installations/${other}`,'PUT',3,enrollment)).status).toBe(200);
+      expect((await put(other,3)).body.code).toBe('transport_owned');
+      expect((await put(id,2,{...input,sender_id:'999999999'})).body.code).toBe('provider_mismatch');
+      const second = id;
+      const w2 = (await db`INSERT INTO flightdeck_pg_workspaces(tower_service_npub,workspace_service_npub,workspace_owner_npub,app_npub,name) VALUES('tower-fcm2','service-fcm2',${npubs[0]!},'app','Second') RETURNING id`)[0]!.id;
+      await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${w2},${actors[2]!},'member')`;
+      const secondBase = `/api/v4/flightdeck-pg/workspaces/${w2}/notifications/installations/${second}`;
+      expect((await call(secondBase,'PUT',2,enrollment)).status).toBe(200);
+      expect((await call(`${secondBase}/transports/fcm`,'PUT',2,input)).status).toBe(200);
+      expect((await db`SELECT id FROM flightdeck_pg_notification_transports WHERE kind='fcm' AND address=${input.device_token} AND status='active'`).length).toBe(1);
+      const unenrolled = await call(secondBase,'DELETE',2);expect(unenrolled.status).toBe(200);expect(unenrolled.body.remaining_workspace_ids).toEqual([w1]);
+      expect((await db`SELECT id FROM flightdeck_pg_notification_transports WHERE kind='fcm' AND installation_id=${id} AND status='active'`).length).toBe(1);
+      await ping();
+      const calls:any[]=[];const sender:any=async (_config:any,value:any)=>{calls.push(value);return {status:200,code:null,retryAfterMs:null};};
+      expect((await processAlertBatch({sql:db,fcmSender:sender})).sent).toBe(1);
+      expect(calls[0]).toMatchObject({installationId:id,token:input.device_token,content:{workspaceId:w1,preview:null}});
+      const items=await db`SELECT read_at FROM flightdeck_pg_notification_items WHERE recipient_actor_id=${actors[2]!}`;
+      expect(items.some(i=>i.read_at===null)).toBe(true);
+      await ping();
+      const next={...input,device_token:'private-fcm-refreshed-token-123456'};
+      expect((await put(id,2,next)).status).toBe(200);
+      expect((await db`SELECT COUNT(*)::int AS n FROM flightdeck_pg_notification_alerts WHERE state='pending'`)[0]!.n).toBe(0);
+      await ping();expect((await processAlertBatch({sql:db,fcmSender:sender})).sent).toBe(1);expect(calls.at(-1).token).toBe(next.device_token);
+      await ping();await db`UPDATE flightdeck_pg_notification_items SET read_at=NOW() WHERE id IN (SELECT item_id FROM flightdeck_pg_notification_alerts WHERE state='pending')`;
+      expect((await processAlertBatch({sql:db,fcmSender:sender})).suppressed).toBe(1);
+      for(const mutation of ['permission','lease','enrollment','audience','membership','acl','project']) {
+        await ping();
+        if(mutation==='permission')await db`UPDATE flightdeck_pg_notification_installations SET permission_state='denied' WHERE id=${id}`;
+        if(mutation==='lease')await db`UPDATE flightdeck_pg_notification_transports SET lease_expires_at=NOW()-INTERVAL '1 second' WHERE installation_id=${id}`;
+        if(mutation==='enrollment')await db`UPDATE flightdeck_pg_notification_installations SET enrolled_workspace_ids='{}' WHERE id=${id}`;
+        if(mutation==='audience')await db`UPDATE flightdeck_pg_notification_items SET audience_client_apps=ARRAY['other'] WHERE id IN (SELECT item_id FROM flightdeck_pg_notification_alerts WHERE state='pending')`;
+        if(mutation==='membership')await db`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${w1} AND actor_id=${actors[2]!}`;
+        if(mutation==='acl')await db`DELETE FROM flightdeck_pg_permission_grants WHERE workspace_id=${w1} AND principal_actor_id=${actors[2]!}`;
+        if(mutation==='project')process.env.FCM_SENDER_ID='999999999';
+        const before=calls.length;expect({mutation,suppressed:(await processAlertBatch({sql:db,fcmSender:sender})).suppressed}).toEqual({mutation,suppressed:1});expect(calls.length).toBe(before);
+        process.env.FCM_SENDER_ID='123456789';
+        if(mutation==='membership'){await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${w1},${actors[2]!},'member')`;await grant(actors[2]!,ch1,'channel.read');}
+        if(mutation==='acl')await grant(actors[2]!,ch1,'channel.read');
+        await n(`/installations/${id}`,'PUT',2,enrollment);await put(id,2,next);
+      }
+      await ping();expect((await processAlertBatch({sql:db,fcmSender:async()=>({status:429,code:'QUOTA_EXCEEDED',retryAfterMs:1000})})).retried).toBe(1);
+      const [retry]=await db`SELECT next_attempt_at FROM flightdeck_pg_notification_alerts WHERE state='failed'`;expect(new Date(retry!.next_attempt_at).getTime()-Date.now()).toBeGreaterThan(59000);
+      await db`UPDATE flightdeck_pg_notification_alerts SET next_attempt_at=NOW() WHERE state='failed'`;
+      expect((await processAlertBatch({sql:db,fcmSender:async()=>({status:400,code:'INVALID_ARGUMENT',retryAfterMs:null})})).dead).toBe(1);
+      expect((await db`SELECT status FROM flightdeck_pg_notification_transports WHERE installation_id=${id} AND kind='fcm' AND status='active'`).length).toBe(1);
+      await ping();expect((await processAlertBatch({sql:db,fcmSender:async()=>({status:404,code:'UNREGISTERED',retryAfterMs:null})})).dead).toBe(1);
+      expect((await db`SELECT status FROM flightdeck_pg_notification_transports WHERE installation_id=${id} AND address=${next.device_token}`)[0]!.status).toBe('stale');
+      await put(id,2,next);await ping();expect((await processAlertBatch({sql:db,fcmSender:async()=>({status:403,code:'SENDER_ID_MISMATCH',retryAfterMs:null})})).retried).toBe(1);
+      expect(alertStatus.fcmBreakerOpenUntil).toBeGreaterThan(Date.now());expect(alertStatus.breakerOpenUntil).toBe(0);expect(alertStatus.unifiedpushBreakerOpenUntil).toBe(0);
+      configure();await register(2,randomUUID(),token());await ping();expect((await processAlertBatch({sql:db,sender:sendOk})).sent).toBeGreaterThan(0);
+      expect((await n(`/installations/${id}/transports/fcm`,'DELETE',2)).status).toBe(200);
+    } finally {names.forEach((n,i)=>{if(saved[i]===undefined)delete process.env[n];else process.env[n]=saved[i];});alertStatus.fcmBreakerOpenUntil=0;}
+  });
+
   test('UnifiedPush registry ownership, encrypted sender inputs, retries, late checks and independent circuit', async () => {
     const envNames = ['UNIFIEDPUSH_VAPID_PUBLIC_KEY','UNIFIEDPUSH_VAPID_PRIVATE_KEY','UNIFIEDPUSH_VAPID_SUBJECT','UNIFIEDPUSH_ALLOWED_ORIGINS'];
     const saved = envNames.map(n => process.env[n]);
@@ -200,7 +273,7 @@ describe.skipIf(!port || port === 5432)('notification push delivery against disp
 
   test('without provider config: registry works, readiness is explicit, nothing is queued or sent', async () => {
     unconfigure();
-    expect(transportAdvertisement()).toMatchObject({ alerts: false, transports: ['apns', 'unifiedpush'], transport_status: { apns: { ready: false, reason: 'provider_not_configured' } } });
+    expect(transportAdvertisement()).toMatchObject({ alerts: false, transports: ['apns', 'unifiedpush', 'fcm'], transport_status: { apns: { ready: false, reason: 'provider_not_configured' } } });
     const installation = randomUUID();
     const res = await register(2, installation, token());
     expect(res.status).toBe(200);
@@ -260,7 +333,7 @@ describe.skipIf(!port || port === 5432)('notification push delivery against disp
     expect((await register(2, installation, token(), { bundle_id: 'com.other.app' })).body.code).toBe('bundle_not_allowed');
     expect((await register(2, installation, token(), { lease_seconds: 99999999 })).status).toBe(400);
     expect((await n(`/apns-devices/${installation}`, 'PUT', 2, { ...apnsBody(token()), extra: 1 })).status).toBe(400);
-    expect((await n(`/installations/${installation}/transports/fcm`, 'PUT', 2, transportBody(token()))).body.code).toBe('transport_not_implemented');
+    expect((await n(`/installations/${installation}/transports/webpush`, 'PUT', 2, transportBody(token()))).body.code).toBe('transport_not_implemented');
 
     // revoke, then the released token may be claimed by someone else
     const del = await call(`${base()}/notifications/apns-devices/${installation}`, 'DELETE', 2);
@@ -741,7 +814,7 @@ describe.skipIf(!port || port === 5432)('notification push delivery against disp
       expect(doc.paths[`/api/v4/flightdeck-pg/workspaces/{workspaceId}/notifications/${path}`]).toBeTruthy();
     }
     expect(transportAdvertisement()).toMatchObject({ alerts: true, transport_status: { apns: { ready: true, environments: ['sandbox', 'production'] } } });
-    expect(transportAdvertisement().transports).not.toContain('fcm');
+    expect(transportAdvertisement().transports).toContain('fcm');
     const queue = await call(`${base()}/admin/notifications/queue`, 'GET', 0);
     expect(queue.status === 200 || queue.status === 403).toBe(true);
   });

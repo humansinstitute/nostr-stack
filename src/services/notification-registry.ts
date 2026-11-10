@@ -1,3 +1,4 @@
+import { loadFcmConfig, type FcmInput } from './notification-fcm';
 import { loadUnifiedPushConfig, type UnifiedPushInput } from './notification-unifiedpush';
 import { createHash } from 'node:crypto';
 import { NotificationError, type Sql } from './notification-core';
@@ -119,8 +120,10 @@ export async function putInstallation(sql: Sql, r: Registrant, input: Installati
   return sql.begin(async (raw) => {
     const tx = raw as unknown as Sql;
     const installation = await upsertInstallation(tx, r, input, { client_app_id: input.client_app_id!, platform: input.platform! });
-    const [transport] = await tx<TransportRow[]>`SELECT * FROM flightdeck_pg_notification_transports WHERE installation_id = ${installation.id} AND kind = 'apns' AND status = 'active'`;
-    return { installation: serializeInstallation(installation), delivery: installation.platform === 'android' ? unifiedPushDeliveryState(installation, null) : deliveryState(installation, transport ?? null) };
+    const [transport] = await tx<TransportRow[]>`SELECT * FROM flightdeck_pg_notification_transports WHERE installation_id = ${installation.id} AND status = 'active' ORDER BY CASE kind WHEN 'fcm' THEN 0 WHEN 'unifiedpush' THEN 1 ELSE 2 END LIMIT 1`;
+    const origin = (transport as (TransportRow & { registered_origin?: string }) | undefined)?.registered_origin ?? null;
+    const delivery = installation.platform === 'android' ? (transport?.kind === 'unifiedpush' ? unifiedPushDeliveryState(installation, origin) : fcmDeliveryState(installation, origin)) : deliveryState(installation, transport ?? null);
+    return { installation: serializeInstallation(installation), delivery };
   });
 }
 
@@ -276,16 +279,66 @@ export async function putUnifiedPushTransport(
   });
 }
 
+export async function putFcmTransport(
+  sql: Sql, r: Registrant, input: FcmInput, opts: { implicit: null; origin: string | null },
+) {
+  const hash = createHash('sha256').update(input.device_token).digest('hex');
+  const origin = opts.origin?.startsWith('https://') ? opts.origin : null;
+  return sql.begin(async (raw) => {
+    const tx = raw as unknown as Sql;
+    // Serialize claims for this token, including concurrent inserts with no row yet.
+    await tx`SELECT pg_advisory_xact_lock(${BigInt.asIntN(64, BigInt('0x' + hash.slice(0,16))).toString()}::bigint)`;
+    let installation: InstallationRow;
+    const [installationRow] = await tx<InstallationRow[]>`SELECT * FROM flightdeck_pg_notification_installations WHERE id = ${r.installationId} FOR UPDATE`;
+    if (!installationRow || installationRow.status !== 'active') throw new NotificationError(404, 'installation_not_found', 'Register the installation first');
+    if (installationRow.actor_id !== r.actorId) throw new NotificationError(409, 'installation_owned', 'Installation id belongs to another actor');
+    if (!installationRow.enrolled_workspace_ids.includes(r.workspaceId)) throw new NotificationError(409, 'workspace_not_enrolled', 'Installation is not enrolled in this workspace');
+    if (installationRow.platform !== 'android' || installationRow.client_app_id !== 'ambulando') throw bad('FCM requires an android/ambulando installation');
+    installation = installationRow;
+
+    const [existing] = await tx<TransportRow[]>`SELECT * FROM flightdeck_pg_notification_transports WHERE kind = 'fcm' AND address_hash = ${hash} FOR UPDATE`;
+    if (existing && existing.actor_id !== r.actorId && existing.status === 'active' && new Date(existing.lease_expires_at).getTime() > Date.now()) {
+      throw new NotificationError(409, 'transport_owned', 'This device token is registered to another actor');
+    }
+
+    // One active transport per installation: the new registration supersedes the old one.
+    const superseded = await tx<{ id: string }[]>`
+      UPDATE flightdeck_pg_notification_transports SET status = 'revoked', updated_at = NOW()
+      WHERE installation_id = ${installation.id} AND kind = 'fcm' AND status = 'active' AND id IS DISTINCT FROM ${existing?.id ?? null}::uuid RETURNING id`;
+    await suppressPending(tx, { transportIds: superseded.map((t) => t.id) }, 'transport_revoked');
+
+    let row: TransportRow;
+    if (existing) {
+      // Pending alerts addressed to a previous owner or installation must not follow the token.
+      if (existing.actor_id !== r.actorId || existing.installation_id !== installation.id) await suppressPending(tx, { transportIds: [existing.id] }, 'transport_owner_changed');
+      [row] = await tx<TransportRow[]>`
+        UPDATE flightdeck_pg_notification_transports SET
+          installation_id = ${installation.id}, actor_id = ${r.actorId}, address = ${input.device_token}, environment = ${null}, bundle_id = ${null}, fcm_metadata = ${tx.json({ project_id: input.project_id, sender_id: input.sender_id, package_name: input.package_name })},
+          preview = ${input.preview}, registered_origin = ${origin}, lease_expires_at = NOW() + make_interval(secs => ${input.lease_seconds}),
+          status = 'active', failure_count = 0, updated_at = NOW()
+        WHERE id = ${existing.id} RETURNING *`;
+    } else {
+      [row] = await tx<TransportRow[]>`
+        INSERT INTO flightdeck_pg_notification_transports (installation_id, actor_id, kind, address, address_hash, environment, bundle_id, preview, registered_origin, lease_expires_at, fcm_metadata)
+        VALUES (${installation.id}, ${r.actorId}, 'fcm', ${input.device_token}, ${hash}, ${null}, ${null}, ${input.preview}, ${origin}, NOW() + make_interval(secs => ${input.lease_seconds}), ${tx.json({ project_id: input.project_id, sender_id: input.sender_id, package_name: input.package_name })})
+        RETURNING *`;
+    }
+    return { installation: serializeInstallation(installation), device: serializeTransport(row!), delivery: fcmDeliveryState(installation, origin) };
+  });
+}
+
 /** Content-free transport readiness for the workspace descriptor. */
 export function transportAdvertisement() {
   const unifiedpush = loadUnifiedPushConfig();
+  const fcm = loadFcmConfig();
   const readiness = loadApnsConfig();
   return {
-    transports: ['apns', 'unifiedpush'],
-    alerts: readiness.ready || unifiedpush.ready,
+    transports: ['apns', 'unifiedpush', 'fcm'],
+    alerts: readiness.ready || unifiedpush.ready || fcm.ready,
     // false: each transport must have registered over https (delivery.reason=origin_unavailable otherwise)
-    public_origin_configured: (readiness.ready && readiness.config.publicOrigin !== null) || (unifiedpush.ready && unifiedpush.config.publicOrigin !== null),
+    public_origin_configured: (fcm.ready && fcm.config.publicOrigin !== null) || (readiness.ready && readiness.config.publicOrigin !== null) || (unifiedpush.ready && unifiedpush.config.publicOrigin !== null),
     transport_status: {
+      fcm: fcm.ready ? { ready: true, reason: null, project_id: fcm.config.projectId, sender_id: fcm.config.senderId, package_name: fcm.config.packageName } : { ready: false, reason: fcm.reason, project_id: null, sender_id: null, package_name: null },
       unifiedpush: unifiedpush.ready ? { ready: true, reason: null, vapid_public_key: unifiedpush.config.publicKey } : { ready: false, reason: unifiedpush.reason, vapid_public_key: null },
       apns: readiness.ready
         ? { ready: true, environments: [...readiness.config.environments] }
@@ -297,6 +350,14 @@ export function transportAdvertisement() {
 
 export function unifiedPushDeliveryState(installation: Pick<InstallationRow, 'permission_state'>, origin: string | null) {
   const state = loadUnifiedPushConfig();
+  if (!state.ready) return { ready: false, reason: state.reason };
+  if (installation.permission_state !== 'granted') return { ready: false, reason: 'permission_not_granted' };
+  if (!state.config.publicOrigin && !origin?.startsWith('https://')) return { ready: false, reason: 'origin_unavailable' };
+  return { ready: true };
+}
+
+export function fcmDeliveryState(installation: Pick<InstallationRow, 'permission_state'>, origin: string | null) {
+  const state = loadFcmConfig();
   if (!state.ready) return { ready: false, reason: state.reason };
   if (installation.permission_state !== 'granted') return { ready: false, reason: 'permission_not_granted' };
   if (!state.config.publicOrigin && !origin?.startsWith('https://')) return { ready: false, reason: 'origin_unavailable' };

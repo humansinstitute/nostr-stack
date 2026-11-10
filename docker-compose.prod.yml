@@ -220,6 +220,12 @@ services:
       UNIFIEDPUSH_VAPID_PRIVATE_KEY: ${UNIFIEDPUSH_VAPID_PRIVATE_KEY:-}
       UNIFIEDPUSH_VAPID_SUBJECT: ${UNIFIEDPUSH_VAPID_SUBJECT:-}
       UNIFIEDPUSH_ALLOWED_ORIGINS: ${UNIFIEDPUSH_ALLOWED_ORIGINS:-}
+      # FCM credentials may be injected by protected runtime settings or a read-only mounted file.
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FCM_SENDER_ID: ${FCM_SENDER_ID:-}
+      FCM_ANDROID_PACKAGE: ${FCM_ANDROID_PACKAGE:-}
+      FCM_SERVICE_ACCOUNT_JSON: ${FCM_SERVICE_ACCOUNT_JSON:-}
+      FCM_SERVICE_ACCOUNT_JSON_FILE: ${FCM_SERVICE_ACCOUNT_JSON_FILE:-}
       APNS_KEY_ID: ${APNS_KEY_ID:-}
       APNS_TEAM_ID: ${APNS_TEAM_ID:-}
       APNS_TOPIC: ${APNS_TOPIC:-}
@@ -236,6 +242,7 @@ services:
       - ${TOWER_GIT_SECRETS_DIR:-./.runtime/tower-git-secrets}/git-oidc-client-secret:/run/tower-git-secrets/git-oidc-client-secret:ro
       - ${TOWER_GIT_SECRETS_DIR:-./.runtime/tower-git-secrets}/git-oidc-signing-key.pem:/run/tower-git-secrets/git-oidc-signing-key.pem:ro
       # Directory mount (not a file mount): it is valid and empty when no APNs key exists, so an unconfigured Tower starts normally.
+      - ${TOWER_FCM_SECRETS_DIR:-./.runtime/tower-fcm-secrets}:/run/tower-fcm-secrets:ro
       - ${TOWER_APNS_SECRETS_DIR:-./.runtime/tower-apns-secrets}:/run/tower-apns-secrets:ro
     networks:
       default:

@@ -6,7 +6,7 @@ const workspaceParam = { name: 'workspaceId', in: 'path', required: true, schema
 const json = (schema: unknown, description = 'OK') => ({ description, content: { 'application/json': { schema } } });
 const clientApp = { name: 'client_app_id', in: 'query', description: 'Presentation filter: only items visible to this client app (audience + effective inbox rule). Never access authority.', schema: { type: 'string', pattern: '^[a-z][a-z0-9_.-]{0,63}$' } };
 const installationParam = { name: 'installationId', in: 'path', required: true, schema: uuid };
-const transportKind = { name: 'kind', in: 'path', required: true, schema: { enum: ['apns', 'unifiedpush'], description: 'webpush and fcm are rejected with 400 transport_not_implemented' } };
+const transportKind = { name: 'kind', in: 'path', required: true, schema: { enum: ['apns', 'unifiedpush', 'fcm'], description: 'webpush is rejected with 400 transport_not_implemented' } };
 const tags = ['Notifications'];
 const security = [{ nip98: [] }];
 const op = (summary: string, extra: Record<string, unknown> = {}) => ({
@@ -23,6 +23,11 @@ const pushSchemas = {
       permission_state: { enum: ['granted', 'denied', 'unknown'] },
     },
   },
+  NotificationFcmBody: { type: 'object', additionalProperties: false, required: ['device_token', 'project_id', 'sender_id', 'package_name'], properties: {
+    device_token: { type: 'string', minLength: 20, maxLength: 4096, description: 'Sensitive device token, never echoed or logged' },
+    project_id: { type: 'string' }, sender_id: { type: 'string' }, package_name: { type: 'string' },
+    preview: { const: 'generic', default: 'generic' }, lease_seconds: { type: 'integer', minimum: 1, maximum: 2592000, default: 604800 },
+  } },
   NotificationUnifiedPushBody: { type: 'object', additionalProperties: false, required: ['endpoint', 'keys'], properties: {
     endpoint: { type: 'string', format: 'uri', maxLength: 1000, description: 'HTTPS endpoint, maximum 1000 UTF-8 bytes, on an operator-approved exact origin. No credentials, fragments or IP literals.' },
     keys: { type: 'object', additionalProperties: false, required: ['p256dh', 'auth'], properties: { p256dh: { type: 'string', description: 'Unpadded base64url uncompressed P-256 public key (65 bytes)' }, auth: { type: 'string', description: 'Unpadded base64url authentication secret (16 bytes)' } } },
@@ -42,8 +47,8 @@ const pushSchemas = {
     type: 'object', required: ['installation', 'device', 'delivery'],
     properties: {
       installation: { type: 'object', properties: { installation_id: uuid, client_app_id: { type: 'string' }, platform: { type: 'string' }, permission_state: { type: 'string' }, status: { enum: ['active', 'revoked'] }, enrolled_workspace_ids: { type: 'array', items: uuid } } },
-      device: { type: 'object', properties: { installation_id: uuid, kind: { enum: ['apns', 'unifiedpush'] }, environment: { enum: ['sandbox', 'production', null] }, bundle_id: { type: ['string', 'null'] }, preview: { enum: ['generic', 'full'] }, status: { enum: ['active', 'stale', 'revoked'] }, token_suffix: { type: 'string' }, lease_expires_at: { type: 'string', format: 'date-time' } } },
-      delivery: { type: 'object', required: ['ready'], properties: { ready: { type: 'boolean' }, reason: { enum: ['provider_not_configured', 'provider_key_invalid', 'environment_not_enabled', 'bundle_not_allowed', 'permission_not_granted', 'origin_unavailable', 'unifiedpush_not_configured', 'unifiedpush_invalid_configuration'] } } },
+      device: { type: 'object', properties: { installation_id: uuid, kind: { enum: ['apns', 'unifiedpush', 'fcm'] }, environment: { enum: ['sandbox', 'production', null] }, bundle_id: { type: ['string', 'null'] }, preview: { enum: ['generic', 'full'] }, status: { enum: ['active', 'stale', 'revoked'] }, token_suffix: { type: 'string' }, lease_expires_at: { type: 'string', format: 'date-time' } } },
+      delivery: { type: 'object', required: ['ready'], properties: { ready: { type: 'boolean' }, reason: { enum: ['provider_not_configured', 'provider_key_invalid', 'environment_not_enabled', 'bundle_not_allowed', 'permission_not_granted', 'origin_unavailable', 'unifiedpush_not_configured', 'unifiedpush_invalid_configuration', 'fcm_not_configured', 'fcm_invalid_configuration'] } } },
     },
   },
   NotificationPushRevocation: { type: 'object', required: ['revoked', 'remaining_workspace_ids'], properties: { revoked: { const: true }, remaining_workspace_ids: { type: 'array', items: uuid } } },
@@ -237,9 +242,9 @@ export const notificationPaths = {
     }),
   },
   [`${base}/notifications/installations/{installationId}/transports/{kind}`]: {
-    put: op('Register/renew an APNs or Android Ambulando UnifiedPush transport with a bounded lease', {
-      parameters: [installationParam, transportKind], requestBody: { required: true, content: { 'application/json': { schema: { oneOf: [ref('NotificationApnsBody'), ref('NotificationUnifiedPushBody')] } } } },
-      responses: { '200': json(ref('NotificationPushRegistration')), '400': err, '403': err, '404': err, '409': json(ref('ErrorResponse'), 'transport_owned | installation_owned | workspace_not_enrolled') },
+    put: op('Register/renew an APNs, Android FCM or optional UnifiedPush transport with a bounded lease', {
+      parameters: [installationParam, transportKind], requestBody: { required: true, content: { 'application/json': { schema: { oneOf: [ref('NotificationApnsBody'), ref('NotificationUnifiedPushBody'), ref('NotificationFcmBody')] } } } },
+      responses: { '200': json(ref('NotificationPushRegistration')), '400': err, '403': err, '404': err, '409': json(ref('ErrorResponse'), 'transport_owned | installation_owned | workspace_not_enrolled | provider_mismatch | transport_unavailable') },
     }),
     delete: op('Revoke the transport (pending alerts are withdrawn)', { parameters: [installationParam, transportKind], responses: { '200': json(ref('NotificationPushRevocation')), '404': err } }),
   },

@@ -2430,6 +2430,7 @@ export function buildAdvancedDashboardHtml(origin: string) {
   return superbasedDashboardHtml(preferredOrigin(origin));
 }
 
+// FCM registration and privacy-safe payload contract: docs/contract/notifications-fcm-v1.md.
 export function buildOpenApiDocument(origin: string) {
   const publicOrigin = preferredOrigin(origin);
   return {

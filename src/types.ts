@@ -3474,7 +3474,7 @@ export interface NotificationApnsRegistrationInputV1 {
 }
 export interface NotificationPushRegistrationV1 {
   installation: { installation_id: string; client_app_id: string; platform: PushPlatform; permission_state: PushPermissionState; status: 'active' | 'revoked'; enrolled_workspace_ids: string[] };
-  device: { installation_id: string; kind: 'apns'; environment: ApnsEnvironmentV1; bundle_id: string; preview: 'generic' | 'full'; status: 'active' | 'stale' | 'revoked'; token_suffix: string; lease_expires_at: string } | { installation_id: string; kind: 'unifiedpush'; environment: null; bundle_id: null; preview: 'generic'; status: 'active' | 'stale' | 'revoked'; lease_expires_at: string };
+  device: { installation_id: string; kind: 'apns'; environment: ApnsEnvironmentV1; bundle_id: string; preview: 'generic' | 'full'; status: 'active' | 'stale' | 'revoked'; token_suffix: string; lease_expires_at: string } | { installation_id: string; kind: 'unifiedpush' | 'fcm'; environment: null; bundle_id: null; preview: 'generic'; status: 'active' | 'stale' | 'revoked'; lease_expires_at: string };
   delivery: { ready: boolean; reason?: string };
 }
 /** Visible APNs alert. `fd` is routing only; no private content unless a full preview was explicitly allowed. */
@@ -3725,4 +3725,15 @@ export interface NotificationUnifiedPushEnvelopeV1 {
   fd: { v: 1; notification_id: string; workspace_id: string; change_seq: number; origin: string; tower_service_npub: string };
   title: string;
   body: string;
+}
+
+/** PUT installations/:id/transports/fcm. Server validates project identity against protected configuration. */
+export interface NotificationFcmRegistrationInputV1 {
+  device_token: string; project_id: string; sender_id: string; package_name: string;
+  preview?: 'generic'; lease_seconds?: number;
+}
+/** String-encoded as FCM data.fd; hint only, never routing or read authority. */
+export interface NotificationFcmHintV1 {
+  v: 1; installation_id: string; origin: string; tower_service_npub: string;
+  workspace_id: string; notification_id: string; change_seq: number;
 }

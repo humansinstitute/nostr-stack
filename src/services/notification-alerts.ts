@@ -1,3 +1,4 @@
+import { loadFcmConfig, sendFcm, classifyFcmResult, resetFcmOAuthCache, FcmAuthError, type FcmSender } from './notification-fcm';
 import { loadUnifiedPushConfig, sendUnifiedPush, classifyUnifiedPushResult, type UnifiedPushSender } from './notification-unifiedpush';
 import { channelActivityAllowed } from './notification-channel-preferences';
 import { randomUUID } from 'node:crypto';
@@ -22,7 +23,7 @@ export const alertsEnabled = () => (Bun.env.NOTIF_ALERTS ?? 'on').toLowerCase() 
 
 export const alertStatus = {
   running: false, lastTickAt: null as string | null, lastError: null as string | null,
-  sent: 0, suppressed: 0, failed: 0, dead: 0, breakerOpenUntil: 0, unifiedpushBreakerOpenUntil: 0,
+  sent: 0, suppressed: 0, failed: 0, dead: 0, breakerOpenUntil: 0, unifiedpushBreakerOpenUntil: 0, fcmBreakerOpenUntil: 0,
 };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -74,17 +75,18 @@ export async function enqueueAlerts(tx: Sql, itemId: string, refold: boolean): P
   if (!alertsEnabled()) return 0;
   const readiness = loadApnsConfig();
   const unified = loadUnifiedPushConfig();
-  if (!readiness.ready && !unified.ready) return 0;
+  const fcm = loadFcmConfig();
+  if (!readiness.ready && !unified.ready && !fcm.ready) return 0;
   const [item] = await tx<ItemFacts[]>`SELECT * FROM flightdeck_pg_notification_items WHERE id = ${itemId}`;
   if (!item || item.removed_at || item.read_at || item.dismissed_at || item.archived_at || item.status !== 'active') return 0;
   if (item.expires_at && new Date(item.expires_at).getTime() <= Date.now()) return 0;
   if (!await channelActivityAllowed(tx, { workspaceId: item.workspace_id, actorId: item.recipient_actor_id }, item.acl_channel_id, item.source_app_id, item.category)) return 0;
 
-  const candidates = await tx<{ kind: string; transport_id: string; client_app_id: string; environment: string; bundle_id: string; registered_origin: string | null }[]>`
-    SELECT t.kind, t.id AS transport_id, i.client_app_id, t.environment, t.bundle_id, t.registered_origin
+  const candidates = await tx<{ kind: string; transport_id: string; client_app_id: string; environment: string; bundle_id: string; registered_origin: string | null; fcm_metadata: any }[]>`
+    SELECT t.kind, t.id AS transport_id, i.client_app_id, t.environment, t.bundle_id, t.registered_origin, t.fcm_metadata
     FROM flightdeck_pg_notification_transports t
     JOIN flightdeck_pg_notification_installations i ON i.id = t.installation_id
-    WHERE t.kind IN ('apns', 'unifiedpush') AND t.status = 'active' AND t.lease_expires_at > NOW() AND t.actor_id = ${item.recipient_actor_id}
+    WHERE t.kind IN ('apns', 'unifiedpush', 'fcm') AND t.status = 'active' AND t.lease_expires_at > NOW() AND t.actor_id = ${item.recipient_actor_id}
       AND i.actor_id = ${item.recipient_actor_id} AND i.status = 'active' AND i.permission_state = 'granted'
       AND ${item.workspace_id}::uuid = ANY(i.enrolled_workspace_ids)`;
   if (!candidates.length) return 0;
@@ -96,7 +98,8 @@ export async function enqueueAlerts(tx: Sql, itemId: string, refold: boolean): P
   for (const c of candidates) {
     if (c.kind === 'apns' && (!readiness.ready || !readiness.config.environments.has(c.environment as 'sandbox' | 'production') || !readiness.config.topics.has(c.bundle_id))) continue;
     if (c.kind === 'unifiedpush' && !unified.ready) continue;
-    const publicOrigin = c.kind === 'apns' ? (readiness.ready ? readiness.config.publicOrigin : null) : (unified.ready ? unified.config.publicOrigin : null);
+    if (c.kind === 'fcm' && (!fcm.ready || !fcmMatches(c.fcm_metadata, fcm.config))) continue;
+    const publicOrigin = c.kind === 'fcm' ? (fcm.ready ? fcm.config.publicOrigin : null) : c.kind === 'apns' ? (readiness.ready ? readiness.config.publicOrigin : null) : (unified.ready ? unified.config.publicOrigin : null);
     if (!publicOrigin && !c.registered_origin?.startsWith('https://')) continue;
     if (!audienceAllows(item.audience_client_apps, c.client_app_id)) continue;
     if (resolveAlertRule(rules, item.source_app_id, item.category, c.client_app_id, fallback).mode !== 'on') continue;
@@ -175,7 +178,7 @@ type Gate = { ok: true; item: ItemFacts; transport: any; installation: any; conf
  */
 async function gate(sql: Sql, alert: Claimed, config: ApnsConfig | null): Promise<Gate> {
   const [row] = await sql<any[]>`
-    SELECT t.kind, t.webpush_keys, t.address, t.status AS t_status, t.lease_expires_at, t.actor_id AS t_actor, t.environment, t.bundle_id, t.preview AS t_preview, t.registered_origin,
+    SELECT t.installation_id, t.kind, t.fcm_metadata, t.webpush_keys, t.address, t.status AS t_status, t.lease_expires_at, t.actor_id AS t_actor, t.environment, t.bundle_id, t.preview AS t_preview, t.registered_origin,
            i.status AS i_status, i.actor_id AS i_actor, i.permission_state, i.enrolled_workspace_ids, i.client_app_id, i.platform
     FROM flightdeck_pg_notification_transports t JOIN flightdeck_pg_notification_installations i ON i.id = t.installation_id
     WHERE t.id = ${alert.transport_id}`;
@@ -186,7 +189,12 @@ async function gate(sql: Sql, alert: Claimed, config: ApnsConfig | null): Promis
   if (row.i_status !== 'active' || !row.enrolled_workspace_ids.includes(alert.workspace_id)) return { ok: false, reason: 'not_enrolled' };
   if (row.permission_state !== 'granted') return { ok: false, reason: 'permission_not_granted' };
   const unified = loadUnifiedPushConfig();
-  if (row.kind === 'unifiedpush') {
+  const fcm = loadFcmConfig();
+  if (row.kind === 'fcm') {
+    if (!fcm.ready) return { ok: false, reason: fcm.reason };
+    if (!fcmMatches(row.fcm_metadata, fcm.config)) return { ok: false, reason: 'provider_mismatch' };
+    if (row.client_app_id !== 'ambulando' || row.platform !== 'android') return { ok: false, reason: 'audience_mismatch' };
+  } else if (row.kind === 'unifiedpush') {
     if (!unified.ready) return { ok: false, reason: unified.reason };
     if (row.client_app_id !== 'ambulando' || row.platform !== 'android') return { ok: false, reason: 'audience_mismatch' };
   } else {
@@ -217,7 +225,7 @@ async function gate(sql: Sql, alert: Claimed, config: ApnsConfig | null): Promis
   const resolved = resolveAlertRule(rules, item.source_app_id, item.category, row.client_app_id, fallback);
   if (resolved.mode !== 'on') return { ok: false, reason: 'alert_rule_off' };
   const preview = row.t_preview === 'full' && resolved.preview === 'full' ? 'full' : null;
-  return { ok: true, item, transport: row, installation: row, config: row.kind === 'unifiedpush' && unified.ready ? unified.config : config!, preview };
+  return { ok: true, item, transport: row, installation: row, config: row.kind === 'fcm' && fcm.ready ? fcm.config : row.kind === 'unifiedpush' && unified.ready ? unified.config : config!, preview };
 }
 
 async function buildContent(sql: Sql, alert: Claimed, g: Extract<Gate, { ok: true }>) {
@@ -239,17 +247,17 @@ async function buildContent(sql: Sql, alert: Claimed, g: Extract<Gate, { ok: tru
   const presentation = item.presentation as { title?: string; body?: string };
   const opaque = opaqueIds(await cursorSecret(sql), alert.workspace_id, item.id, item.group_key);
   const [ws] = await sql<{ tower_service_npub: string | null }[]>`SELECT tower_service_npub FROM flightdeck_pg_workspaces WHERE id = ${alert.workspace_id}`;
-  if (transport.kind === 'unifiedpush' && !ws?.tower_service_npub) return null;
+  if (transport.kind !== 'apns' && !ws?.tower_service_npub) return null;
   return {
     clientAppId: installation.client_app_id,
     towerServiceNpub: ws?.tower_service_npub ?? null,
     workspaceId: alert.workspace_id, itemId: item.id, changeSeq: Number(item.change_seq), sourceAppId: item.source_app_id, category: item.category,
     ...opaque, coreSource: core, ids, badge, origin,
-    preview: transport.kind !== 'unifiedpush' && g.preview === 'full' ? { title: plainText(presentation.title, 120), body: plainText(presentation.body, 120) } : null,
+    preview: transport.kind === 'apns' && g.preview === 'full' ? { title: plainText(presentation.title, 120), body: plainText(presentation.body, 120) } : null,
   };
 }
 
-async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: ApnsConfig | null, sender: ApnsSender, unifiedSender: UnifiedPushSender, stats: AlertBatchStats, beforeSend?: (alert: { id: string }) => void | Promise<void>) {
+async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: ApnsConfig | null, sender: ApnsSender, unifiedSender: UnifiedPushSender, fcmSender: FcmSender, stats: AlertBatchStats, beforeSend?: (alert: { id: string }) => void | Promise<void>) {
   const g = await gate(sql, alert, config);
   if (!g.ok) {
     if (await settle(sql, alert, owner, { state: 'suppressed', reason: g.reason })) { stats.suppressed += 1; alertStatus.suppressed += 1; }
@@ -278,7 +286,14 @@ async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: Apns
   let errorClass: string | null = null;
   let retryAfterMs: number | null = null;
   try {
-    if (g.transport.kind === 'unifiedpush') {
+    if (g.transport.kind === 'fcm') {
+      const state = loadFcmConfig();
+      if (!state.ready) throw new FcmAuthError(true);
+      const result = await fcmSender(state.config, { token: g.transport.address, installationId: g.transport.installation_id, content, collapseId: marked[0]!.collapse_key, expiration: Math.floor(new Date(alert.deadline_at).getTime() / 1000) });
+      outcome = classifyFcmResult(result); providerStatus = result.status;
+      errorClass = outcome === 'sent' ? null : result.code ?? `http_${result.status}`;
+      retryAfterMs = result.status === 429 ? Math.max(60000, result.retryAfterMs ?? 0, backoffMs(attemptNo)) : result.retryAfterMs;
+    } else if (g.transport.kind === 'unifiedpush') {
       const state = loadUnifiedPushConfig();
       if (!state.ready) throw new Error('unifiedpush_unavailable');
       const result = await unifiedSender(state.config, {
@@ -301,6 +316,7 @@ async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: Apns
       retryAfterMs = result.retryAfterMs;
     }
   } catch (error) {
+    if (error instanceof FcmAuthError && error.credential) outcome = 'credential';
     const message = error instanceof Error ? error.message : '';
     errorClass = /timeout/i.test(message) ? 'timeout' : message === 'apns_no_response' ? 'no_response' : 'network_error';
   }
@@ -325,7 +341,8 @@ async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: Apns
   }
   if (outcome === 'credential') {
     // A credential problem is Tower's, not the alert's: open the breaker, keep the attempt budget, retry after it resets.
-    if (g.transport.kind === 'unifiedpush') alertStatus.unifiedpushBreakerOpenUntil = Date.now() + BREAKER_MS;
+    if (g.transport.kind === 'fcm') { alertStatus.fcmBreakerOpenUntil = Date.now() + BREAKER_MS; resetFcmOAuthCache(); }
+    else if (g.transport.kind === 'unifiedpush') alertStatus.unifiedpushBreakerOpenUntil = Date.now() + BREAKER_MS;
     else { alertStatus.breakerOpenUntil = Date.now() + BREAKER_MS; resetApnsJwtCache(); }
     await sql`UPDATE flightdeck_pg_notification_alerts SET attempt_count = attempt_count - 1 WHERE id = ${alert.id}`;
     if (await settle(sql, alert, owner, { state: 'failed', reason: 'provider_credential', nextInMs: BREAKER_MS, providerStatus, errorClass })) { stats.retried += 1; alertStatus.failed += 1; }
@@ -346,13 +363,14 @@ async function dispatchOne(sql: Sql, alert: Claimed, owner: string, config: Apns
 }
 
 /** Claims due alerts and delivers them. Safe to run from several processes: `SKIP LOCKED` leases give each alert one sender. */
-export async function processAlertBatch(opts: { sql?: Sql; limit?: number; sender?: ApnsSender; unifiedSender?: UnifiedPushSender; owner?: string; beforeSend?: (alert: { id: string }) => void | Promise<void> } = {}): Promise<AlertBatchStats> {
+export async function processAlertBatch(opts: { sql?: Sql; limit?: number; sender?: ApnsSender; unifiedSender?: UnifiedPushSender; fcmSender?: FcmSender; owner?: string; beforeSend?: (alert: { id: string }) => void | Promise<void> } = {}): Promise<AlertBatchStats> {
   const sql = opts.sql ?? getDb();
   const owner = opts.owner ?? `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
   const stats: AlertBatchStats = { claimed: 0, sent: 0, suppressed: 0, retried: 0, dead: 0, skipped: 0 };
   const readiness = loadApnsConfig();
   const unified = loadUnifiedPushConfig();
-  const kinds = [...(readiness.ready && Date.now() >= alertStatus.breakerOpenUntil ? ['apns'] : []), ...(unified.ready && Date.now() >= alertStatus.unifiedpushBreakerOpenUntil ? ['unifiedpush'] : [])];
+  const fcm = loadFcmConfig();
+  const kinds = [...(fcm.ready && Date.now() >= alertStatus.fcmBreakerOpenUntil ? ['fcm'] : []), ...(readiness.ready && Date.now() >= alertStatus.breakerOpenUntil ? ['apns'] : []), ...(unified.ready && Date.now() >= alertStatus.unifiedpushBreakerOpenUntil ? ['unifiedpush'] : [])];
   if (!kinds.length) return stats;
   // Never claim more than run at once: a claimed-but-waiting alert would burn its lease behind slow provider calls.
   const alerts = await claim(sql, owner, Math.min(opts.limit ?? PARALLEL, PARALLEL), kinds);
@@ -361,7 +379,7 @@ export async function processAlertBatch(opts: { sql?: Sql; limit?: number; sende
   for (let i = 0; i < alerts.length; i += PARALLEL) {
     await Promise.all(alerts.slice(i, i + PARALLEL).map(async (alert) => {
       try {
-        await dispatchOne(sql, alert, owner, readiness.ready ? readiness.config : null, sender, opts.unifiedSender ?? sendUnifiedPush, stats, opts.beforeSend);
+        await dispatchOne(sql, alert, owner, readiness.ready ? readiness.config : null, sender, opts.unifiedSender ?? sendUnifiedPush, opts.fcmSender ?? sendFcm, stats, opts.beforeSend);
       } catch (error) {
         // Unexpected failure: give the alert back with a backoff rather than leaving it leased.
         alertStatus.lastError = 'alert_worker_error';
@@ -380,8 +398,9 @@ export async function alertStats(sql: Sql, workspaceId: string) {
     SELECT EXTRACT(EPOCH FROM NOW() - MIN(created_at))::int AS age FROM flightdeck_pg_notification_alerts WHERE workspace_id = ${workspaceId} AND state IN ('pending', 'failed', 'leased')`;
   const readiness = loadApnsConfig();
   const unified = loadUnifiedPushConfig();
+  const fcm = loadFcmConfig();
   return {
-    transport_status: { unifiedpush: unified.ready ? { ready: true, breaker_open: Date.now() < alertStatus.unifiedpushBreakerOpenUntil } : { ready: false, reason: unified.reason } },
+    transport_status: { fcm: fcm.ready ? { ready: true, breaker_open: Date.now() < alertStatus.fcmBreakerOpenUntil } : { ready: false, reason: fcm.reason }, unifiedpush: unified.ready ? { ready: true, breaker_open: Date.now() < alertStatus.unifiedpushBreakerOpenUntil } : { ready: false, reason: unified.reason } },
     by_state: Object.fromEntries(rows.map((r) => [r.state, r.n])), oldest_pending_age_s: oldest?.age ?? null,
     provider: readiness.ready ? { ready: true } : { ready: false, reason: readiness.reason },
     worker: { ...alertStatus, enabled: alertsEnabled(), breaker_open: Date.now() < alertStatus.breakerOpenUntil },
@@ -433,4 +452,8 @@ export function stopAlertWorker() {
   if (timer) clearInterval(timer);
   timer = null;
   alertStatus.running = false;
+}
+
+function fcmMatches(metadata: any, config: { projectId: string; senderId: string; packageName: string }) {
+  return metadata?.project_id === config.projectId && metadata?.sender_id === config.senderId && metadata?.package_name === config.packageName;
 }

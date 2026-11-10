@@ -1,3 +1,5 @@
+import { parseFcmInput } from '../services/notification-fcm';
+import { putFcmTransport } from '../services/notification-registry';
 import { parseUnifiedPushInput } from '../services/notification-unifiedpush';
 import { getChannelPreferences, putChannelPreference } from '../services/notification-channel-preferences';
 import type { Context, Hono } from 'hono';
@@ -271,14 +273,19 @@ export function registerNotificationRoutes(router: Hono) {
 
   const transportKind = (c: Context) => {
     const kind = c.req.param('kind');
-    if (kind === 'apns' || kind === 'unifiedpush') return kind;
-    if (kind === 'webpush' || kind === 'fcm') throw new NotificationError(400, 'transport_not_implemented', `Transport ${kind} is not implemented on this Tower`);
+    if (kind === 'apns' || kind === 'unifiedpush' || kind === 'fcm') return kind;
+    if (kind === 'webpush') throw new NotificationError(400, 'transport_not_implemented', `Transport ${kind} is not implemented on this Tower`);
     throw new NotificationError(400, 'validation_error', 'kind must be apns, unifiedpush, webpush or fcm');
   };
 
   router.put(`${base}/installations/:installationId/transports/:kind`, pushConsumer(async (ctx) => {
     const kind = transportKind(ctx.c);
     const { body } = await readBody(ctx.c);
+    if (kind === 'fcm') {
+      onlyKeys(body, ['device_token', 'project_id', 'sender_id', 'package_name', 'preview', 'lease_seconds']);
+      const result = await putFcmTransport(ctx.sql, registrant(ctx), parseFcmInput(body), { implicit: null, origin: requestOrigin(ctx.c) });
+      return ctx.c.json({ identity: ctx.identity, ...result });
+    }
     if (kind === 'unifiedpush') {
       onlyKeys(body, ['endpoint', 'keys', 'preview', 'lease_seconds']);
       const result = await putUnifiedPushTransport(ctx.sql, registrant(ctx), parseUnifiedPushInput(body), { implicit: null, origin: requestOrigin(ctx.c) });

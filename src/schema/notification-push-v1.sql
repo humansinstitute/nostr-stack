@@ -82,3 +82,6 @@ CREATE TABLE IF NOT EXISTS flightdeck_pg_notification_alert_attempts (
 ALTER TABLE flightdeck_pg_notification_transports ADD COLUMN IF NOT EXISTS webpush_keys JSONB;
 ALTER TABLE flightdeck_pg_notification_transports DROP CONSTRAINT IF EXISTS flightdeck_pg_notification_transports_kind_check;
 ALTER TABLE flightdeck_pg_notification_transports ADD CONSTRAINT flightdeck_pg_notification_transports_kind_check CHECK (kind IN ('apns', 'webpush', 'fcm', 'unifiedpush'));
+
+-- Provider identity is checked again at dispatch after runtime configuration changes.
+ALTER TABLE flightdeck_pg_notification_transports ADD COLUMN IF NOT EXISTS fcm_metadata JSONB;
