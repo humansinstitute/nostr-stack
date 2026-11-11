@@ -61,20 +61,25 @@ blossomRouter.on(['GET', 'HEAD'], '/:blob', async (c, next) => {
     actor = await resolveWsKeyNpub(signer) ?? signer;
   }
   for (const row of candidates) {
-    const accessible = actor
+    const readable = actor
       ? (await hasFlightDeckPgStorageAuthority(row.id)
         ? await resolveReadableFlightDeckPgBlossomObject({ actorNpub: actor, storageObjectId: row.id })
         : await canAccessStorageObject(row.id, actor))
-      : await canAccessStorageObject(row.id, null) ?? (await hasBlossomPublication(row.id, hash) ? row : null);
-    if (!accessible || !await hasActiveStorageReference(row.id)) continue;
+      : null;
+    // Explicit publications serve anyone, authenticated or not, without private metadata.
+    const viaPublication = !readable && !row.is_public && await hasBlossomPublication(row.id, hash);
+    if (!readable && !row.is_public && !viaPublication) continue;
+    if (!await hasActiveStorageReference(row.id)) continue;
     const verified = await verifyStorageIdentity(row);
     if (!verified || verified.sha256_hex !== hash) continue;
-    // Each further chunk needs current ACL access.
-    const protectStream = (stream: ReadableStream<Uint8Array>) => actor && !row.is_public
-      ? revocableStream(stream, async () => Boolean(await hasFlightDeckPgStorageAuthority(row.id)
-        ? await resolveReadableFlightDeckPgBlossomObject({ actorNpub: actor!, storageObjectId: row.id })
-        : await canAccessStorageObject(row.id, actor)))
-      : stream;
+    // Each further chunk needs current ACL access or a still-active publication.
+    const protectStream = (stream: ReadableStream<Uint8Array>) => row.is_public
+      ? stream
+      : viaPublication
+        ? revocableStream(stream, () => hasBlossomPublication(row.id, hash))
+        : revocableStream(stream, async () => Boolean(await hasFlightDeckPgStorageAuthority(row.id)
+          ? await resolveReadableFlightDeckPgBlossomObject({ actorNpub: actor!, storageObjectId: row.id })
+          : await canAccessStorageObject(row.id, actor)));
     const size = Number(verified.size_bytes);
     const headers = new Headers({
       'Content-Type': row.content_type || 'application/octet-stream',
@@ -86,7 +91,7 @@ blossomRouter.on(['GET', 'HEAD'], '/:blob', async (c, next) => {
       'X-Content-Type-Options': 'nosniff',
       // User supplied HTML/SVG must not run in Tower's authenticated origin.
       'Content-Security-Policy': "sandbox; default-src 'none'",
-      'Content-Disposition': `inline; filename="${(actor ? row.file_name || 'file.bin' : hash).replace(/[^a-zA-Z0-9._-]/g, '_')}"`,
+      'Content-Disposition': `inline; filename="${(readable ? row.file_name || 'file.bin' : hash).replace(/[^a-zA-Z0-9._-]/g, '_')}"`,
     });
     const range = c.req.method === 'GET' && (!c.req.header('if-range') || c.req.header('if-range') === headers.get('etag'))
       ? parseBlobRange(c.req.header('range') || null, size) : null;

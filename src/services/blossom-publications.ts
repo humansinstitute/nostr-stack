@@ -1,13 +1,15 @@
 import { getDb } from '../db';
-import { verifyStorageIdentity, storageObjectsByHash } from './storage';
+import { verifyStorageIdentity, storageObjectsByHash, prepareStorageObjectForAuthorizedOwner } from './storage';
 import { resolveFlightDeckPgFileVersion } from './flightdeck-pg-api';
-import { authorizeFlightDeckPgStorageAttach, authorizeFlightDeckPgStorageRead } from './flightdeck-pg-storage-access';
+import { authorizeFlightDeckPgStorageAttach, authorizeFlightDeckPgStorageRead, hasFlightDeckPgStorageAuthority } from './flightdeck-pg-storage-access';
+import { authorizeFlightDeckPgOperation } from './flightdeck-pg-authorization';
+import { resolveWsKeyNpub } from './user-workspace-keys';
 import { isFlightDeckPgThreadParticipant } from './flightdeck-pg-api';
-import type { V4StorageObject } from '../types';
+import type { PrepareStorageInput, V4StorageObject, WorkspaceAppStorageBlossomStatus } from '../types';
 
 type DbClient = ReturnType<typeof getDb>;
 export class BlossomPublicationError extends Error {
-  constructor(public code: string, public status: 404 | 409, message: string) { super(message); }
+  constructor(public code: string, public status: 400 | 404 | 409, message: string) { super(message); }
 }
 
 /** Public authority is a separate, version/hash-pinned reference; storage ACLs stay private. */
@@ -44,6 +46,15 @@ export async function hasBlossomPublication(storageObjectId: string, hash: strin
       workspaceId: ref.workspace_id, threadId: ref.thread_id, actorId: ref.actor_id, actorNpub: ref.npub }, sql)) continue;
     return true;
   }
+  return hasAppBlossomPublication(storageObjectId, hash, sql);
+}
+
+/** Any current public authority for these exact bytes, including independently published copies. */
+async function hashIsPublic(hash: string, sql: DbClient) {
+  for (const candidate of await storageObjectsByHash(hash)) {
+    if (!candidate.is_public && !await hasBlossomPublication(candidate.id, hash, sql)) continue;
+    if ((await verifyStorageIdentity(candidate))?.sha256_hex === hash) return true;
+  }
   return false;
 }
 
@@ -66,15 +77,8 @@ export async function fileBlossomPublications(input: {
   for (const row of rows) {
     const [object] = await sql<V4StorageObject[]>`SELECT * FROM v4_storage_objects WHERE id=${row.storage_object_id}`;
     const verified = row.operation !== 'deleted' && object ? await verifyStorageIdentity(object) : null;
-    let isPublic = false;
-    if (verified) {
-      // A hash URL is shared by identical bytes, including independently published copies.
-      for (const candidate of await storageObjectsByHash(verified.sha256_hex!)) {
-        if (!candidate.is_public && !await hasBlossomPublication(candidate.id, verified.sha256_hex!, sql)) continue;
-        const publicBytes = await verifyStorageIdentity(candidate);
-        if (publicBytes?.sha256_hex === verified.sha256_hex) { isPublic = true; break; }
-      }
-    }
+    // A hash URL is shared by identical bytes, including independently published copies.
+    const isPublic = verified ? await hashIsPublic(verified.sha256_hex!, sql) : false;
     versions.push({ ...row, sha256_hex: verified?.sha256_hex ?? null,
       available: !!verified, public: isPublic,
       blossom_url: isPublic ? `${input.origin}/${verified!.sha256_hex}` : null });
@@ -141,11 +145,7 @@ export async function messageAttachmentBlossom(input: {
     COALESCE(BOOL_OR(actor_id=${input.actorId}),false) AS published_by_you
     FROM flightdeck_pg_blossom_message_publications WHERE workspace_id=${input.workspaceId}
       AND link_id=${source.link_id} AND revoked_at IS NULL`;
-  let isPublic = false;
-  if (verified) for (const candidate of await storageObjectsByHash(verified.sha256_hex!)) {
-    if (!candidate.is_public && !await hasBlossomPublication(candidate.id, verified.sha256_hex!, sql)) continue;
-    if ((await verifyStorageIdentity(candidate))?.sha256_hex === verified.sha256_hex) { isPublic = true; break; }
-  }
+  const isPublic = verified ? await hashIsPublic(verified.sha256_hex!, sql) : false;
   return { message_id: input.messageId, attachment: {
     storage_object_id: input.storageObjectId, link_id: source.link_id,
     sha256_hex: verified?.sha256_hex ?? null, available: !!verified,
@@ -183,5 +183,105 @@ export async function mutateMessageAttachmentBlossom(input: {
     VALUES (${input.workspaceId},${input.messageId},${source.link_id},${input.actorId},${input.storageObjectId},${verified.sha256_hex!})
     ON CONFLICT (workspace_id,link_id,actor_id) DO UPDATE SET revoked_at=NULL,published_at=NOW()
       WHERE flightdeck_pg_blossom_message_publications.revoked_at IS NOT NULL RETURNING link_id`;
+  return changed.length > 0;
+}
+
+type AppObjectInput = {
+  workspaceId: string; workspaceOwnerNpub: string; appNpub: string;
+  storageObjectId: string; actorId: string; actorNpub: string;
+};
+
+async function isStorageCreator(object: V4StorageObject, actorNpub: string) {
+  return ((await resolveWsKeyNpub(object.created_by_npub)) ?? object.created_by_npub) === actorNpub;
+}
+
+/** Create a private standalone object bound to one workspace, app and creating actor. */
+export async function prepareAppStorageObject(input: Omit<AppObjectInput, 'storageObjectId'> & { body: PrepareStorageInput }) {
+  const object = await prepareStorageObjectForAuthorizedOwner({ ...input.body,
+    owner_npub: input.workspaceOwnerNpub, owner_group_id: null, access_group_ids: [], is_public: false,
+  }, input.actorNpub, { workspaceId: input.workspaceId });
+  await getDb()`INSERT INTO flightdeck_pg_app_storage_objects (storage_object_id,workspace_id,app_npub,actor_id)
+    VALUES (${object.id},${input.workspaceId},${input.appNpub},${input.actorId})`;
+  return object;
+}
+
+/** Only the creator's object, bound to this exact workspace and app, is addressable; all else is not found. */
+async function appStorageObject(input: AppObjectInput, sql: DbClient, lock = false) {
+  const [object] = await sql<V4StorageObject[]>`SELECT s.* FROM flightdeck_pg_app_storage_objects b
+    JOIN v4_storage_objects s ON s.id=b.storage_object_id
+    WHERE b.storage_object_id=${input.storageObjectId} AND b.workspace_id=${input.workspaceId}
+      AND b.app_npub=${input.appNpub} AND b.actor_id=${input.actorId}
+      AND s.pg_workspace_id=${input.workspaceId} AND s.owner_npub=${input.workspaceOwnerNpub}
+    ${lock ? sql`FOR UPDATE OF b` : sql``}`;
+  if (!object || !await isStorageCreator(object, input.actorNpub))
+    throw new BlossomPublicationError('storage_object_not_found', 404, 'App storage object not found');
+  return object;
+}
+
+/**
+ * App publications stay effective only while the app is enabled, the publisher is a current member, the object
+ * remains the publisher's unlinked app object, and the stored bytes still match the pinned hash.
+ */
+async function hasAppBlossomPublication(storageObjectId: string, hash: string, sql: DbClient) {
+  const refs = await sql`
+    SELECT a.npub, w.id AS workspace_id, w.app_npub AS workspace_app_npub, s.created_by_npub
+    FROM flightdeck_pg_app_blossom_publications p
+    JOIN flightdeck_pg_app_storage_objects b ON b.storage_object_id=p.storage_object_id
+      AND b.actor_id=p.actor_id AND b.workspace_id=p.workspace_id
+    JOIN flightdeck_pg_workspaces w ON w.id=b.workspace_id
+    JOIN v4_storage_objects s ON s.id=b.storage_object_id AND s.pg_workspace_id=w.id AND s.owner_npub=w.workspace_owner_npub
+    JOIN workspace_apps wa ON wa.workspace_owner_npub=w.workspace_owner_npub AND wa.app_npub=b.app_npub AND wa.enabled
+    JOIN flightdeck_pg_actors a ON a.id=p.actor_id
+    WHERE p.storage_object_id=${storageObjectId} AND p.sha256_hex=${hash} AND p.revoked_at IS NULL
+  `;
+  if (!refs.length || await hasFlightDeckPgStorageAuthority(storageObjectId, sql)) return false;
+  for (const ref of refs) {
+    if (((await resolveWsKeyNpub(ref.created_by_npub)) ?? ref.created_by_npub) !== ref.npub) continue;
+    const decision = await authorizeFlightDeckPgOperation({ actorNpub: ref.npub, appNpub: ref.workspace_app_npub,
+      workspaceId: ref.workspace_id, permission: 'workspace.read', resource: { type: 'workspace' } }, sql);
+    if (decision.allowed) return true;
+  }
+  return false;
+}
+
+export async function appObjectBlossom(input: AppObjectInput & { origin: string }, sql: DbClient = getDb()): Promise<WorkspaceAppStorageBlossomStatus> {
+  const object = await appStorageObject(input, sql);
+  const verified = object.completed_at ? await verifyStorageIdentity(object) : null;
+  const linked = await hasFlightDeckPgStorageAuthority(object.id, sql);
+  const [own] = await sql`SELECT sha256_hex, published_at FROM flightdeck_pg_app_blossom_publications
+    WHERE storage_object_id=${object.id} AND actor_id=${input.actorId} AND revoked_at IS NULL`;
+  const active = !!own && verified?.sha256_hex === own.sha256_hex && await hasAppBlossomPublication(object.id, own.sha256_hex, sql);
+  const isPublic = verified ? await hashIsPublic(verified.sha256_hex!, sql) : false;
+  return {
+    app_npub: input.appNpub, storage_object_id: object.id,
+    sha256_hex: verified?.sha256_hex ?? null, size_bytes: verified ? Number(verified.size_bytes) : null,
+    content_type: object.content_type, completed: !!object.completed_at, available: !!verified, linked,
+    published_by_you: !!own, published_sha256: own?.sha256_hex ?? null, published_at: own?.published_at ?? null,
+    publication_active: active,
+    // Hash URLs are shared by identical bytes: true may come from another publisher's copy.
+    public: isPublic, blossom_url: isPublic ? `${input.origin}/${verified!.sha256_hex}` : null,
+  };
+}
+
+export async function mutateAppObjectBlossom(input: AppObjectInput & { publish: boolean; expectedSha256?: string }, sql: DbClient) {
+  // Serialize repeated and concurrent publish/unpublish on the binding row.
+  const object = await appStorageObject(input, sql, true);
+  if (!input.publish) {
+    const changed = await sql`UPDATE flightdeck_pg_app_blossom_publications SET revoked_at=NOW()
+      WHERE storage_object_id=${object.id} AND actor_id=${input.actorId} AND revoked_at IS NULL RETURNING storage_object_id`;
+    return changed.length > 0;
+  }
+  if (await hasFlightDeckPgStorageAuthority(object.id, sql))
+    throw new BlossomPublicationError('storage_object_linked', 409, 'Object is linked to workspace content; upload a standalone copy');
+  if (!object.completed_at) throw new BlossomPublicationError('storage_incomplete', 409, 'Upload is not complete');
+  const verified = await verifyStorageIdentity(object);
+  if (!verified) throw new BlossomPublicationError('storage_unavailable', 409, 'Stored bytes are missing or could not be verified');
+  const prior = await sql`SELECT sha256_hex FROM flightdeck_pg_app_blossom_publications WHERE storage_object_id=${object.id}`;
+  if (verified.sha256_hex !== input.expectedSha256 || prior.some(p => p.sha256_hex !== verified.sha256_hex))
+    throw new BlossomPublicationError('publication_hash_changed', 409, 'Stored bytes differ from the reviewed SHA-256; refresh or upload a new copy');
+  const changed = await sql`INSERT INTO flightdeck_pg_app_blossom_publications (storage_object_id,actor_id,workspace_id,sha256_hex)
+    VALUES (${object.id},${input.actorId},${input.workspaceId},${verified.sha256_hex!})
+    ON CONFLICT (storage_object_id,actor_id) DO UPDATE SET revoked_at=NULL,published_at=NOW()
+      WHERE flightdeck_pg_app_blossom_publications.revoked_at IS NOT NULL RETURNING storage_object_id`;
   return changed.length > 0;
 }

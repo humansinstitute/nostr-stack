@@ -131,6 +131,27 @@ export interface WorkspaceAppNamespaceRegistration {
   capabilities: string[];
 }
 
+/** Status of the caller's explicit public publication of one app-bound storage object. */
+export interface WorkspaceAppStorageBlossomStatus {
+  app_npub: string;
+  storage_object_id: string;
+  sha256_hex: string | null;
+  size_bytes: number | null;
+  content_type: string;
+  completed: boolean;
+  available: boolean;
+  /** Linked to workspace content (file/doc/message/...): not publishable through the app route. */
+  linked: boolean;
+  published_by_you: boolean;
+  published_sha256: string | null;
+  published_at: string | Date | null;
+  /** The caller's publication currently grants public reads. */
+  publication_active: boolean;
+  /** Any current authority serves these bytes, possibly another publisher's identical copy. */
+  public: boolean;
+  blossom_url: string | null;
+}
+
 export interface WorkspaceAppSchemaFamily {
   record_family_hash: string;
   collection_space?: string;

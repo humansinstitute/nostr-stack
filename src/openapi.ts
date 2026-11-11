@@ -6653,6 +6653,33 @@ export function buildOpenApiDocument(origin: string) {
           },
         },
       },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/apps/{appNpub}/storage/prepare': {
+        parameters: [
+          { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+          { name: 'appNpub', in: 'path', required: true, description: 'Canonical bech32 app npub', schema: { type: 'string' } },
+        ],
+        post: { tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Prepare a private standalone app storage object',
+          description: 'Requires typed workspace.read and an enabled workspace_apps registration for appNpub under the workspace owner (404 app_not_found, 409 workspace_app_disabled). Labels (x-flightdeck-pg-app-npub, app_npub, owner_npub) must name the path or workspace app/owner (403 workspace_app_identity_mismatch). Creates a private object owned by the workspace owner, bound to this workspace, app and calling actor; is_public must be absent or false. Upload and complete through upload_url/complete_url (creator-only; the server hashes bytes). Only objects prepared here are eligible for the app blossom publication route; nothing else is inferred as app-owned.',
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['content_type'], properties: { content_type: { type: 'string' }, file_name: { type: 'string' }, size_bytes: { type: 'integer' }, metadata: { type: 'object' }, is_public: { type: 'boolean', const: false } } } } } },
+          responses: { '201': { description: 'Prepared object: app_npub, object_id, owner_npub, is_public=false, upload_url, complete_url, content_url, download_url' }, '400': { description: 'Invalid body or is_public requested' }, '401': { description: 'Invalid NIP-98' }, '403': { description: 'workspace.read required or app/owner label mismatch' }, '404': { description: 'App not registered' }, '409': { description: 'App registration disabled' } } },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/apps/{appNpub}/storage/{storageObjectId}/blossom': {
+        parameters: [
+          { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+          { name: 'appNpub', in: 'path', required: true, description: 'Canonical bech32 app npub', schema: { type: 'string' } },
+          { name: 'storageObjectId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+        ],
+        get: { tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Read the caller’s app object publication status',
+          description: 'Requires typed workspace.read. Only the creating actor’s object prepared through the app storage route for this exact workspace and app is addressable; any other object is 404 storage_object_not_found. Returns app_npub, storage_object_id, sha256_hex, size_bytes, content_type, completed, available, linked, published_by_you, published_sha256, published_at, publication_active, public, blossom_url, can_publish and changed. public reports whether any current authority serves these bytes, which can include another publisher’s identical copy; blossom_url uses the configured public HTTPS Blossom origin.',
+          responses: { '200': { description: 'Publication status' }, '401': { description: 'Invalid NIP-98' }, '403': { description: 'workspace.read required or label mismatch' }, '404': { description: 'Not the caller’s app object in this workspace and app' } } },
+        put: { tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Publicly publish the caller’s app object bytes',
+          description: 'Requires typed workspace.read, an enabled app registration and that the caller created the object. Body must acknowledge public download and pin the reviewed SHA-256; the server re-verifies stored bytes. Does not change storage ACLs or is_public. Published bytes may be cached by others and cannot be recalled. Idempotent; changed=false on a repeat. The publication stays effective only while the app remains enabled, the caller remains a member with workspace.read, the object stays unlinked from workspace content and the bytes match the pinned hash.',
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['public', 'expected_sha256'], properties: { public: { type: 'boolean', const: true }, expected_sha256: { type: 'string', pattern: '^[0-9a-f]{64}$' } } } } } },
+          responses: { '200': { description: 'Publication status with public HTTPS Blossom URL' }, '400': { description: 'Invalid ID or absent consent/hash' }, '401': { description: 'Invalid NIP-98' }, '403': { description: 'workspace.read required or label mismatch' }, '404': { description: 'Not the caller’s app object, or app not registered' }, '409': { description: 'App disabled, object linked to workspace content, incomplete, unavailable or bytes differ from the reviewed hash' } } },
+        delete: { tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Revoke the calling actor’s app object publication',
+          description: 'Requires typed workspace.read and object ownership; allowed while the app is disabled. Revokes only the caller’s publication and is idempotent (changed=false when none was active). Other publishers of identical bytes remain public.',
+          responses: { '200': { description: 'Publication status after revocation' }, '401': { description: 'Invalid NIP-98' }, '403': { description: 'workspace.read required or label mismatch' }, '404': { description: 'Not the caller’s app object' } } },
+      },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/messages/{messageId}/attachments/{storageObjectId}/blossom': {
         parameters: ['workspaceId', 'messageId', 'storageObjectId'].map(name => ({ name, in: 'path', required: true, schema: { type: 'string', format: 'uuid' } })),
         get: { tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Read existing message attachment publication status', description: 'Requires channel.read and agent thread participation. Returns message_id, can_publish, changed and attachment {storage_object_id, link_id, sha256_hex, available, public, published_by_you, publication_count, blossom_url}; no message body, names or metadata. Only a live exact message storage link is eligible.', responses: { '200': { description: 'Authorized byte publication status' }, '403': { description: 'Channel permission required' }, '404': { description: 'Missing, removed, deleted or inaccessible source' } } },

@@ -178,3 +178,45 @@ app keys, WApp install, billing, ACL grants, table schemas or app signers, and
 does not use the legacy `/api/v4/workspaces/:owner/apps` management check. After
 registration the existing `.../apps/:appNpub/db/:collection/rows` routes work;
 `app_rows.private_only` restricts those rows to private visibility.
+
+### App object publication (channel-free)
+
+An app's own storage objects are private and unlinked from channels, so the
+file/message publication routes do not apply. A registered app uses two routes
+instead; both need typed `workspace.read`, apply the same namespace label guard
+as registration, and resolve the namespace owner from the workspace UUID.
+
+- `POST /api/v4/flightdeck-pg/workspaces/:workspaceId/apps/:appNpub/storage/prepare`
+  needs an enabled registration (`404 app_not_found`, `409
+  workspace_app_disabled`). It takes the PG prepare body (`content_type`
+  required; `is_public` must be absent or `false`) and creates a private object
+  owned by the workspace owner and bound, in
+  `flightdeck_pg_app_storage_objects`, to this workspace, app and calling actor.
+  Upload and complete through the returned URLs as usual (creator-only; the
+  server hashes the bytes). Like PG `/storage/prepare`, it applies no billing
+  check. Objects from other prepare routes are never treated as app objects.
+- `GET|PUT|DELETE .../apps/:appNpub/storage/:storageObjectId/blossom` addresses
+  only the caller's own bound object; any other object is `404
+  storage_object_not_found`. `PUT {"public": true, "expected_sha256": "<hex>"}`
+  needs an enabled app, a completed, unlinked object and re-verified bytes equal
+  to the reviewed hash (`409 storage_incomplete | storage_unavailable |
+  storage_object_linked | publication_hash_changed`). It records a hash-pinned
+  row in `flightdeck_pg_app_blossom_publications` and never changes
+  `is_public` or storage ACLs. `DELETE` revokes only the caller's row, is
+  idempotent and also works while the app is disabled. All three return
+  `changed`, `can_publish` and the `WorkspaceAppStorageBlossomStatus` fields.
+
+`GET|HEAD /<sha256>` serves an app object anonymously only while a publication
+is active: not revoked, app still enabled, publisher still a member with
+`workspace.read`, object still unlinked from workspace content, and stored bytes
+still matching the pinned hash. Open publication-backed streams recheck that
+authority (not the bytes) before each chunk. Authenticated callers without ACL
+access receive the same public bytes under the hash filename; an invalid token
+is still rejected. Removing a member revokes their publications, and rejoining
+does not restore them.
+
+Public hashes are shared by identical bytes: `public` (and `blossom_url`) can
+stay true after your `DELETE` if someone else published the same bytes, and
+downloaded copies cannot be recalled. Clients that want a limited audience must
+publish ciphertext under a generic filename. Tower does not interpret the
+payload or any audience setting.

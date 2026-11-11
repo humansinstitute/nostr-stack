@@ -73,6 +73,7 @@ export async function removeWorkspaceMember(workspaceId: string, actorId: string
     // Historical publication records remain; their opt-in public authority ends.
     await sql`UPDATE flightdeck_pg_blossom_publications SET revoked_at=NOW() WHERE workspace_id=${workspaceId} AND actor_id=${actorId} AND revoked_at IS NULL`;
     await sql`UPDATE flightdeck_pg_blossom_message_publications SET revoked_at=NOW() WHERE workspace_id=${workspaceId} AND actor_id=${actorId} AND revoked_at IS NULL`;
+    await sql`UPDATE flightdeck_pg_app_blossom_publications SET revoked_at=NOW() WHERE workspace_id=${workspaceId} AND actor_id=${actorId} AND revoked_at IS NULL`;
     const event = await audit(sql,workspaceId,requester.id,actorId,'workspace_member.remove',state);
     await sql`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspaceId} AND actor_id=${actorId}`;
     return { removed: true, actor: state.actor, audit: event };

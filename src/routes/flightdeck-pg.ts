@@ -33,7 +33,7 @@ import { registerOrgDataRoutes } from './org-data';
 import { getWorkspaceStorageUsage } from '../services/workspace-storage-usage';
 import { readFlightDeckPgMessageActivity, parseMessageActivityRange } from '../services/flightdeck-pg-message-activity';
 import { blossomPublicOrigin } from '../services/blossom-origin';
-import { messageAttachmentSource, messageAttachmentBlossom, mutateMessageAttachmentBlossom, BlossomPublicationError, fileBlossomPublications, mutateBlossomPublication } from '../services/blossom-publications';
+import { messageAttachmentSource, messageAttachmentBlossom, mutateMessageAttachmentBlossom, BlossomPublicationError, fileBlossomPublications, mutateBlossomPublication, prepareAppStorageObject, appObjectBlossom, mutateAppObjectBlossom } from '../services/blossom-publications';
 import { resolveFlightDeckPgMessageLookup } from '../services/flightdeck-pg-message-lookup';
 import { registerScopeAccessRoutes } from './scope-access';
 import { registerContextTreeRoutes } from './context-tree';
@@ -1983,6 +1983,96 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/apps/:appNpub/registration', a
     return jsonError(c, 409, 'workspace_app_disabled', 'Workspace app registration exists but is disabled', identity, { registration });
   }
   return c.json({ identity, created, registration }, created ? 201 : 200);
+});
+
+/** Namespace guard plus workspace.read; app-scoped storage additionally requires the enabled registration unless revoking. */
+async function resolveAppStorageRequest(c: Context, requireEnabledApp: boolean) {
+  const resolved = await resolveAppNamespaceRequest(c);
+  if ('response' in resolved) return resolved;
+  const { auth, context, identity, appNpub } = resolved;
+  const decision = await authorizeFlightDeckPgOperation({ actorNpub: auth.userNpub,
+    appNpub: context.workspace.app_npub, workspaceId: context.workspace.id,
+    permission: 'workspace.read', resource: { type: 'workspace' } });
+  if (!decision.allowed) return { response: authorizationError(c, decision, identity, 'workspace.read') };
+  const app = await getWorkspaceApp(context.workspace.workspace_owner_npub, appNpub);
+  if (requireEnabledApp && !app) return { response: jsonError(c, 404, 'app_not_found', 'Workspace app is not registered', identity) };
+  if (requireEnabledApp && !app!.enabled) return { response: jsonError(c, 409, 'workspace_app_disabled', 'Workspace app registration is disabled', identity) };
+  return { ...resolved, appEnabled: app?.enabled === true };
+}
+
+// Private standalone upload bound to this workspace, app and creator; the only source for app Blossom publication.
+flightDeckPgRouter.post('/workspaces/:workspaceId/apps/:appNpub/storage/prepare', async (c) => {
+  c.header('Cache-Control', 'private, no-store');
+  const resolved = await resolveAppStorageRequest(c, true);
+  if ('response' in resolved) return resolved.response;
+  const { auth, context, identity, appNpub } = resolved;
+  const body = await readJsonBody(c) as PrepareStorageInput | null;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return validationError(c, identity, [{ path: 'body', code: 'invalid_json', message: 'body must be a JSON object' }]);
+  if (!body.content_type) return validationError(c, identity, [{ path: 'content_type', code: 'required', message: 'content_type required' }]);
+  if (optionalObject(body.metadata) === null) return validationError(c, identity, [{ path: 'metadata', code: 'invalid', message: 'metadata must be an object when provided' }]);
+  if (body.is_public !== undefined && body.is_public !== false) {
+    return validationError(c, identity, [{ path: 'is_public', code: 'invalid', message: 'app storage is private; publish explicitly through the blossom route' }]);
+  }
+  try {
+    const row = await prepareAppStorageObject({ workspaceId: context.workspace.id,
+      workspaceOwnerNpub: context.workspace.workspace_owner_npub, appNpub, actorId: context.actor.id,
+      actorNpub: auth.userNpub, body });
+    const origin = new URL(c.req.url).origin;
+    const uploadUrl = await getStorageUploadUrl(row.id);
+    const downloadUrl = await getStorageDownloadUrl(row.id);
+    return c.json({
+      identity,
+      app_npub: appNpub,
+      object_id: row.id,
+      owner_npub: row.owner_npub,
+      owner_group_id: row.owner_group_id,
+      access_group_ids: row.access_group_ids,
+      is_public: row.is_public,
+      file_name: row.file_name,
+      content_type: row.content_type,
+      size_bytes: row.size_bytes,
+      upload_url: uploadUrl || `${origin}/api/v4/storage/${row.id}`,
+      complete_url: `${origin}/api/v4/storage/${row.id}/complete`,
+      content_url: `${origin}/api/v4/storage/${row.id}/content`,
+      download_url: downloadUrl || `${origin}/api/v4/storage/${row.id}/content`,
+      completed_at: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
+    }, 201);
+  } catch (error) {
+    return jsonError(c, 500, 'storage_prepare_failed', error instanceof Error ? error.message : 'Failed to prepare app storage object', identity);
+  }
+});
+
+// Explicit, hash-pinned public byte authority for the caller's own app object; storage ACLs stay private.
+flightDeckPgRouter.on(['GET', 'PUT', 'DELETE'], '/workspaces/:workspaceId/apps/:appNpub/storage/:storageObjectId/blossom', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  // Revocation stays available after the app is disabled.
+  const resolved = await resolveAppStorageRequest(c, c.req.method === 'PUT');
+  if ('response' in resolved) return resolved.response;
+  const { auth, context, identity, appNpub, appEnabled } = resolved;
+  const storageObjectId = c.req.param('storageObjectId');
+  if (!isUuid(storageObjectId)) return jsonError(c, 400, 'invalid_id', 'Storage object id must be a UUID', identity);
+  const body = c.req.method === 'PUT' ? await readJsonBody(c) : null;
+  if (c.req.method === 'PUT' && (!body || body.public !== true || !/^[0-9a-f]{64}$/.test(String(body.expected_sha256 ?? ''))))
+    return jsonError(c, 400, 'public_consent_required', 'Explicit public consent and the reviewed SHA-256 are required', identity);
+  const input = { workspaceId: context.workspace.id, workspaceOwnerNpub: context.workspace.workspace_owner_npub,
+    appNpub, storageObjectId, actorId: context.actor.id, actorNpub: auth.userNpub };
+  try {
+    let changed = false;
+    if (c.req.method !== 'GET') changed = await getDb().begin(async tx => {
+      const sql = asDbClient(tx);
+      const changed = await mutateAppObjectBlossom({ ...input, publish: c.req.method === 'PUT',
+        expectedSha256: body?.expected_sha256 as string | undefined }, sql);
+      if (changed) await writeFlightDeckPgAudit({ workspaceId: context.workspace.id, actorId: context.actor.id,
+        action: c.req.method === 'PUT' ? 'app_storage.blossom.publish' : 'app_storage.blossom.unpublish',
+        resourceType: 'storage_object', resourceId: storageObjectId, metadata: { app_npub: appNpub } }, sql);
+      return changed;
+    });
+    const status = await appObjectBlossom({ ...input, origin: blossomPublicOrigin(c.req.raw) });
+    return c.json({ identity, changed, can_publish: appEnabled && status.available && !status.linked, ...status });
+  } catch (error) {
+    if (error instanceof BlossomPublicationError) return jsonError(c, error.status, error.code, error.message, identity);
+    throw error;
+  }
 });
 
 flightDeckPgRouter.get('/workspaces/:workspaceId/descriptor', async (c) => {
