@@ -266,7 +266,7 @@ export async function appObjectBlossom(input: AppObjectInput & { origin: string 
 export async function mutateAppObjectBlossom(input: AppObjectInput & { publish: boolean; expectedSha256?: string }, sql: DbClient) {
   // Member removal locks this actor row before revoking. Holding it until commit means a publish either commits
   // first (and is revoked by the removal) or observes the removal; then the binding row serializes repeats.
-  await sql`SELECT id FROM flightdeck_pg_actors WHERE id=${input.actorId} FOR SHARE`;
+  await sql`SELECT id FROM flightdeck_pg_actors WHERE id=${input.actorId} FOR KEY SHARE`;
   const object = await appStorageObject(input, sql, true);
   if (!input.publish) {
     const changed = await sql`UPDATE flightdeck_pg_app_blossom_publications SET revoked_at=NOW()
