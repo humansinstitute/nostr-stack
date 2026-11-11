@@ -61,6 +61,9 @@ describe('OpenAPI docs', () => {
     expect(body.paths['/api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/schemas']).toBeDefined();
     expect(body.paths['/api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/connection-token']).toBeDefined();
     expect(body.paths['/api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/db/descriptor']).toBeDefined();
+    expect(body.paths['/api/v4/flightdeck-pg/workspaces/{workspaceId}/apps/{appNpub}/registration']?.get).toBeDefined();
+    expect(body.paths['/api/v4/flightdeck-pg/workspaces/{workspaceId}/apps/{appNpub}/registration']?.post?.responses?.['409']).toBeDefined();
+    expect(body.components.schemas.WorkspaceAppNamespaceRegistration).toBeDefined();
     expect(body.paths['/api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/db/provision']).toBeDefined();
     expect(body.paths['/api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/db/migrations']).toBeDefined();
     expect(body.paths['/api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/db/tables/{table}/rows']).toBeDefined();

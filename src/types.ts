@@ -122,6 +122,15 @@ export interface WorkspaceApp {
   created_at: Date;
 }
 
+/** Public registration fields for one app namespace in a Flight Deck PG workspace. */
+export interface WorkspaceAppNamespaceRegistration {
+  installed: boolean;
+  enabled: boolean;
+  app_npub: string;
+  app_name: string | null;
+  capabilities: string[];
+}
+
 export interface WorkspaceAppSchemaFamily {
   record_family_hash: string;
   collection_space?: string;

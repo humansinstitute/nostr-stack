@@ -236,6 +236,35 @@ export async function getWorkspaceApp(workspaceOwnerNpub: string, appNpub: strin
   return app || null;
 }
 
+/**
+ * Insert-only registration: a new row may declare its initial name and capabilities, but an existing row (enabled or
+ * disabled) is returned exactly as stored. Concurrent callers converge on one row without either one mutating it.
+ */
+export async function ensureWorkspaceAppRegistration(
+  workspaceOwnerNpub: string,
+  appNpub: string,
+  input: { appName: string; capabilities: string[]; createdByNpub: string },
+  sql: DbClient = getDb(),
+): Promise<{ app: WorkspaceApp; created: boolean }> {
+  const [inserted] = await sql<WorkspaceApp[]>`
+    INSERT INTO workspace_apps (workspace_owner_npub, app_npub, app_name, enabled, capabilities, created_by_npub)
+    VALUES (${workspaceOwnerNpub}, ${appNpub}, ${input.appName}, true, ${sql.json(input.capabilities)}, ${input.createdByNpub})
+    ON CONFLICT (workspace_owner_npub, app_npub) DO NOTHING
+    RETURNING *
+  `;
+  if (inserted) return { app: inserted, created: true };
+  // READ COMMITTED: a conflicting insert waits for the winner to commit, so this new statement sees its row.
+  const [existing] = await sql<WorkspaceApp[]>`
+    SELECT *
+    FROM workspace_apps
+    WHERE workspace_owner_npub = ${workspaceOwnerNpub}
+      AND app_npub = ${appNpub}
+    LIMIT 1
+  `;
+  if (!existing) throw new Error('workspace app registration vanished after conflicting insert');
+  return { app: existing, created: false };
+}
+
 export async function publishWorkspaceAppSchemaManifest(
   workspaceOwnerNpub: string,
   appNpub: string,

@@ -2484,6 +2484,26 @@ export function buildOpenApiDocument(origin: string) {
 
       },
       schemas: {
+        WorkspaceAppNamespaceRegistration: {
+          type: 'object',
+          required: ['installed', 'enabled', 'app_npub', 'app_name', 'capabilities'],
+          properties: {
+            installed: { type: 'boolean' },
+            enabled: { type: 'boolean' },
+            app_npub: { type: 'string' },
+            app_name: { type: ['string', 'null'] },
+            capabilities: { type: 'array', items: { type: 'string' } },
+          },
+        },
+        WorkspaceAppNamespaceRegistrationResult: {
+          type: 'object',
+          required: ['identity', 'created', 'registration'],
+          properties: {
+            identity: { type: 'object' },
+            created: { type: 'boolean' },
+            registration: { $ref: '#/components/schemas/WorkspaceAppNamespaceRegistration' },
+          },
+        },
         FlightDeckPgGeneralEnsureResponse: {
           type: 'object', required: ['identity','scope','channel','reused','policy'],
           properties: {
@@ -4471,6 +4491,42 @@ export function buildOpenApiDocument(origin: string) {
           responses: {
             '200': { description: 'Exact workspace identity and registration: installed, enabled, app_npub, app_name', content: { 'application/json': { schema: { type: 'object', required: ['identity', 'registration'], properties: { identity: { type: 'object' }, registration: { type: 'object', required: ['installed', 'enabled', 'app_npub'], properties: { installed: { type: 'boolean' }, enabled: { type: 'boolean' }, app_npub: { type: 'string' }, app_name: { type: ['string', 'null'] } } } } } } } },
             '403': { description: 'Typed workspace access denied' }, '404': { description: 'Workspace unavailable' },
+          },
+        },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/apps/{appNpub}/registration': {
+        get: {
+          tags: ['Flight Deck PG'], summary: 'Read one app namespace registration in a PG workspace',
+          description: 'Requires typed workspace.read. The namespace owner is resolved from the workspace UUID exactly as the PG app-row facade resolves it. appNpub must be a canonical bech32 npub. A present x-flightdeck-pg-app-npub header or app_npub query must name the path app or the workspace app; owner_npub query must match the workspace owner. Missing registration is explicit (installed=false).',
+          parameters: [
+            { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+            { name: 'appNpub', in: 'path', required: true, schema: { type: 'string' } },
+          ],
+          responses: {
+            '200': { description: 'Workspace identity and registration', content: { 'application/json': { schema: { type: 'object', required: ['identity', 'registration'], properties: { identity: { type: 'object' }, registration: { $ref: '#/components/schemas/WorkspaceAppNamespaceRegistration' } } } } } },
+            '400': { description: 'validation_error: app_npub is not a canonical npub' },
+            '403': { description: 'workspace_membership_required, permission_denied, or workspace_app_identity_mismatch' },
+            '404': { description: 'workspace_not_found' },
+          },
+        },
+        post: {
+          tags: ['Flight Deck PG'], summary: 'Ensure one app namespace registration in a PG workspace',
+          description: 'Requires typed workspace.manage. Insert-only and idempotent: a first call creates an enabled registration with the declared name and capabilities (201, created=true). An existing enabled registration is returned unchanged (200, created=false); its name and capabilities are never updated by this route. An existing disabled registration is never reactivated (409 workspace_app_disabled). Does not provision app keys, WApps, billing, ACL grants, table schemas, app signers or workspaces. Capability app_rows.private_only restricts app rows to private visibility.',
+          parameters: [
+            { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+            { name: 'appNpub', in: 'path', required: true, schema: { type: 'string' } },
+          ],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['app_name'], properties: {
+            app_name: { type: 'string', minLength: 1, maxLength: 128 },
+            capabilities: { type: 'array', maxItems: 32, items: { type: 'string', pattern: '^[a-z][a-z0-9_.:-]*$', maxLength: 128 } },
+          } } } } },
+          responses: {
+            '200': { description: 'Already registered and enabled; returned unchanged', content: { 'application/json': { schema: { $ref: '#/components/schemas/WorkspaceAppNamespaceRegistrationResult' } } } },
+            '201': { description: 'Registration created', content: { 'application/json': { schema: { $ref: '#/components/schemas/WorkspaceAppNamespaceRegistrationResult' } } } },
+            '400': { description: 'validation_error with details.fields for app_npub, body, app_name or capabilities' },
+            '403': { description: 'workspace_membership_required, permission_denied (required_permission workspace.manage), or workspace_app_identity_mismatch' },
+            '404': { description: 'workspace_not_found' },
+            '409': { description: 'workspace_app_disabled: registration exists but is disabled; body includes registration', content: { 'application/json': { schema: { type: 'object', required: ['error', 'code', 'status', 'identity', 'registration'], properties: { error: { type: 'string' }, code: { type: 'string', enum: ['workspace_app_disabled'] }, status: { type: 'integer', enum: [409] }, identity: { type: 'object' }, registration: { $ref: '#/components/schemas/WorkspaceAppNamespaceRegistration' } } } } } },
           },
         },
       },

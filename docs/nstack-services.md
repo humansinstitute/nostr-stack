@@ -162,3 +162,19 @@ workspace and returns `identity` plus `registration` (`installed`, `enabled`,
 namespace route's ACL. Missing registration remains explicit. Display names are
 not stable product identifiers; clients must review the exact registered app
 identity from the authorized locator rather than guessing an Ambulando namespace.
+
+An app that needs its own private namespace in a selected workspace (for
+example Alexandria) uses
+`GET|POST /api/v4/flightdeck-pg/workspaces/:workspaceId/apps/:appNpub/registration`.
+Both derive the namespace owner from the workspace UUID exactly as the PG
+app-row facade does. `GET` needs `workspace.read` and returns `identity` plus
+`registration` (`installed`, `enabled`, `app_npub`, `app_name`,
+`capabilities`). `POST {app_name, capabilities?}` needs `workspace.manage` and
+is insert-only: the first call creates an enabled registration (`201`,
+`created: true`); later calls return the stored row unchanged (`200`,
+`created: false`); a disabled registration is never reactivated (`409
+workspace_app_disabled`, body still carries `registration`). It provisions no
+app keys, WApp install, billing, ACL grants, table schemas or app signers, and
+does not use the legacy `/api/v4/workspaces/:owner/apps` management check. After
+registration the existing `.../apps/:appNpub/db/:collection/rows` routes work;
+`app_rows.private_only` restricts those rows to private visibility.

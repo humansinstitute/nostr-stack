@@ -1,6 +1,6 @@
 import { ensureWorkspaceGeneral } from '../services/flightdeck-pg-general';
 import { runFlightDeckPgChannelMove, ChannelMoveError } from '../services/flightdeck-pg-channel-move';
-import { getWorkspaceApp } from '../services/workspace-apps';
+import { ensureWorkspaceAppRegistration, getWorkspaceApp } from '../services/workspace-apps';
 import { MembershipAdminError, previewWorkspaceMemberRemoval, removeWorkspaceMember, setWorkspaceAgentManager, inspectWorkspaceMemberAccess } from '../services/flightdeck-pg-membership-admin';
 import { registerPermissionDiagnosticRoutes } from './permission-diagnostics';
 import {
@@ -399,6 +399,8 @@ import {
 } from '../services/flightdeck-pg-agent-direct';
 import type {
   CreateWorkspaceAppRowInput,
+  WorkspaceApp,
+  WorkspaceAppNamespaceRegistration,
   FlightDeckPgActorKind,
   FlightDeckPgCommentMention,
   FlightDeckPgApprovalStatus,
@@ -1862,6 +1864,124 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/app-registration', async (c) =>
     installed: Boolean(registration), enabled: registration?.enabled === true,
     app_npub: context.workspace.app_npub, app_name: registration?.app_name ?? null,
   } });
+});
+
+const APP_NAMESPACE_CAPABILITY_PATTERN = /^[a-z][a-z0-9_.:-]*$/;
+const APP_NAMESPACE_MAX_CAPABILITIES = 32;
+const APP_NAMESPACE_MAX_NAME_LENGTH = 128;
+
+function isCanonicalNpub(value: string) {
+  try {
+    const decoded = nip19.decode(value);
+    return decoded.type === 'npub' && nip19.npubEncode(decoded.data) === value;
+  } catch {
+    return false;
+  }
+}
+
+function serializeAppNamespaceRegistration(appNpub: string, app: WorkspaceApp | null): WorkspaceAppNamespaceRegistration {
+  return {
+    installed: Boolean(app),
+    enabled: app?.enabled === true,
+    app_npub: appNpub,
+    app_name: app?.app_name ?? null,
+    capabilities: Array.isArray(app?.capabilities) ? app.capabilities.filter((item): item is string => typeof item === 'string') : [],
+  };
+}
+
+/**
+ * Shared guard for the per-app registration route: canonical path npub, and any caller-supplied app or owner label
+ * must name either the path app or the selected workspace's own app/owner. Labels never select the namespace.
+ */
+async function resolveAppNamespaceRequest(c: Context) {
+  const auth = await requireNip98AuthResolved(c);
+  if (auth instanceof Response) return { response: auth };
+  const result = await requireFlightDeckPgContext(c, auth.userNpub);
+  if ('response' in result) return { response: result.response };
+  const { context, identity } = result;
+  const appNpub = String(c.req.param('appNpub') || '');
+  if (!isCanonicalNpub(appNpub)) {
+    return { response: validationError(c, identity, [{ path: 'app_npub', code: 'invalid', message: 'app_npub must be a canonical bech32 npub' }]) };
+  }
+  const allowedApps = new Set([appNpub, context.workspace.app_npub]);
+  const headerApp = c.req.header('x-flightdeck-pg-app-npub');
+  const queryApp = c.req.query('app_npub');
+  const queryOwner = c.req.query('owner_npub');
+  if ((headerApp && !allowedApps.has(headerApp))
+    || (queryApp && !allowedApps.has(queryApp))
+    || (queryOwner && queryOwner !== context.workspace.workspace_owner_npub)) {
+    return { response: jsonError(c, 403, 'workspace_app_identity_mismatch', 'Request app or owner does not match the selected workspace app namespace', identity) };
+  }
+  return { auth, context, identity, appNpub };
+}
+
+flightDeckPgRouter.get('/workspaces/:workspaceId/apps/:appNpub/registration', async (c) => {
+  c.header('Cache-Control', 'private, no-store');
+  const resolved = await resolveAppNamespaceRequest(c);
+  if ('response' in resolved) return resolved.response;
+  const { auth, context, identity, appNpub } = resolved;
+  const decision = await authorizeFlightDeckPgOperation({ actorNpub: auth.userNpub,
+    appNpub: context.workspace.app_npub, workspaceId: context.workspace.id,
+    permission: 'workspace.read', resource: { type: 'workspace' } });
+  if (!decision.allowed) return authorizationError(c, decision, identity, 'workspace.read');
+  // Same namespace owner the app-row facade uses: resolved from the workspace UUID, never from the request.
+  const registration = await getWorkspaceApp(context.workspace.workspace_owner_npub, appNpub);
+  return c.json({ identity, registration: serializeAppNamespaceRegistration(appNpub, registration) });
+});
+
+flightDeckPgRouter.post('/workspaces/:workspaceId/apps/:appNpub/registration', async (c) => {
+  c.header('Cache-Control', 'private, no-store');
+  const resolved = await resolveAppNamespaceRequest(c);
+  if ('response' in resolved) return resolved.response;
+  const { auth, context, identity, appNpub } = resolved;
+  const manageError = await requireFlightDeckPgWorkspaceManage(c, auth.userNpub, context, identity);
+  if (manageError) return manageError;
+
+  const body = await readJsonBody(c);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return validationError(c, identity, [{ path: 'body', code: 'invalid_json', message: 'body must be a JSON object' }]);
+  }
+  const fields: { path: string; code: string; message: string }[] = [];
+  const appName = typeof body.app_name === 'string' ? body.app_name.trim() : '';
+  if (body.app_name === undefined || body.app_name === null || (typeof body.app_name === 'string' && !appName)) {
+    fields.push({ path: 'app_name', code: 'required', message: 'app_name must be a non-empty string' });
+  } else if (typeof body.app_name !== 'string' || appName.length > APP_NAMESPACE_MAX_NAME_LENGTH) {
+    fields.push({ path: 'app_name', code: 'invalid', message: `app_name must be a string of at most ${APP_NAMESPACE_MAX_NAME_LENGTH} characters` });
+  }
+  const capabilities: string[] = [];
+  if (body.capabilities !== undefined) {
+    const raw = body.capabilities;
+    if (!Array.isArray(raw) || raw.length > APP_NAMESPACE_MAX_CAPABILITIES
+      || raw.some((item) => typeof item !== 'string' || item.length > 128 || !APP_NAMESPACE_CAPABILITY_PATTERN.test(item))) {
+      fields.push({ path: 'capabilities', code: 'invalid', message: `capabilities must be an array of at most ${APP_NAMESPACE_MAX_CAPABILITIES} lowercase capability names` });
+    } else {
+      for (const item of raw as string[]) if (!capabilities.includes(item)) capabilities.push(item);
+    }
+  }
+  if (fields.length) return validationError(c, identity, fields);
+
+  const { app, created } = await getDb().begin(async (tx) => {
+    const ensured = await ensureWorkspaceAppRegistration(context.workspace.workspace_owner_npub, appNpub, {
+      appName, capabilities, createdByNpub: auth.userNpub,
+    }, tx);
+    if (ensured.created) {
+      await writeFlightDeckPgAudit({
+        workspaceId: context.workspace.id,
+        actorId: context.actor.id,
+        action: 'workspace_app_registration.create',
+        resourceType: 'workspace_app',
+        resourceId: ensured.app.id,
+        metadata: { app_npub: appNpub, app_name: appName, capabilities },
+      }, tx);
+    }
+    return ensured;
+  });
+  const registration = serializeAppNamespaceRegistration(appNpub, app);
+  if (!app.enabled) {
+    // A disabled registration is a deliberate operator decision: report it, never reactivate it.
+    return jsonError(c, 409, 'workspace_app_disabled', 'Workspace app registration exists but is disabled', identity, { registration });
+  }
+  return c.json({ identity, created, registration }, created ? 201 : 200);
 });
 
 flightDeckPgRouter.get('/workspaces/:workspaceId/descriptor', async (c) => {
