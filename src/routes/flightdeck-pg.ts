@@ -1,3 +1,4 @@
+import { inlineContentDisposition } from '../content-disposition';
 import { ensureWorkspaceGeneral } from '../services/flightdeck-pg-general';
 import { runFlightDeckPgChannelMove, ChannelMoveError } from '../services/flightdeck-pg-channel-move';
 import { ensureWorkspaceAppRegistration, getWorkspaceApp } from '../services/workspace-apps';
@@ -9379,7 +9380,7 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/files/:fileId/object', async (c
         'Content-Type': readable.storageObject.content_type || 'application/octet-stream',
         'Content-Length': String(partial.byteLength),
         'Content-Range': `bytes ${byteRange.start}-${byteRange.end}/${content.size}`,
-        'Content-Disposition': `inline; filename="${readable.storageObject.file_name || `${readable.storageObject.id}.bin`}"`,
+        'Content-Disposition': inlineContentDisposition(readable.storageObject.file_name || `${readable.storageObject.id}.bin`),
       },
     });
   }

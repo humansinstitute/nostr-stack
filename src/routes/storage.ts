@@ -1,3 +1,4 @@
+import { inlineContentDisposition } from '../content-disposition';
 import { Hono } from 'hono';
 import { requireNip98AuthResolved } from '../auth';
 import { getInsufficientCreditsBlock } from '../services/billing';
@@ -225,7 +226,7 @@ storageRouter.get('/:objectId/content', async (c) => {
       headers: {
         'Content-Type': obj.content_type || 'application/octet-stream',
         'Content-Length': String(obj.size_bytes || size || 0),
-        'Content-Disposition': `inline; filename=\"${obj.file_name || `${obj.id}.bin`}\"`,
+        'Content-Disposition': inlineContentDisposition(obj.file_name || `${obj.id}.bin`),
         'Cache-Control': 'public, max-age=3600',
       },
     });
@@ -247,7 +248,7 @@ storageRouter.get('/:objectId/content', async (c) => {
     headers: {
       'Content-Type': row.content_type || 'application/octet-stream',
       'Content-Length': String(row.size_bytes || size || 0),
-      'Content-Disposition': `inline; filename=\"${row.file_name || `${row.id}.bin`}\"`,
+      'Content-Disposition': inlineContentDisposition(row.file_name || `${row.id}.bin`),
       'Cache-Control': 'private, no-store',
     },
   });
