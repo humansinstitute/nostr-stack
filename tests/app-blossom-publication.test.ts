@@ -11,9 +11,10 @@ import { createApp } from '../src/server';
 // Legacy fixture without the runtime schema and without agent classifications: explicit, test-only ceiling provider.
 import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { buildOpenApiDocument } from '../src/openapi';
+import { previewWorkspaceMemberRemoval, removeWorkspaceMember } from '../src/services/flightdeck-pg-membership-admin';
 
-// 0 owner, 1 uploader member, 2 other member, 3 outsider (no membership).
-const keys = [101, 102, 103, 104].map(n => new Uint8Array(32).fill(n));
+// 0 owner, 1 uploader member, 2 other member, 3 outsider (no membership); 4 and 5 enroll in removal race tests.
+const keys = [101, 102, 103, 104, 108, 109].map(n => new Uint8Array(32).fill(n));
 const npubs = keys.map(key => nip19.npubEncode(getPublicKey(key)));
 const appNpub = nip19.npubEncode(getPublicKey(new Uint8Array(32).fill(105)));
 const otherAppNpub = nip19.npubEncode(getPublicKey(new Uint8Array(32).fill(106)));
@@ -44,6 +45,37 @@ async function appObject(bytes: Uint8Array, who = 1, complete = true) {
   await writeStorageObject(prepared.object_id, bytes, npubs[who]);
   if (complete) await completeStorageObject(prepared.object_id, {}, npubs[who]);
   return { id: prepared.object_id as string, sha: hash(bytes), path: pubPath(prepared.object_id) };
+}
+
+async function enroll(who: number) {
+  await sql.begin(async tx => {
+    await tx`SELECT set_config('tower.explicit_member_enrollment', ${`${workspaceId}:${actors[who]}`}, true)`;
+    await tx`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspaceId},${actors[who]},'member') ON CONFLICT DO NOTHING`;
+    await tx`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,permission)
+      VALUES(${workspaceId},'actor',${actors[who]},'workspace','workspace.read')`;
+  });
+}
+async function removeMember(who: number) {
+  const { confirmation_token } = await previewWorkspaceMemberRemoval(workspaceId, actors[who], npubs[0]);
+  return removeWorkspaceMember(workspaceId, actors[who], npubs[0], { confirmation_token, confirm_npub: npubs[who] });
+}
+/** Wait until `count` backends of this test database wait on a lock, or `stop` reports the race already resolved. */
+async function lockWaiters(count: number, stop: () => boolean = () => false) {
+  for (let i = 0; i < 500; i++) {
+    const [row] = await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'`;
+    if (row.n >= count || stop()) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`timed out waiting for ${count} lock waiters`);
+}
+/** Hold a row lock in its own transaction until released. */
+async function holdLock(lock: (tx: typeof sql) => Promise<unknown>) {
+  let release!: () => void, locked!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const acquired = new Promise<void>(resolve => { locked = resolve; });
+  const done = sql.begin(async tx => { await lock(tx as unknown as typeof sql); locked(); await gate; });
+  await acquired;
+  return async () => { release(); await done; };
 }
 
 beforeAll(async () => {
@@ -237,5 +269,51 @@ describe('channel-free app object Blossom publication', () => {
     const res = await app.request('/' + o.sha); expect(res.status).toBe(200);
     await request(o.path, 'DELETE', 1);
     await expect(new Response(res.body).arrayBuffer()).rejects.toThrow();
+  });
+
+  test('member removal racing a first PUT that commits first revokes it; rejoin does not resurrect it', async () => {
+    await enroll(4);
+    const o = await appObject(new Uint8Array([51, 52, 53]), 4);
+    // Park the already-authorized PUT inside its transaction (after the actor lock, at the binding lock).
+    const release = await holdLock(tx => tx`SELECT 1 FROM flightdeck_pg_app_storage_objects WHERE storage_object_id=${o.id} FOR UPDATE`);
+    const put = request(o.path, 'PUT', 4, consent(o.sha));
+    await lockWaiters(1);
+    let removed = false;
+    const removal = removeMember(4).finally(() => { removed = true; });
+    // Removal must wait for the in-flight publish instead of revoking before it inserts.
+    await lockWaiters(2, () => removed);
+    expect(removed).toBe(false);
+    await release();
+    expect((await put).status).toBe(200);
+    expect((await removal).removed).toBe(true);
+    const rows = await sql`SELECT revoked_at FROM flightdeck_pg_app_blossom_publications WHERE storage_object_id=${o.id}`;
+    expect(rows.length).toBe(1); expect(rows[0].revoked_at).not.toBeNull();
+    expect((await app.request('/' + o.sha)).status).toBe(401);
+    await enroll(4);
+    expect((await app.request('/' + o.sha)).status).toBe(401);
+    expect((await (await request(o.path, 'GET', 4)).json())).toMatchObject({ published_by_you: false, publication_active: false, public: false });
+  });
+
+  test('a first PUT racing an in-progress member removal is refused once the removal commits', async () => {
+    await enroll(5);
+    const o = await appObject(new Uint8Array([61, 62, 63]), 5);
+    // Park the removal after it has locked the actor and revoked publications, before it deletes the membership.
+    const release = await holdLock(tx => tx`SELECT 1 FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspaceId} AND actor_id=${actors[5]} FOR UPDATE`);
+    const removal = removeMember(5);
+    await lockWaiters(1);
+    let settled = false;
+    const put = request(o.path, 'PUT', 5, consent(o.sha)).finally(() => { settled = true; });
+    await lockWaiters(2, () => settled);
+    expect(settled).toBe(false);
+    await release();
+    expect((await removal).removed).toBe(true);
+    const res = await put;
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('publisher_authority_changed');
+    const [active] = await sql`SELECT count(*)::int AS n FROM flightdeck_pg_app_blossom_publications WHERE storage_object_id=${o.id} AND revoked_at IS NULL`;
+    expect(active.n).toBe(0);
+    await enroll(5);
+    expect((await app.request('/' + o.sha)).status).toBe(401);
+    expect((await (await request(o.path, 'GET', 5)).json())).toMatchObject({ published_by_you: false, publication_active: false });
   });
 });

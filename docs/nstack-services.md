@@ -200,7 +200,11 @@ as registration, and resolve the namespace owner from the workspace UUID.
   storage_object_not_found`. `PUT {"public": true, "expected_sha256": "<hex>"}`
   needs an enabled app, a completed, unlinked object and re-verified bytes equal
   to the reviewed hash (`409 storage_incomplete | storage_unavailable |
-  storage_object_linked | publication_hash_changed`). It records a hash-pinned
+  storage_object_linked | publication_hash_changed`). It holds the publisher's
+  actor row for the whole transaction, which member removal also locks before
+  revoking, and re-checks membership after taking it (`409
+  publisher_authority_changed`), so a concurrent removal cannot leave an
+  unrevoked row that rejoining would revive. It records a hash-pinned
   row in `flightdeck_pg_app_blossom_publications` and never changes
   `is_public` or storage ACLs. `DELETE` revokes only the caller's row, is
   idempotent and also works while the app is disabled. All three return

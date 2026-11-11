@@ -264,13 +264,20 @@ export async function appObjectBlossom(input: AppObjectInput & { origin: string 
 }
 
 export async function mutateAppObjectBlossom(input: AppObjectInput & { publish: boolean; expectedSha256?: string }, sql: DbClient) {
-  // Serialize repeated and concurrent publish/unpublish on the binding row.
+  // Member removal locks this actor row before revoking. Holding it until commit means a publish either commits
+  // first (and is revoked by the removal) or observes the removal; then the binding row serializes repeats.
+  await sql`SELECT id FROM flightdeck_pg_actors WHERE id=${input.actorId} FOR SHARE`;
   const object = await appStorageObject(input, sql, true);
   if (!input.publish) {
     const changed = await sql`UPDATE flightdeck_pg_app_blossom_publications SET revoked_at=NOW()
       WHERE storage_object_id=${object.id} AND actor_id=${input.actorId} AND revoked_at IS NULL RETURNING storage_object_id`;
     return changed.length > 0;
   }
+  const [workspace] = await sql`SELECT app_npub FROM flightdeck_pg_workspaces WHERE id=${input.workspaceId}`;
+  const current = workspace && await authorizeFlightDeckPgOperation({ actorNpub: input.actorNpub, appNpub: workspace.app_npub,
+    workspaceId: input.workspaceId, permission: 'workspace.read', resource: { type: 'workspace' } }, sql);
+  if (!current || !current.allowed)
+    throw new BlossomPublicationError('publisher_authority_changed', 409, 'Workspace membership changed; refresh and retry');
   if (await hasFlightDeckPgStorageAuthority(object.id, sql))
     throw new BlossomPublicationError('storage_object_linked', 409, 'Object is linked to workspace content; upload a standalone copy');
   if (!object.completed_at) throw new BlossomPublicationError('storage_incomplete', 409, 'Upload is not complete');
