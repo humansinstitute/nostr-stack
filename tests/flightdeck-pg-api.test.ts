@@ -688,6 +688,71 @@ describe('Flight Deck PG API routes', () => {
     expect(foreign.json.channels).toEqual([]);
   });
 
+  test('audio File registration conflicts atomically, while new DM attachment and link-only recovery replay safely', async () => {
+    const { workspaceId } = await seedWorkspace(`audio-${randomUUID()}`);
+    const scope = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/scopes`, 'POST', ownerSecret, { name: 'Audio fixture', kind: 'project' });
+    expect(scope.res.status).toBe(201);
+    const dm = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/scopes/${scope.json.scope.id}/channels`, 'POST', ownerSecret,
+      { name: 'Audio private DM', kind: 'dm', participant_npubs: [OWNER_NPUB, GROUP_MEMBER_NPUB] });
+    expect(dm.res.status).toBe(201);
+    const channelId = dm.json.channel.id;
+    const base = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/channels/${channelId}`;
+    const upload = async () => {
+      const bytes = Buffer.from(`audio contract fixture ${randomUUID()}`);
+      const prepared = await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/storage/prepare`, 'POST', ownerSecret,
+        { file_name: 'voice.m4a', content_type: 'audio/mp4', size_bytes: bytes.length, is_public: false });
+      expect(prepared.res.status).toBe(201);
+      const id = prepared.json.object_id;
+      expect((await requestJson(`/api/v4/storage/${id}`, 'PUT', ownerSecret, { base64_data: bytes.toString('base64') })).res.status).toBe(200);
+      expect((await requestJson(`/api/v4/storage/${id}/complete`, 'POST', ownerSecret, { sha256_hex: sha256Hex(bytes), size_bytes: bytes.length })).res.status).toBe(200);
+      return { id, bytes };
+    };
+    const request = (id: string, key: string, attachments = true) => {
+      const body = `[voice.m4a](storage://${id})`;
+      return { body, create_thread: true, client_request_id: key,
+        message_signature: messageSignature({ body, secret: ownerSecret, workspaceId, channelId }),
+        metadata: attachments ? { attachments: [{ storage_object_id: id, kind: 'file', mime_type: 'audio/mp4' }] } : {} };
+    };
+    const legacy = await upload();
+    const file = await requestJson(base + '/files', 'POST', ownerSecret, { storage_object_id: legacy.id, display_name: 'voice.m4a' });
+    expect(file.res.status).toBe(201);
+    const key = randomUUID();
+    const failed = await requestJson(base + '/messages', 'POST', ownerSecret, request(legacy.id, key));
+    expect(failed.res.status).toBe(409);
+    expect(failed.json.code).toBe('message_attachment_conflict');
+    expect((await sql`SELECT id FROM flightdeck_pg_messages WHERE workspace_id=${workspaceId}`).length).toBe(0);
+    expect((await sql`SELECT id FROM flightdeck_pg_threads WHERE workspace_id=${workspaceId}`).length).toBe(0);
+    // A rolled-back failure reserves no idempotency key. Keep the existing File and bytes;
+    // send its storage link without claiming a second attachment association.
+    const recovery = request(legacy.id, key, false);
+    const recovered = await requestJson(base + '/messages', 'POST', ownerSecret, recovery);
+    expect(recovered.res.status).toBe(201);
+    const replay = await requestJson(base + '/messages', 'POST', ownerSecret, recovery);
+    expect(replay.res.status).toBe(200);
+    expect(replay.json.replayed).toBe(true);
+    expect(replay.json.message.id).toBe(recovered.json.message.id);
+    expect(replay.json.thread.id).toBe(recovered.json.thread.id);
+    expect((await requestJson(base + '/files', 'GET', ownerSecret)).json.files.length).toBe(1);
+    const fresh = await upload();
+    const canonical = request(fresh.id, randomUUID());
+    const sent = await requestJson(base + '/messages', 'POST', ownerSecret, canonical);
+    expect(sent.res.status).toBe(201);
+    const retry = await requestJson(base + '/messages', 'POST', ownerSecret, canonical);
+    expect(retry.res.status).toBe(200);
+    expect(retry.json.message.id).toBe(sent.json.message.id);
+    const changed = request(fresh.id, canonical.client_request_id, false);
+    const conflict = await requestJson(base + '/messages', 'POST', ownerSecret, changed);
+    expect(conflict.res.status).toBe(409);
+    expect(conflict.json.code).toBe('idempotency_conflict');
+    expect((await requestJson(base + '/messages', 'POST', memberSecret, canonical)).res.status).toBe(403);
+    expect((await requestRaw(`/api/v4/storage/${fresh.id}/content`, 'GET', memberSecret)).res.status).toBe(404);
+    expect(Buffer.from((await requestRaw(`/api/v4/storage/${fresh.id}/content`, 'GET', groupMemberSecret)).bytes)).toEqual(fresh.bytes);
+    expect(Buffer.from((await requestRaw(`/api/v4/storage/${legacy.id}/content`, 'GET', ownerSecret)).bytes)).toEqual(legacy.bytes);
+    expect((await sql`SELECT id FROM flightdeck_pg_messages WHERE workspace_id=${workspaceId}`).length).toBe(2);
+    expect((await sql`SELECT id FROM flightdeck_pg_threads WHERE workspace_id=${workspaceId}`).length).toBe(2);
+    expect((await sql`SELECT id FROM flightdeck_pg_storage_links WHERE workspace_id=${workspaceId} AND deleted_at IS NULL`).length).toBe(2);
+  });
+
   test('text attachment lineage files are unique per origin attachment and replay safely', async () => {
     const { workspaceId, ownerId, groupMemberId } = await seedWorkspace('npub1textlineageapi');
     const [scope] = await sql`INSERT INTO flightdeck_pg_scopes(workspace_id,name,kind) VALUES(${workspaceId},'Lineage','project') RETURNING id`;
