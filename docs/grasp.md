@@ -167,3 +167,23 @@ loopback ingress, or an independent CapRover GRasp app with its own persistent
 volume. The latter needs explicit hosting/deployment approval. Keeping existing
 public Forgejo sources temporarily preserves access while that choice is made.
 Do not silently turn public repositories private or publish private data.
+
+## Isolated recovery gate
+
+`scripts/grasp/recovery.ts CONFIG` tests the patched immutable image using
+verified Git readbacks and retained signed repository/review events. Configuration
+provides `image` (a SHA256 image ID), `events` (signed-event JSON), `repositories`
+(array of `{ root, source, main }`), a new ignored `evidence` directory, and four
+unique disposable `name`, `volume`, `restoreName`, `restoreVolume` values beginning
+with `nstack-grasp-test-`. It refuses existing targets. This is a single-owner,
+single-service dataset gate, not an automatic production-volume snapshot.
+
+The gate never mounts a live service volume. It reconstructs an isolated data
+volume with actual verified repository objects and signed events, tests member
+reads and exclusion of another authenticated service member from Git and broad
+relay queries, stops its own writer, archives the complete volume privately,
+then restores into a second new volume. The restored public service identity,
+Git refs/objects, integrity and signed-event IDs must match. Both test containers
+are stopped in `finally`; private archives, volumes and failed-attempt evidence
+remain available for review. No key is inspected or printed. A successful gate
+does not replace the separately approved clean production snapshot and activation.

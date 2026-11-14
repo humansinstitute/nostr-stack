@@ -22,7 +22,7 @@ export class GraspClient extends Client {
   else if([30617,30618].includes(template.kind))check(template.tags.some(t=>t[0]==='d'&&t[1]===this.coordinate.identifier),'Repository coordinate mismatch');
   else check(template.tags.some(t=>t[0]==='a'&&t[1]===`30617:${nostr.nip19.decode(this.coordinate.actor).data}:${this.coordinate.identifier}`),'Review coordinate mismatch');
   return boundedBrokerRetry(async()=>{
-   const e={...template,created_at:template.created_at??Math.floor(Date.now()/1000),pubkey:identity.botPubkeyHex};
+   const e={...template,created_at:Math.floor(Date.now()/1000),pubkey:identity.botPubkeyHex};
    const r:any=await broker.callCapabilityBroker('/api/mcp/capabilities/nostr-event',{event:e});
    validateSignedResponse(r.event,e,nostr.verifyEvent);return r.event;
   });
