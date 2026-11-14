@@ -2290,12 +2290,12 @@ export interface StorageBlossomMetadata {
 
 // ---- Public Nstack service discovery ----
 
-export type NstackServiceId = 'tower' | 'relay' | 'blossom' | 'autopilot';
+export type NstackServiceId = 'tower' | 'relay' | 'blossom' | 'autopilot' | 'grasp';
 export type NstackServiceAvailability = 'available' | 'unavailable' | 'unknown';
 
 export interface NstackServiceDescriptor {
   id: NstackServiceId;
-  kind: 'tower' | 'nostr_relay' | 'blossom' | 'autopilot';
+  kind: 'tower' | 'nostr_relay' | 'blossom' | 'autopilot' | 'grasp';
   endpoint: string;
   version: string;
   protocols: string[];
@@ -2303,6 +2303,8 @@ export interface NstackServiceDescriptor {
   features: {
     nips?: number[];
     buds?: number[];
+    grasps?: number[];
+    private?: boolean;
   };
   availability: {
     status: NstackServiceAvailability;

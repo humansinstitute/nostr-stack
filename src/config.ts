@@ -1,5 +1,3 @@
-import { secretEnv } from './secret-env';
-
 function csvValues(value: string | undefined): string[] {
   return String(value || '')
     .split(',')
@@ -92,15 +90,6 @@ export const config = {
     auditRetentionDays: positiveIntEnv('WAPP_ACTIVITY_AUDIT_RETENTION_DAYS', 365),
     activeMaxAgeDays: positiveIntEnv('WAPP_ACTIVITY_ACTIVE_MAX_AGE_DAYS', 365),
   },
-  git: {
-    // Authentication only. An empty explicit Nostr allowlist denies all sign-ins.
-    oidcAllowedNpubs: csvValues(process.env.GIT_OIDC_ALLOWED_NPUBS),
-    oidcIssuer: String(process.env.GIT_OIDC_ISSUER || '').trim().replace(/\/+$/, ''),
-    oidcClientId: String(process.env.GIT_OIDC_CLIENT_ID || 'forgejo').trim(),
-    oidcClientSecret: secretEnv('GIT_OIDC_CLIENT_SECRET'),
-    oidcSigningKey: secretEnv('GIT_OIDC_SIGNING_KEY'),
-    oidcRedirectUri: String(process.env.GIT_OIDC_REDIRECT_URI || '').trim(),
-  },
   tower: {
     name: String(process.env.SUPERBASED_TOWER_NAME || '').trim() || null,
     description: String(process.env.SUPERBASED_TOWER_DESCRIPTION || '').trim() || null,
@@ -108,6 +97,12 @@ export const config = {
   nstack: {
     descriptorCacheTtlSeconds: positiveIntEnv('NSTACK_DESCRIPTOR_CACHE_TTL_SECONDS', 30),
     autopilotPublicOrigin: String(process.env.NSTACK_AUTOPILOT_PUBLIC_ORIGIN || '').trim(),
+    grasp: {
+      enabled: booleanEnv('NSTACK_GRASP_ENABLED'),
+      publicOrigin: String(process.env.NSTACK_GRASP_PUBLIC_ORIGIN || '').trim(),
+      healthUrl: String(process.env.NSTACK_GRASP_HEALTH_URL || '').trim(),
+      version: String(process.env.NSTACK_GRASP_VERSION || '3.0.1-b990d218').trim(),
+    },
     relay: {
       enabled: booleanEnv('NSTACK_RELAY_ENABLED'),
       publicOrigin: String(process.env.NSTACK_RELAY_PUBLIC_ORIGIN || '').trim(),

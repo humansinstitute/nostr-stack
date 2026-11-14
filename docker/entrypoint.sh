@@ -4,12 +4,8 @@ set -eu
 runtime_role=${TOWER_RUNTIME_ROLE:-api}
 
 case "$runtime_role" in
-  git-gateway)
-    echo "Starting stock Forgejo reverse proxy..."
-    exec bun run git:gateway
-    ;;
-  git-issue-broker|git-identity-reconciler|git-org-reconciler|git-reconciler)
-    echo "Retired runtime role: Tower authenticates only; Forgejo owns authorization." >&2
+  git-gateway|git-issue-broker|git-identity-reconciler|git-org-reconciler|git-reconciler)
+    echo "Retired runtime role: use the supported GRasp component." >&2
     exit 64
     ;;
   api)

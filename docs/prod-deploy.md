@@ -55,21 +55,11 @@ Optional because Tower has code defaults:
 - `DB_WAIT_MAX_ATTEMPTS` default `40`
 - `NSTACK_DESCRIPTOR_CACHE_TTL_SECONDS` default `30`
 
-Tower optionally provides Nostr OIDC authentication for stock Forgejo. Set
-`GIT_OIDC_ALLOWED_NPUBS` explicitly and preserve issuer, signing key, client
-secret and callback URL. Forgejo owns all native OAuth, repository permissions,
-Git and APIs. See [native migration](forgejo-native-auth-migration.md) before
-updating any existing deployment. No worker or issue broker is deployed.
-
-Prepare protected OIDC secret files without printing them:
-
-```bash
-./scripts/prepare-tower-git-deployment.sh /absolute/path/to/existing/.env.prod
-docker compose --env-file .env.prod -f docker-compose.prod.yml config --quiet
-```
-
-The preparation script preserves existing files. Preserve the original issuer
-and keys during migration; do not bootstrap replacement identities.
+GRasp is the supported Git/review service. Prepare its independent lifecycle,
+reviewed reader manifest and existing data volume using [GRasp operations](grasp.md).
+Do not activate this source's Forgejo removal until all source consumers, private
+access, review/deployment workflows and public repositories have passed cutover.
+The old source images and volumes remain rollback data.
 
 Important container note:
 
@@ -95,8 +85,6 @@ cp .env.prod.example .env.prod
 - set `SUPERBASED_SERVICE_NSEC` to the stable service key
 - set `DB_PASSWORD` to a real password
 - set the main and graph database usernames/passwords explicitly; no credential defaults are accepted
-- set `GIT_GATEWAY_ORIGINS` explicitly to the public HTTPS origin(s) that route
-  Git smart HTTP to this stack's gateway
 - set unique MinIO access and secret keys; no credential defaults are accepted
 - set `STORAGE_S3_ENDPOINT_PUBLIC` to the MinIO URL your clients can reach
 - leave `STORAGE_S3_ENDPOINT=http://minio:9000` unless you are using external S3
@@ -136,28 +124,11 @@ This starts:
 - `wingman-tower-nostr-relay`
 - `wingman-tower-blossom`
 - `wingman-tower-b3`
-- `wingman-tower-forgejo`
-- `wingman-tower-git-gateway`
 
-Forgejo has persistent config/data volumes and no host port. The optional plain
-reverse proxy is published on `127.0.0.1:3180` and preserves the public URL.
-Reverse-proxy identity authentication is disabled. Stock native OAuth, Git,
-API, consent and permissions pass through unchanged; the proxy has no Tower
-authorization or startup dependency. SSH, push-to-create, Actions and custom
-Git hooks remain disabled by default.
-
-Set `GIT_GATEWAY_BROWSER_ORIGIN` to the existing public Forgejo HTTPS origin.
-For a fresh instance, configure the native external OIDC source once:
-
-```bash
-./scripts/bootstrap-forgejo-oidc.sh
-```
-
-For migration, preserve existing source IDs, issuer and immutable subject links.
-Keep `GIT_FORGEJO_OIDC_ACCOUNT_LINKING=disabled`; do not auto-link by alias or
-email. Old control/identity bootstrap scripts are retired and return an error.
-Organizations, teams, accounts, usernames and repositories are managed natively
-in Forgejo. Never restart permission reconciliation to repair access.
+GRasp is managed separately by `docker-compose.grasp.yml`; a public-read service,
+when required, uses `docker-compose.grasp-public.yml` with independent storage.
+Neither Compose file starts or restarts Autopilot. Keep current runtime targets
+unchanged until the supervising owner approves the prepared activation.
 
 Postgres is created automatically, MinIO is bootstrapped with the configured bucket, and Tower waits for its dependencies, runs migrations, then starts the API.
 
@@ -169,8 +140,6 @@ separately; do not delete or recreate volumes.
 
 ```bash
 curl http://127.0.0.1:${TOWER_HOST_PORT:-3100}/health
-curl http://127.0.0.1:${GIT_GATEWAY_HOST_PORT:-3180}/health
-curl http://127.0.0.1:${GIT_GATEWAY_HOST_PORT:-3180}/ready
 curl http://127.0.0.1:${MINIO_API_HOST_PORT:-9000}/minio/health/live
 curl http://127.0.0.1:${TOWER_HOST_PORT:-3100}/.well-known/nstack.json
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f tower
@@ -181,11 +150,9 @@ Route them through distinct TLS-enabled domains; the relay proxy must preserve
 WebSocket upgrades. Full configuration, security boundaries and post-restart
 smoke commands are in [Nstack services](nstack-services.md).
 
-The shipped Autopilot `git-credential-wingman` helper obtains a native Forgejo
-OAuth credential through the session broker and Tower Nostr OIDC. Expiry causes
-native sign-in again. Existing native tokens work while Tower is unavailable;
-allowlist removal prevents new login only. Forgejo must revoke native access
-separately when immediate removal is required.
+Agent Git operations use the stable capability broker through
+`scripts/grasp/git.ts`. No native Forgejo OAuth credential, login allowlist or
+Tower OIDC client/signing secret is part of the new GRasp runtime.
 
 ## Canonical Tower release checks
 

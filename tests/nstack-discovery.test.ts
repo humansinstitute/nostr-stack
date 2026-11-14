@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { nip19 } from 'nostr-tools';
 import { config } from '../src/config';
 import { buildOpenApiDocument } from '../src/openapi';
 import { createApp } from '../src/server';
@@ -129,4 +130,17 @@ describe('Nstack service discovery v1', () => {
     expect(api.paths['/.well-known/nstack.json'].get.security).toEqual([]);
     expect(api.components.schemas.NstackServiceDiscoveryV1.properties.schema_version.const).toBe(1);
   });
+});
+
+test('private GRasp discovery pins FIPS and exposes no repository or membership inventory',async()=>{
+ const runtime=runtimeConfig();
+ const endpoint='http://'+nip19.npubEncode('b'.repeat(64))+'.fips:41007';
+ runtime.nstack.grasp={enabled:true,publicOrigin:endpoint,healthUrl:'http://grasp:7334/',version:'3.0.1-b990d218'};
+ const descriptor=await buildNstackServiceDiscovery({config:runtime,fetchImpl:(async()=>new Response('{}')) as typeof fetch});
+ expect(descriptor.services.find(s=>s.id==='grasp')).toMatchObject({endpoint,kind:'grasp',features:{private:true,grasps:[1,2,8]},availability:{status:'available'}});
+ expect(JSON.stringify(descriptor)).not.toContain('http://grasp:7334');
+ for(const unsafe of ['http://public.example','http://npub1invalid.fips:41007',endpoint+'/repository',endpoint+'?token=secret']){
+  runtime.nstack.grasp.publicOrigin=unsafe;
+  expect((await buildNstackServiceDiscovery({config:runtime})).services.some(s=>s.id==='grasp')).toBe(false);
+ }
 });

@@ -21,16 +21,17 @@ For the current Wingman Be Free workflow:
 - Flight Deck is not intended to run in Docker for local dev; it is run locally via Wingman/PM2 and deployed to CapRover for the latest live version
 - Yoke is a local CLI and should ideally be consumable via `npx wingman-yoke` or `bunx wingman-yoke`
 
-The portable Docker bundle is backend-only: Tower, Postgres, MinIO, a persistent
-Nostr relay, a full Blossom server, and the stock Forgejo provider with a plain
-reverse proxy preserving its public URL.
-Tower authenticates explicitly allowlisted Nostr identities through OIDC only.
-Forgejo issues native OAuth credentials and owns all accounts, repository/team
-permissions, Git and APIs. Autopilot's shipped helper signs in again through
-Tower when a native credential expires; there are no Tower Git grants, permission
-workers or issue broker. See [migration](docs/forgejo-native-auth-migration.md)
-for the reviewed cutover and native access recovery. Flight Deck and Autopilot
-stay outside this stack.
+The portable Docker bundle provides Tower, Postgres, MinIO, a persistent Nostr
+relay and a full Blossom server. GRasp is the Git/review component, with a
+separate private lifecycle in `docker-compose.grasp.yml`. It authenticates
+members with NIP-42 and repository-scoped NIP-98; Tower publishes explicit
+service discovery metadata. See [GRasp operations](docs/grasp.md) for the pinned
+source patch/build, broker agent commands, access controls and migration gates.
+
+Forgejo OIDC, proxy and runtime configuration are retired from the new source.
+Existing installations must finish the documented migration and activation
+gates before deploying this removal. Source and volume backups remain available
+for rollback; updating source does not retire a running service.
 
 Nostr Browser and other consent boundaries can inspect the safe public service
 catalogue at `/.well-known/nstack.json`. See

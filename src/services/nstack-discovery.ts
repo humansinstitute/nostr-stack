@@ -27,6 +27,17 @@ function configuredPublicOrigin(value: string, kind: 'https' | 'wss'): string | 
   }
 }
 
+export function configuredGraspOrigin(value: string): string | null {
+  const https = configuredPublicOrigin(value, 'https');
+  if (https) return https;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' || !/^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}\.fips$/.test(url.hostname)
+      || !url.port || url.username || url.password || url.search || url.hash || url.pathname !== '/') return null;
+    return url.origin;
+  } catch { return null; }
+}
+
 function configuredHealthUrl(value: string): string | null {
   try {
     if (!value) return null;
@@ -56,7 +67,7 @@ async function availability(
   const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
   try {
     const response = await fetchImpl(url, {
-      headers: { Accept: cacheKey === 'relay' ? 'application/nostr+json' : 'application/json, text/html;q=0.5' },
+      headers: { Accept: ['relay', 'grasp'].includes(cacheKey) ? 'application/nostr+json' : 'application/json, text/html;q=0.5' },
       signal: controller.signal,
     });
     status = response.ok ? 'available' : 'unavailable';
@@ -108,6 +119,21 @@ export async function buildNstackServiceDiscovery(
       id: 'autopilot', kind: 'autopilot', endpoint: autopilotOrigin, version: '1',
       protocols: ['https', 'nip-98'], capabilities: ['agents.read'],
       features: { nips: [98] }, availability: { status: 'unknown', checked_at: null },
+    });
+  }
+
+  // Selected FIPS services never acquire a public fallback. This descriptor
+  // contains service topology only, never private repository/member listings.
+  const graspOrigin = runtime.nstack.grasp.enabled
+    ? configuredGraspOrigin(runtime.nstack.grasp.publicOrigin) : null;
+  if (graspOrigin) {
+    services.push({
+      id: 'grasp', kind: 'grasp', endpoint: graspOrigin,
+      version: runtime.nstack.grasp.version,
+      protocols: ['git-smart-http', 'nostr-relay', 'nip-42', 'nip-98'],
+      capabilities: ['git.clone', 'git.fetch', 'git.push', 'repository.private', 'review.nip34'],
+      features: { nips: [1, 11, 34, 42, 98], grasps: [1, 2, 8], private: true },
+      availability: await availability('grasp', runtime.nstack.grasp.healthUrl, ttl, fetchImpl, now),
     });
   }
 

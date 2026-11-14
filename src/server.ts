@@ -19,7 +19,6 @@ import { flightDeckPgRouter } from './routes/flightdeck-pg';
 import { groupsRouter } from './routes/groups';
 import { graphRouter } from './routes/graph';
 import { learningRouter } from './routes/learning';
-import { gitOidcRouter } from './routes/git-oidc';
 import { recordsRouter } from './routes/records';
 import { storageRouter } from './routes/storage';
 import { streamRouter } from './routes/stream';
@@ -66,10 +65,7 @@ export function createApp(options: CreateAppOptions = {}) {
         enabled: Boolean(config.graph?.enabled),
         allowed_npubs_configured: (config.graph?.allowedNpubs?.length || 0) > 0,
       },
-      git: {
-        authentication_only: true,
-        oidc_configured: Boolean(config.git.oidcIssuer && config.git.oidcAllowedNpubs.length),
-      },
+      git: { provider: 'grasp', authentication: ['nip-42', 'nip-98'] },
     });
   });
   app.get('/version', (c) => c.json(getTowerBuildInfo()));
@@ -123,9 +119,8 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v4/wapp-activity/workspaces/:workspaceId/*', hostedWriteBoundary);
   app.route('/api/v4/hosting-billing', hostingBillingRouter);
   app.route('/api/v4/groups', groupsRouter);
-  app.route('/api/v4/git/oidc', gitOidcRouter);
-  // Legacy Git authority endpoints are retired. Forgejo owns all authorization.
-  app.all('/api/v4/git/*', (c) => c.json({ error: 'retired', message: 'Use native Forgejo Git and API endpoints' }, 410));
+  // Legacy Git authority and OIDC endpoints are retired. GRasp owns Git access.
+  app.all('/api/v4/git/*', (c) => c.json({ error: 'retired', message: 'Use the configured GRasp Git and Nostr endpoints' }, 410));
   app.route('/api/v4/graph', graphRouter);
   app.route('/api/v4/learning', learningRouter);
   app.route('/api/v4/billing', billingRouter);

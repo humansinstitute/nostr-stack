@@ -7,7 +7,7 @@ import { closeDb, setDb } from '../src/db';
 import { ensureRuntimeSchema } from '../src/schema/ensure-runtime-schema';
 import { completeInstallIntent } from '../src/services/wapp-management';
 import { config } from '../src/config';
-import { resolveForgejoLoginIdentity, forgejoLoginIdentitySchema } from '../src/services/forgejo-login-identity';
+import { forgejoLoginIdentitySchema } from '../src/schema/forgejo-login-legacy';
 
 const TEST_DB = process.env.TEST_DB_NAME || 'coworker_v4_test_flightdeck_pg_schema';
 
@@ -3116,11 +3116,8 @@ describe('native Forgejo schema retirement', () => {
     await sql`DELETE FROM flightdeck_pg_actors WHERE id = ${actor.id}`;
     expect((await sql`SELECT * FROM git_forgejo_workspace_bindings WHERE workspace_id = ${historical.id}`)[0]).toEqual(before);
     expect((await sql`SELECT * FROM git_forgejo_actor_aliases WHERE actor_id = ${actor.id}`)[0]).toEqual(aliasBefore);
-    const previousAllowlist = config.git.oidcAllowedNpubs;
-    try {
-      config.git.oidcAllowedNpubs = ['npub1native' + marker];
-      expect((await resolveForgejoLoginIdentity('npub1native' + marker, sql))!.sub).toBe(actor.id);
-    } finally { config.git.oidcAllowedNpubs = previousAllowlist; }
+    // Retired OIDC subjects remain recoverable after the actor is deleted.
+    expect((await sql`SELECT subject FROM forgejo_login_identities WHERE npub = ${'npub1native' + marker}`)[0].subject).toBe(actor.id);
     const externalFks = await sql`SELECT constraint_row.conname FROM pg_constraint constraint_row
       JOIN pg_class relation ON relation.oid = constraint_row.conrelid
       JOIN pg_class referenced ON referenced.oid = constraint_row.confrelid

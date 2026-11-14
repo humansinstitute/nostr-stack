@@ -1,0 +1,14 @@
+{
+  "upstream": "https://gitnostr.com/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit-grasp.git",
+  "revision": "b990d2189ba494944f8e6c875d52056421c061c2",
+  "patch": "patches/repository-readers.patch",
+  "patch_sha256": "dc849fe0903dcccc5a0d271b3b9625916a140a0b208e5086290fe63e0e285d67",
+  "scope": "Private repository read manifests for Git and relay; fail-closed unknown coordinates, counts and unscoped replies",
+  "gitworkshop": {
+    "upstream": "https://github.com/DanConwayDev/gitworkshop.git",
+    "base_revision": "dc36db64f6a2cca29d109829eabaf0a49d4bf4da",
+    "tested_revision": "9c107489a78f5fe36cfb23ad2c8683429f579842",
+    "patch": "patches/gitworkshop-managed-start.patch",
+    "patch_sha256": "296a1b28bcf2f0e378034aeecbd764344f7131726d3f362ee7a3daa39561c766"
+  }
+}

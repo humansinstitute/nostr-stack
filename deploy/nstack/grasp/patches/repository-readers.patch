@@ -1,0 +1,598 @@
+diff --git a/.env.example b/.env.example
+index bb6318d..3e20727 100644
+--- a/.env.example
++++ b/.env.example
+@@ -491,3 +491,6 @@
+ # NGIT_RELAY_MAX_SUBSCRIPTIONS=500
+ # NGIT_RELAY_FILTER_LIMIT=500
+ # NGIT_RELAY_MAX_EVENT_SIZE_BYTES=196608
++
++# Explicit private repository read ACL; absent preserves legacy service membership.
++# NGIT_PRIVATE_REPOSITORY_READERS_FILE=/etc/ngit-grasp/repository-readers.json
+diff --git a/docs/explanation/architecture.md b/docs/explanation/architecture.md
+index 575900e..2daa776 100644
+--- a/docs/explanation/architecture.md
++++ b/docs/explanation/architecture.md
+@@ -924,3 +924,9 @@ ngit-grasp uses inline authorization at the HTTP handler level, giving full cont
+ - [GRASP-02 Proactive Sync Design](grasp-02-proactive-sync.md) - Current production sync implementation
+ - [Test Strategy](../reference/test-strategy.md) - Comprehensive testing documentation
+ - [GRASP-01 Implementation Learnings](../learnings/grasp-01-implementation.md) - Patterns and lessons learned
++
++Private deployments may narrow the service allowlist with an explicit repository
++reader manifest. Git and WebSocket delivery both enforce the map. Unknown
++coordinates and unscoped replies fail closed; counts/negentropy are disabled in
++this mode. The manifest conveys read authority only, independently of signed
++maintainer/write policy. It is startup configuration and part of recovery state.
+diff --git a/docs/reference/configuration.md b/docs/reference/configuration.md
+index a1da46a..0f3be8d 100644
+--- a/docs/reference/configuration.md
++++ b/docs/reference/configuration.md
+@@ -1876,3 +1876,17 @@ NGIT_BIND_ADDRESS=0.0.0.0:3000 cargo run
+ ---
+ 
+ _Part of the [ngit-grasp reference documentation](./)_
++
++### NGIT_PRIVATE_REPOSITORY_READERS_FILE
++
++Optional path, unset by default. With private mode enabled, load a JSON object
++mapping `npub/repository` to an explicit nonempty array of reader npubs. The
++coordinate owner must be included. This only narrows service membership; it
++never grants maintainership or canonical write permission. A missing coordinate
++is denied, including unknown repositories. Invalid/unreadable files fail startup.
++Git credentials are checked against both service and repository membership.
++Relay events are filtered before delivery, including broad subscriptions. All
++repository a/A tags must name readable coordinates; e-only replies are denied.
++Scoped COUNT/negentropy are disabled to prevent cross-repository existence leaks.
++Membership changes currently require a reviewed service recreation; retain the
++manifest with the service recovery backup. No content or keys belong in it.
+diff --git a/nix/module.nix b/nix/module.nix
+index b050d31..c5f77d0 100644
+--- a/nix/module.nix
++++ b/nix/module.nix
+@@ -442,6 +442,12 @@ let
+         '';
+       };
+ 
++      privateRepositoryReadersFile = mkOption {
++        type = types.nullOr types.path;
++        default = null;
++        description = "Fail-closed JSON map of npub/repository to explicit private reader npubs. Missing coordinates deny access; scoped counts/negentropy and unscoped replies are disabled.";
++      };
++
+       privatePublicOrigin = mkOption {
+         type = types.str;
+         default = "";
+@@ -634,6 +640,7 @@ let
+       NGIT_PRIVATE_MODE = if cfg.privateMode then "true" else "false";
+       NGIT_PRIVATE_MEMBERS = concatStringsSep "," cfg.privateMembers;
+       NGIT_PRIVATE_PUBLIC_ORIGIN = cfg.privatePublicOrigin;
++      NGIT_PRIVATE_REPOSITORY_READERS_FILE = if cfg.privateRepositoryReadersFile == null then "" else toString cfg.privateRepositoryReadersFile;
+       NGIT_DELETION_REQUEST_DISRESPECTOR =
+         if cfg.deletionRequestDisrespector then "true" else "false";
+       NGIT_RELAY_MAX_SUBSCRIPTIONS = toString cfg.relayMaxSubscriptions;
+diff --git a/src/config.rs b/src/config.rs
+index 3d49d31..27caf4a 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -634,6 +634,10 @@ pub struct Config {
+     #[arg(long, env = "NGIT_PRIVATE_PUBLIC_ORIGIN", default_value = "")]
+     pub private_public_origin: String,
+ 
++    /// Fail-closed JSON map of npub/repository to explicit reader npubs.
++    #[arg(long, env = "NGIT_PRIVATE_REPOSITORY_READERS_FILE", default_value = "")]
++    pub private_repository_readers_file: String,
++
+     /// Repository whitelist: comma-separated list of npub/identifier/npub/identifier entries
+     /// Formats: "npub1...", "npub1.../identifier", "identifier"
+     /// When set, only announcements matching the whitelist AND listing the service are accepted
+@@ -1040,6 +1044,9 @@ impl Config {
+         // Validate repository whitelist configuration
+         let repository_whitelist = WhitelistEntry::parse_whitelist(&self.repository_whitelist);
+ 
++        if !self.private_repository_readers_file.is_empty() && !self.private_mode {
++            anyhow::bail!("Repository readers require NGIT_PRIVATE_MODE=true");
++        }
+         let private_members = self.parse_private_members()?;
+         if self.private_mode && private_members.is_empty() {
+             return Err(anyhow!(
+@@ -1375,6 +1382,7 @@ impl Config {
+             private_mode: false,
+             private_members: String::new(),
+             private_public_origin: String::new(),
++            private_repository_readers_file: String::new(),
+             repository_whitelist: String::new(),
+             repository_blacklist: String::new(),
+             blacklist_auto_restore: false,
+diff --git a/src/private/access.rs b/src/private/access.rs
+index 7b9379d..e156c28 100644
+--- a/src/private/access.rs
++++ b/src/private/access.rs
+@@ -1,7 +1,7 @@
+-use std::collections::HashSet;
++use std::collections::{HashMap, HashSet};
+ use std::sync::{Arc, RwLock};
+ 
+-use nostr_sdk::prelude::PublicKey;
++use nostr_sdk::prelude::{Event, PublicKey, ToBech32};
+ use tokio::sync::watch;
+ 
+ /// Live service-wide access list for a private GRASP instance.
+@@ -17,6 +17,7 @@ pub struct PrivateAccess {
+ struct Inner {
+     members: RwLock<HashSet<PublicKey>>,
+     generation: watch::Sender<u64>,
++    repository_readers: RwLock<Option<HashMap<String, HashSet<PublicKey>>>>,
+ }
+ 
+ impl PrivateAccess {
+@@ -26,10 +27,146 @@ impl PrivateAccess {
+             inner: Arc::new(Inner {
+                 members: RwLock::new(members.into_iter().collect()),
+                 generation,
++                repository_readers: RwLock::new(None),
+             }),
+         }
+     }
+ 
++    /// Load an explicit fail-closed repository read manifest. It only narrows
++    /// service membership; it never confers canonical write/maintainer authority.
++    pub fn load_repository_readers(&self, path: &std::path::Path) -> anyhow::Result<()> {
++        let bytes = std::fs::read(path)?;
++        let raw: HashMap<String, Vec<String>> = serde_json::from_slice(&bytes)?;
++        anyhow::ensure!(!raw.is_empty(), "Repository read manifest is empty");
++        let mut readers = HashMap::new();
++        for (coordinate, members) in raw {
++            let (owner, identifier) = coordinate
++                .split_once('/')
++                .ok_or_else(|| anyhow::anyhow!("Invalid repository coordinate"))?;
++            let owner_key = PublicKey::parse(owner)?;
++            anyhow::ensure!(
++                owner_key.to_bech32()? == owner
++                    && !identifier.is_empty()
++                    && !identifier.contains('/')
++                    && !members.is_empty(),
++                "Invalid repository read manifest entry"
++            );
++            let keys: HashSet<PublicKey> = members
++                .iter()
++                .map(|value| PublicKey::parse(value))
++                .collect::<Result<_, _>>()?;
++            anyhow::ensure!(
++                keys.contains(&owner_key),
++                "Repository owner must remain a reader"
++            );
++            readers.insert(coordinate, keys);
++        }
++        *self
++            .inner
++            .repository_readers
++            .write()
++            .expect("repository access lock poisoned") = Some(readers);
++        Ok(())
++    }
++
++    pub fn repository_scoped(&self) -> bool {
++        self.inner
++            .repository_readers
++            .read()
++            .expect("repository access lock poisoned")
++            .is_some()
++    }
++
++    pub fn can_read_repository(
++        &self,
++        reader: &PublicKey,
++        owner: &PublicKey,
++        identifier: &str,
++    ) -> bool {
++        if !self.contains(reader) {
++            return false;
++        }
++        let manifest = self
++            .inner
++            .repository_readers
++            .read()
++            .expect("repository access lock poisoned");
++        let Some(manifest) = manifest.as_ref() else {
++            return true;
++        };
++        let owner = owner
++            .to_bech32()
++            .expect("public-key encoding is infallible");
++        manifest
++            .get(&format!("{owner}/{identifier}"))
++            .is_some_and(|members| members.contains(reader))
++    }
++
++    pub fn can_read_url(&self, reader: &PublicKey, url: &str) -> bool {
++        if !self.repository_scoped() {
++            return self.contains(reader);
++        }
++        let Some((_, path)) = url
++            .split_once("://")
++            .and_then(|(_, rest)| rest.split_once('/'))
++        else {
++            return false;
++        };
++        let Some((owner, repository)) = path.split_once('/') else {
++            return false;
++        };
++        let Some(identifier) = repository.strip_suffix(".git") else {
++            return false;
++        };
++        let Ok(owner) = PublicKey::parse(owner) else {
++            return false;
++        };
++        self.can_read_repository(reader, &owner, identifier)
++    }
++
++    /// Do not leak repository events through broad subscriptions or e-only
++    /// replies. Scoped private clients must carry their repository a/A tag.
++    pub fn can_read_event(&self, reader: &PublicKey, event: &Event) -> bool {
++        if !self.repository_scoped() {
++            return self.contains(reader);
++        }
++        let kind = event.kind.as_u16();
++        if kind == 30617 || kind == 30618 {
++            let identifiers: Vec<_> = event
++                .tags
++                .iter()
++                .filter_map(|t| {
++                    let v = t.as_slice();
++                    (v.len() == 2 && v[0] == "d").then(|| v[1].clone())
++                })
++                .collect();
++            return identifiers.len() == 1
++                && self.can_read_repository(reader, &event.pubkey, &identifiers[0]);
++        }
++        let mut coordinates = 0;
++        for tag in event.tags.iter() {
++            let values = tag.as_slice();
++            if values.len() < 2 || (values[0] != "a" && values[0] != "A") {
++                continue;
++            }
++            let mut parts = values[1].splitn(3, ':');
++            if parts.next() != Some("30617") {
++                return false;
++            }
++            let Some(owner) = parts.next().and_then(|v| PublicKey::parse(v).ok()) else {
++                return false;
++            };
++            let Some(identifier) = parts.next() else {
++                return false;
++            };
++            if !self.can_read_repository(reader, &owner, identifier) {
++                return false;
++            }
++            coordinates += 1;
++        }
++        coordinates > 0
++    }
++
+     pub fn contains(&self, pubkey: &PublicKey) -> bool {
+         self.inner
+             .members
+@@ -78,6 +215,64 @@ mod tests {
+     use super::*;
+     use nostr_sdk::prelude::Keys;
+ 
++    #[test]
++    fn scoped_readers_deny_other_service_members_and_unknown_repositories() {
++        use nostr_sdk::prelude::{EventBuilder, FinalizeEvent, Kind, Tag};
++        let owner = Keys::generate();
++        let allowed = Keys::generate();
++        let other = Keys::generate();
++        let access =
++            PrivateAccess::new([owner.public_key(), allowed.public_key(), other.public_key()]);
++        let file = tempfile::NamedTempFile::new().unwrap();
++        let coordinate = format!("{}/secret", owner.public_key().to_bech32().unwrap());
++        std::fs::write(file.path(),serde_json::json!({coordinate:[owner.public_key().to_bech32().unwrap(),allowed.public_key().to_bech32().unwrap()]}).to_string()).unwrap();
++        access.load_repository_readers(file.path()).unwrap();
++        assert!(access.can_read_repository(&allowed.public_key(), &owner.public_key(), "secret"));
++        assert!(!access.can_read_repository(&other.public_key(), &owner.public_key(), "secret"));
++        assert!(!access.can_read_repository(&owner.public_key(), &owner.public_key(), "unknown"));
++        let root = format!(
++            "https://private.example/{}/secret.git",
++            owner.public_key().to_bech32().unwrap()
++        );
++        assert!(access.can_read_url(&allowed.public_key(), &root));
++        assert!(!access.can_read_url(&other.public_key(), &root));
++        let announcement = EventBuilder::new(Kind::Custom(30617), "")
++            .tags([Tag::parse(["d", "secret"]).unwrap()])
++            .finalize(&owner)
++            .unwrap();
++        assert!(access.can_read_event(&allowed.public_key(), &announcement));
++        assert!(!access.can_read_event(&other.public_key(), &announcement));
++        let a = format!("30617:{}:secret", owner.public_key().to_hex());
++        let pr = EventBuilder::new(Kind::Custom(1618), "private diff")
++            .tags([Tag::parse(["a", &a]).unwrap()])
++            .finalize(&allowed)
++            .unwrap();
++        assert!(access.can_read_event(&allowed.public_key(), &pr));
++        assert!(!access.can_read_event(&other.public_key(), &pr));
++        let reply = EventBuilder::new(Kind::Custom(1621), "unscoped private reply")
++            .finalize(&owner)
++            .unwrap();
++        assert!(!access.can_read_event(&allowed.public_key(), &reply));
++        access.replace([owner.public_key(), other.public_key()]);
++        assert!(!access.can_read_event(&allowed.public_key(), &pr));
++    }
++
++    #[test]
++    fn malformed_or_ownerless_manifest_fails_closed() {
++        let owner = Keys::generate();
++        let access = PrivateAccess::new([owner.public_key()]);
++        let file = tempfile::NamedTempFile::new().unwrap();
++        for text in [
++            "{}".to_string(),
++            "not json".to_string(),
++            serde_json::json!({format!("{}/repo",owner.public_key().to_bech32().unwrap()):[]})
++                .to_string(),
++        ] {
++            std::fs::write(file.path(), text).unwrap();
++            assert!(access.load_repository_readers(file.path()).is_err());
++        }
++    }
++
+     #[test]
+     fn replacement_updates_membership() {
+         let first = Keys::generate().public_key();
+diff --git a/src/private/nip98.rs b/src/private/nip98.rs
+index c51be91..6591b4d 100644
+--- a/src/private/nip98.rs
++++ b/src/private/nip98.rs
+@@ -47,7 +47,9 @@ pub fn validate_request<B>(
+     if event.kind != Kind::HttpAuth || event.verify().is_err() {
+         return Err(Nip98Error::Invalid);
+     }
+-    if !access.contains(&event.pubkey) {
++    if !access.contains(&event.pubkey)
++        || !access.can_read_url(&event.pubkey, canonical_repository_url)
++    {
+         return Err(Nip98Error::Restricted);
+     }
+ 
+diff --git a/src/private/ws_auth.rs b/src/private/ws_auth.rs
+index ef404de..299fa3d 100644
+--- a/src/private/ws_auth.rs
++++ b/src/private/ws_auth.rs
+@@ -5,7 +5,7 @@ use std::time::Duration;
+ use futures_util::{SinkExt, StreamExt};
+ use nostr_sdk::local_relay::LocalRelay;
+ use nostr_sdk::prelude::{
+-    nip42, ClientMessage, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId, Timestamp,
++    nip42, ClientMessage, Event, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId, Timestamp,
+ };
+ use tokio::io::{AsyncRead, AsyncWrite};
+ use tokio_tungstenite::tungstenite::protocol::Role;
+@@ -220,6 +220,26 @@ where
+             message = public.next() => {
+                 match message {
+                     Some(Ok(message)) if access.contains(&authenticated) => {
++                        if access.repository_scoped() {
++                            if let Message::Text(text) = &message {
++                                if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
++                                    let op = value[0].as_str().unwrap_or("");
++                                    if op == "COUNT" || op.starts_with("NEG-") {
++                                        let id=value[1].as_str().unwrap_or("");
++                                        public.send(Message::Text(serde_json::json!(["CLOSED",id,"restricted: scoped private reads do not support counts or negentropy"]).to_string().into())).await.map_err(|e| e.to_string())?;
++                                        continue;
++                                    }
++                                    if op=="EVENT" {
++                                        let allowed=Event::from_json(value[1].to_string()).ok().is_some_and(|event| access.can_read_event(&authenticated, &event));
++                                        if !allowed {
++                                            let id=value[1]["id"].as_str().unwrap_or("");
++                                            public.send(Message::Text(serde_json::json!(["OK",id,false,"restricted: repository access denied"]).to_string().into())).await.map_err(|e| e.to_string())?;
++                                            continue;
++                                        }
++                                    }
++                                }
++                            }
++                        }
+                         internal.send(message).await.map_err(|e| e.to_string())?;
+                     }
+                     Some(Ok(_)) => break,
+@@ -230,6 +250,16 @@ where
+             message = internal.next() => {
+                 match message {
+                     Some(Ok(message)) if access.contains(&authenticated) => {
++                        if access.repository_scoped() {
++                            if let Message::Text(text) = &message {
++                                if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
++                                    if value[0].as_str()==Some("EVENT") {
++                                        let allowed=Event::from_json(value[2].to_string()).ok().is_some_and(|event| access.can_read_event(&authenticated, &event));
++                                        if !allowed { continue; }
++                                    }
++                                }
++                            }
++                        }
+                         public.send(message).await.map_err(|e| e.to_string())?;
+                     }
+                     Some(Ok(_)) => break,
+diff --git a/src/server.rs b/src/server.rs
+index d9ae464..220117a 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -104,6 +104,11 @@ impl RelayServer {
+         config.validate()?;
+         let private_access = if config.private_mode {
+             let access = PrivateAccess::new(config.parse_private_members()?);
++            if !config.private_repository_readers_file.is_empty() {
++                access.load_repository_readers(std::path::Path::new(
++                    &config.private_repository_readers_file,
++                ))?;
++            }
+             info!(
+                 "GRASP-08 private mode enabled for {} configured member(s)",
+                 access.len()
+diff --git a/tests/common/relay.rs b/tests/common/relay.rs
+index a097d36..9a70d0c 100644
+--- a/tests/common/relay.rs
++++ b/tests/common/relay.rs
+@@ -98,6 +98,7 @@ struct RelayOptions {
+     relay_max_subscriptions: Option<usize>,
+     sync_recursive_descendant_limit: Option<usize>,
+     private_members: Option<String>,
++    private_repository_readers_file: Option<PathBuf>,
+     /// Explicit NGIT_USER_INDEX_RELAYS value (comma-separated), overriding
+     /// the bootstrap relay's double duty as the sole user-index target.
+     user_index_relays: Option<String>,
+@@ -171,6 +172,27 @@ impl TestRelay {
+         .await
+     }
+ 
++    pub async fn start_private_scoped(
++        members: &[nostr_sdk::prelude::PublicKey],
++        manifest: PathBuf,
++    ) -> Self {
++        Self::start_internal(
++            port::reserve_port(),
++            RelayOptions {
++                private_members: Some(
++                    members
++                        .iter()
++                        .map(|p| p.to_bech32().unwrap())
++                        .collect::<Vec<_>>()
++                        .join(","),
++                ),
++                private_repository_readers_file: Some(manifest),
++                ..RelayOptions::default()
++            },
++        )
++        .await
++    }
++
+     /// Start relay with sync from another relay (bootstrap relay)
+     ///
+     /// # Example
+@@ -882,6 +904,10 @@ impl TestRelay {
+                 );
+         }
+ 
++        if let Some(path) = &options.private_repository_readers_file {
++            cmd.env("NGIT_PRIVATE_REPOSITORY_READERS_FILE", path);
++        }
++
+         // The test infrastructure runs entirely on loopback, which the
+         // production outbound target policy rejects for event-directed sync.
+         // Default to the permissive test policy; policy regression tests opt
+diff --git a/tests/private_mode.rs b/tests/private_mode.rs
+index 3c81bc5..c1bdd4b 100644
+--- a/tests/private_mode.rs
++++ b/tests/private_mode.rs
+@@ -771,3 +771,115 @@ async fn private_websocket_bounds_invalid_authentication_attempts() {
+ 
+     relay.stop().await;
+ }
++
++#[tokio::test]
++async fn repository_read_manifest_filters_git_broad_relay_reads_and_counts() {
++    let owner = Keys::generate();
++    let member = Keys::generate();
++    let excluded = Keys::generate();
++    let npub = owner.public_key().to_bech32().unwrap();
++    let identifier = "scoped-migration";
++    let manifest = tempfile::NamedTempFile::new().unwrap();
++    std::fs::write(manifest.path(),serde_json::json!({format!("{npub}/{identifier}"):[npub.clone(),member.public_key().to_bech32().unwrap()]}).to_string()).unwrap();
++    let relay = TestRelay::start_private_scoped(
++        &[
++            owner.public_key(),
++            member.public_key(),
++            excluded.public_key(),
++        ],
++        manifest.path().to_path_buf(),
++    )
++    .await;
++    let root = format!("http://{}/{npub}/{identifier}.git", relay.domain());
++    let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "")
++        .tags([
++            Tag::identifier(identifier),
++            Tag::custom("clone", [root.clone()]),
++            Tag::custom("relays", [relay.url().to_string()]),
++        ])
++        .finalize(&owner)
++        .unwrap();
++    let git_dir = tempfile::tempdir().unwrap();
++    let commit = create_test_repo_with_commit(git_dir.path(), CommitVariant::StateTest).unwrap();
++    let state = create_state_event(
++        &owner,
++        identifier,
++        &[("main", &commit)],
++        &[],
++        &[root.as_str()],
++        &[relay.url()],
++    )
++    .unwrap();
++    let publisher = TestClient::new(relay.url(), owner.clone()).await.unwrap();
++    publisher.send_event(&announcement).await.unwrap();
++    publisher.send_event(&state).await.unwrap();
++    push_to_relay_with_auth_header(
++        git_dir.path(),
++        &relay.domain(),
++        &npub,
++        identifier,
++        Some(&credential(&owner, &root)),
++    )
++    .unwrap();
++    publisher.disconnect().await;
++    assert!(
++        wait_for_event_as(
++            relay.url(),
++            &owner,
++            announcement.id,
++            Duration::from_secs(30)
++        )
++        .await
++    );
++    let http = reqwest::Client::new();
++    let path = format!("{root}/info/refs?service=git-upload-pack");
++    let response = http
++        .get(&path)
++        .header(AUTHORIZATION, credential(&member, &root))
++        .send()
++        .await
++        .unwrap();
++    assert!(response.status().is_success());
++    let response = http
++        .get(&path)
++        .header(AUTHORIZATION, credential(&excluded, &root))
++        .send()
++        .await
++        .unwrap();
++    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
++    assert!(response.bytes().await.unwrap().is_empty());
++    for (keys, expected) in [(&member, true), (&excluded, false)] {
++        let (mut socket, challenge) = connect_and_challenge(&relay).await;
++        send_text(&mut socket, auth_message(keys, &relay.domain(), &challenge)).await;
++        let ack: serde_json::Value = serde_json::from_str(&next_text(&mut socket).await).unwrap();
++        assert_eq!(ack[2], true);
++        send_text(
++            &mut socket,
++            r#"["REQ","broad",{"kinds":[30617]}]"#.to_string(),
++        )
++        .await;
++        let mut saw = false;
++        loop {
++            let value: serde_json::Value =
++                serde_json::from_str(&next_text(&mut socket).await).unwrap();
++            if value[0] == "EOSE" {
++                break;
++            }
++            if value[0] == "EVENT" {
++                assert_eq!(value[2]["id"], announcement.id.to_hex());
++                saw = true;
++            }
++        }
++        assert_eq!(saw, expected, "broad relay query must obey repository ACL");
++        send_text(
++            &mut socket,
++            r#"["COUNT","count",{"kinds":[30617]}]"#.to_string(),
++        )
++        .await;
++        let denied: serde_json::Value =
++            serde_json::from_str(&next_text(&mut socket).await).unwrap();
++        assert_eq!(denied[0], "CLOSED");
++        socket.close(None).await.unwrap();
++    }
++    relay.stop().await;
++}

@@ -17,7 +17,7 @@ describe('supported Nstack deployment contract', () => {
     expect(compose).toContain('tower-blossom-data:/app/data');
     expect(compose).toContain('tower-nostr-relay-data:');
     expect(compose).toContain('tower-blossom-data:');
-    expect(compose.match(/healthcheck:/g)?.length).toBeGreaterThanOrEqual(7);
+    expect(compose.match(/healthcheck:/g)?.length).toBeGreaterThanOrEqual(6);
   });
 
   test('keeps sidecar listeners on loopback and requires explicit public origins', () => {

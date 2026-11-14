@@ -1,0 +1,48 @@
+# Separate public-read service. NEVER mount the private volume or private manifest.
+# Choose canonical HTTPS origin and approve hosting before activation/publication.
+name: nstack-grasp-public
+services:
+  grasp-public:
+    image: ${GRASP_PUBLIC_IMAGE:?set verified public GRASP image digest}
+    restart: unless-stopped
+    environment:
+      NGIT_DOMAIN: ${GRASP_PUBLIC_DOMAIN:?choose canonical public HTTPS host}
+      NGIT_PRIVATE_MODE: "false"
+      NGIT_PRIVATE_MEMBERS: ""
+      NGIT_REPOSITORY_WHITELIST: ${GRASP_PUBLIC_REPOSITORIES:?explicit public npub/repository coordinates only}
+      NGIT_GRASP06_ENABLE: "false"
+      NGIT_SYNC_PLUS_ENABLED: "false"
+      NGIT_USER_INDEX_RELAYS: ""
+      NGIT_SYNC_PLUS_FALLBACK_RELAYS: ""
+      NGIT_DATABASE_BACKEND: lmdb
+      NGIT_BIND_ADDRESS: 0.0.0.0:7334
+      NGIT_RELAY_NAME: Wingman public GRasp
+      NGIT_GIT_DATA_PATH: /data/git
+      NGIT_RELAY_DATA_PATH: /data/relay
+    volumes:
+      - public-data:/data
+    networks: [public-backend]
+    stop_grace_period: 5m
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --header, "Accept: application/nostr+json", "http://127.0.0.1:7334/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+  grasp-public-ingress:
+    image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GRASP_PUBLIC_HOST_PORT:?allocate independent public ingress port}:7334"
+    volumes:
+      - ./deploy/nstack/grasp-public-nginx.conf:/etc/nginx/nginx.conf:ro
+    networks: [ingress, public-backend]
+    depends_on:
+      grasp-public:
+        condition: service_healthy
+volumes:
+  public-data:
+    name: ${GRASP_PUBLIC_DATA_VOLUME:?choose NEW public-only volume; never private volume}
+networks:
+  ingress:
+  public-backend:
+    internal: true

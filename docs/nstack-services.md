@@ -1,4 +1,4 @@
-# Nstack relay, Blossom and service discovery
+# Nstack GRasp, relay, Blossom and service discovery
 
 Tower is the discovery boundary for the supported Nstack bundle. The canonical
 public descriptor is `GET /.well-known/nstack.json`.
@@ -224,3 +224,17 @@ stay true after your `DELETE` if someone else published the same bytes, and
 downloaded copies cannot be recalled. Clients that want a limited audience must
 publish ciphertext under a generic filename. Tower does not interpret the
 payload or any audience setting.
+
+## GRasp discovery
+
+When `NSTACK_GRASP_ENABLED=true`, configure an explicit root
+`NSTACK_GRASP_PUBLIC_ORIGIN`, optional internal `NSTACK_GRASP_HEALTH_URL` and
+`NSTACK_GRASP_VERSION`. HTTPS and pinned HTTP `npub….fips:port` origins are
+supported. No origin is inferred from forwarding headers. A selected FIPS
+service has no public fallback. The descriptor reports Git Smart HTTP, NIP-34,
+NIP-42, NIP-98 and GRASP-01/02/08 with private-service semantics. It contains no
+repository, collaborator, membership or internal health inventory. Consumers
+must authenticate independently; a descriptor is not an access grant.
+
+Use [GRasp operations](grasp.md) for the separate public-read deployment. Never
+advertise a public fallback for the private service or mount its volume there.

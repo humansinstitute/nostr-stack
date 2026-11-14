@@ -1,0 +1,53 @@
+# Supported private GRasp lifecycle. Reuses the verified existing service volume.
+# Prepare/config-check freely; activation requires the supervising owner's approval.
+name: nstack-grasp
+services:
+  grasp:
+    image: ${GRASP_IMAGE:?set verified GRASP_IMAGE digest}
+    restart: unless-stopped
+    environment:
+      NGIT_DOMAIN: ${GRASP_DOMAIN:?set canonical host and port}
+      NGIT_PRIVATE_PUBLIC_ORIGIN: ${GRASP_PUBLIC_ORIGIN:?set canonical origin}
+      NGIT_PRIVATE_MODE: "true"
+      NGIT_PRIVATE_REPOSITORY_READERS_FILE: /config/repository-readers.json
+      NGIT_PRIVATE_MEMBERS: ${GRASP_PRIVATE_MEMBERS:?set reviewed public member identities}
+      NGIT_REPOSITORY_WHITELIST: ${GRASP_MAINTAINERS:?set reviewed repository maintainer identities}
+      NGIT_GRASP06_ENABLE: "false"
+      NGIT_SYNC_PLUS_ENABLED: "false"
+      NGIT_USER_INDEX_RELAYS: ""
+      NGIT_SYNC_PLUS_FALLBACK_RELAYS: ""
+      NGIT_DATABASE_BACKEND: lmdb
+      NGIT_BIND_ADDRESS: 0.0.0.0:7334
+      NGIT_RELAY_NAME: Wingman private GRasp
+      NGIT_GIT_DATA_PATH: /data/git
+      NGIT_RELAY_DATA_PATH: /data/relay
+    volumes:
+      - grasp-data:/data
+      - ${GRASP_READERS_FILE:?set reviewed repository reader manifest}:/config/repository-readers.json:ro
+    networks: [private-backend]
+    stop_grace_period: 5m
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --header, "Accept: application/nostr+json", "http://127.0.0.1:7334/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+  grasp-ingress:
+    image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GRASP_HOST_PORT:?set existing loopback ingress port}:7334"
+    volumes:
+      - ./deploy/nstack/grasp-nginx.conf:/etc/nginx/nginx.conf:ro
+    networks: [ingress, private-backend]
+    depends_on:
+      grasp:
+        condition: service_healthy
+volumes:
+  grasp-data:
+    external: true
+    name: ${GRASP_DATA_VOLUME:?set existing verified volume; never create empty replacement}
+networks:
+  ingress:
+  private-backend:
+    internal: true

@@ -1,68 +1,13 @@
-# CapRover Tower and Forgejo Deploy
+# CapRover Tower and GRasp deployment
 
-Tower on CapRover is a service group, not a single container. The public stable
-installation uses these origins:
+Tower remains the authority API. Postgres, graph Postgres and MinIO keep their
+existing persistent service apps and volumes. GRasp owns Git and NIP-34 reviews;
+its private and public services use separate volumes and origins. See
+[GRasp operations](grasp.md) for source pins, build, access and activation gates.
 
-```text
-Tower API: https://tower-stable-api.b.otherstuff.ai
-Forgejo gateway: https://tower-stable-forgejo.b.otherstuff.ai
-MinIO API: https://tower-stable-minio.b.otherstuff.ai
-```
-
-The GitHub branch deploy rebuilds each Bun-based app independently. Postgres,
-MinIO, and the private Forgejo provider are sibling CapRover apps with
-persistent data and stable app names. They are recreated only when their
-image/config is intentionally changed.
-
-## App Layout
-
-Use one CapRover app per container:
-
-| App | Purpose | Deploy source | Persistent path | Exposed |
-| --- | --- | --- | --- | --- |
-| `tower-stable-postgres` | Main Tower Postgres | CapRover PostgreSQL one-click app or `postgres:16-alpine` image | `/var/lib/postgresql/data` | No |
-| `tower-stable-minio` | S3-compatible object storage | CapRover MinIO one-click app | `/data` | Yes, if clients need presigned upload/download URLs |
-| `tower-stable-api` | Tower API | GitHub branch `deployed-stable` | None | Yes |
-| `tower-stable-forgejo-provider` | Private stock Forgejo provider | `caprover/forgejo.captain-definition` | `/var/lib/gitea` | No |
-| `tower-stable-forgejo` | Public Tower Git/Forgejo gateway | GitHub branch `deployed-stable` | None | Yes |
-
-If graph memory is enabled, add a fourth app:
-
-| App | Purpose | Deploy source | Persistent path | Exposed |
-| --- | --- | --- | --- | --- |
-| `tower-stable-graph-postgres` | AGE graph Postgres | `apache/age:release_PG16_1.6.0` image | `/var/lib/postgresql/data` | No |
-
-CapRover gives each app an internal service DNS name:
-
-```text
-srv-captain--tower-stable-postgres
-srv-captain--tower-stable-minio
-srv-captain--tower-stable-api
-srv-captain--tower-stable-graph-postgres
-srv-captain--tower-stable-forgejo-provider
-srv-captain--tower-stable-forgejo
-```
-
-## Why This Works
-
-CapRover GitHub deploy is one app at a time. It reads the root `captain-definition` and builds one container from this repo.
-
-The stack therefore works as separate CapRover apps:
-
-1. Create persistent Postgres and MinIO apps once.
-2. Create the private persistent Forgejo provider once.
-3. Create only the Tower API and plain Forgejo proxy from the reviewed release.
-   Retired worker apps stay stopped; see [migration](forgejo-native-auth-migration.md).
-4. Set `TOWER_RUNTIME_ROLE` per Bun app so the shared image starts the intended
-   process.
-5. Point every app at its siblings using CapRover internal DNS.
-6. Future pushes to `deployed-stable` rebuild the GitHub-backed apps; data
-   remains in the Postgres, MinIO, and Forgejo volumes.
-
-Do not put a public domain on `tower-stable-forgejo-provider` . The only public Forgejo origin must terminate
-at `tower-stable-forgejo`, which proxies to the private provider.
-
-This replaces the manual SSH flow of `git pull`, `docker compose up --build`, and container relaunch for the API. Database/storage containers stay running unless you intentionally update them.
+Only activate Forgejo removal after verified consumer cutover. Preserve previous
+source images, protected configuration and volumes for rollback. The new Tower
+image does not run a Git proxy, OIDC provider or permission worker.
 
 ## Tower API GitHub Deploy
 
@@ -124,23 +69,6 @@ The same values are available as a copyable template in:
 caprover/tower-api.env.example
 ```
 
-For this stable deployment, use the exact Git/OIDC URL values from that
-template:
-
-```env
-GIT_FORGEJO_BASE_URL=http://srv-captain--tower-stable-forgejo-provider:3000
-GIT_GATEWAY_BROWSER_ORIGIN=https://tower-stable-forgejo.b.otherstuff.ai
-GIT_OIDC_ISSUER=https://tower-stable-api.b.otherstuff.ai/api/v4/git/oidc
-GIT_OIDC_REDIRECT_URI=https://tower-stable-forgejo.b.otherstuff.ai/user/oauth2/tower/callback
-```
-
-CapRover uses direct environment variables rather than the Docker Compose
-secret-file mounts. Do not set any corresponding `*_FILE` variable unless the
-file is actually mounted into that app. Use an independent
-`GIT_OIDC_CLIENT_SECRET` and protected RSA `GIT_OIDC_SIGNING_KEY`. Preserve both
-for existing installations and configure `GIT_OIDC_ALLOWED_NPUBS` explicitly.
-Tower authenticates only; there are no Git capability/control/broker secrets.
-
 If graph memory is enabled:
 
 ```env
@@ -156,43 +84,6 @@ GRAPH_DB_MAX_CONNECTIONS=10
 GRAPH_AGE_GRAPH_NAME=tower_memory
 GRAPH_ALLOWED_NPUBS=npub1...
 ```
-
-## Forgejo Apps
-
-### Private provider
-
-Create `tower-stable-forgejo-provider` from
-`caprover/forgejo.captain-definition`, set container HTTP port `3000`, and do
-not enable a public domain. Apply `caprover/forgejo.env.example` and attach
-persistent directory:
-
-```text
-/var/lib/gitea
-```
-
-Use a named volume such as `tower-stable-forgejo-provider-data`. The rootless
-image writes its generated configuration and SQLite database below
-`/var/lib/gitea`; mounting only `/etc/gitea` does not preserve either one.
-
-Reverse-proxy authentication is disabled. Native Forgejo OAuth/API/Git routes
-are public through the plain proxy and enforce Forgejo's own credentials and
-permissions. No trusted-header impersonation is used.
-
-### Public proxy
-
-Keep `tower-stable-forgejo`, port `3180`, HTTPS, WebSocket support and the existing
-public hostname. Apply `caprover/git-gateway.env.example`; it needs only the
-private provider base URL and public origin. It does not depend on Tower for
-already-authenticated Git/API access.
-
-### Retired workers
-
-Do not create or redeploy issue broker, identity or org/repository reconcilers.
-Disable existing apps, launchers and tokens with task/process evidence before
-cutover using [the executable migration handoff](forgejo-native-auth-migration.md).
-Keep the existing stock provider, persistent volume, OIDC source and user links.
-A fresh instance needs only the native `tower` OIDC authentication source, never
-provider control/identity accounts.
 
 ## Postgres App
 
@@ -266,23 +157,15 @@ mc anonymous set none tower-minio/superbased-storage
 
 Set `STORAGE_S3_ENDPOINT_PUBLIC` to the externally reachable MinIO API URL used by browsers for presigned uploads/downloads.
 
-## Stable Branch Update Flow
+## Stable branch update flow
 
-1. Fast-forward the release commit to `deployed-stable`.
-2. CapRover rebuilds each GitHub-connected Tower app.
-3. `docker/entrypoint.sh` selects the process using `TOWER_RUNTIME_ROLE`; only
-   the `api` role waits for Postgres and runs migrations.
-4. Existing Postgres, MinIO, and Forgejo volumes remain attached to their
-   service apps.
-5. Verify:
-
-```bash
-curl -fsS https://tower-stable-api.b.otherstuff.ai/health
-curl -fsS https://tower-stable-api.b.otherstuff.ai/api/v4/git/oidc/.well-known/openid-configuration
-curl -fsS https://tower-stable-forgejo.b.otherstuff.ai/health
-curl -fsS https://tower-stable-forgejo.b.otherstuff.ai/ready
-curl -fsS https://tower-stable-minio.b.otherstuff.ai/minio/health/live
-```
+Publish tested source to GitHub main first. Activation remains a separately
+approved release: update the intended deployment branch only after repository,
+reader, review/deployment and public-access checks pass. Do not deploy the new
+Tower image while a surviving Forgejo consumer still depends on Tower OIDC.
+After activation, check `/health`, `/.well-known/nstack.json`, private member and
+denial tests, ordinary clone/fetch/push/review and isolated recovery. Keep all
+retired source volumes until rollback retention is explicitly closed.
 
 ## Rollback
 

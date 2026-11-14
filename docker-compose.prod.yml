@@ -142,8 +142,6 @@ services:
       context: .
       args:
         BUN_IMAGE: ${TOWER_BUN_IMAGE:-oven/bun:1.2.23}
-        TOWER_GIT_COMMIT: ${TOWER_GIT_COMMIT:-}
-        TOWER_GIT_BRANCH: ${TOWER_GIT_BRANCH:-}
         TOWER_BUILD_TIME: ${TOWER_BUILD_TIME:-}
     container_name: wingman-tower-b3
     restart: unless-stopped
@@ -191,6 +189,10 @@ services:
       SUPERBASED_SERVICE_PUBKEY_HEX: ${SUPERBASED_SERVICE_PUBKEY_HEX:-}
       SUPERBASED_SERVICE_NPUB: ${SUPERBASED_SERVICE_NPUB:-}
       NSTACK_AUTOPILOT_PUBLIC_ORIGIN: ${NSTACK_AUTOPILOT_PUBLIC_ORIGIN:-}
+      NSTACK_GRASP_ENABLED: ${NSTACK_GRASP_ENABLED:-false}
+      NSTACK_GRASP_PUBLIC_ORIGIN: ${NSTACK_GRASP_PUBLIC_ORIGIN:-}
+      NSTACK_GRASP_HEALTH_URL: ${NSTACK_GRASP_HEALTH_URL:-}
+      NSTACK_GRASP_VERSION: ${NSTACK_GRASP_VERSION:-3.0.1-b990d218}
       NSTACK_RELAY_ENABLED: ${NSTACK_RELAY_ENABLED:-true}
       NSTACK_RELAY_PUBLIC_ORIGIN: ${NOSTR_RELAY_PUBLIC_ORIGIN:?set NOSTR_RELAY_PUBLIC_ORIGIN}
       NSTACK_RELAY_HEALTH_URL: http://nostr-relay:8080/
@@ -203,17 +205,6 @@ services:
       NSTACK_BLOSSOM_LIST_ENABLED: "true"
       NSTACK_BLOSSOM_MIRROR_ENABLED: "true"
       NSTACK_BLOSSOM_REPORT_ENABLED: "true"
-      GIT_GATEWAY_ORIGINS: ${GIT_GATEWAY_ORIGINS:-}
-      GIT_FORGEJO_BASE_URL: ${GIT_FORGEJO_BASE_URL:-}
-      GIT_GATEWAY_PORT: ${GIT_GATEWAY_PORT:-3180}
-      GIT_OIDC_ALLOWED_NPUBS: ${GIT_OIDC_ALLOWED_NPUBS:-}
-      GIT_OIDC_ISSUER: ${GIT_OIDC_ISSUER:-}
-      GIT_OIDC_CLIENT_ID: ${GIT_OIDC_CLIENT_ID:-forgejo}
-      GIT_OIDC_CLIENT_SECRET: ""
-      GIT_OIDC_CLIENT_SECRET_FILE: /run/tower-git-secrets/git-oidc-client-secret
-      GIT_OIDC_SIGNING_KEY: ""
-      GIT_OIDC_SIGNING_KEY_FILE: /run/tower-git-secrets/git-oidc-signing-key.pem
-      GIT_OIDC_REDIRECT_URI: ${GIT_OIDC_REDIRECT_URI:-}
       # APNs push provider (optional). Unset = provider_not_configured: Tower stays healthy and the inbox/registry keep working.
       # Key custody: APNS_AUTH_KEY_FILE must point under /run/tower-apns-secrets (read-only mount of TOWER_APNS_SECRETS_DIR).
       UNIFIEDPUSH_VAPID_PUBLIC_KEY: ${UNIFIEDPUSH_VAPID_PUBLIC_KEY:-}
@@ -239,107 +230,20 @@ services:
     ports:
       - "${TOWER_HOST_BIND_ADDRESS:-127.0.0.1}:${TOWER_HOST_PORT:-3100}:3100"
     volumes:
-      - ${TOWER_GIT_SECRETS_DIR:-./.runtime/tower-git-secrets}/git-oidc-client-secret:/run/tower-git-secrets/git-oidc-client-secret:ro
-      - ${TOWER_GIT_SECRETS_DIR:-./.runtime/tower-git-secrets}/git-oidc-signing-key.pem:/run/tower-git-secrets/git-oidc-signing-key.pem:ro
       # Directory mount (not a file mount): it is valid and empty when no APNs key exists, so an unconfigured Tower starts normally.
       - ${TOWER_FCM_SECRETS_DIR:-./.runtime/tower-fcm-secrets}:/run/tower-fcm-secrets:ro
       - ${TOWER_APNS_SECRETS_DIR:-./.runtime/tower-apns-secrets}:/run/tower-apns-secrets:ro
     networks:
       default:
-      git-private:
-        ipv4_address: 10.253.91.30
     healthcheck:
       test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:3100/health');process.exit(r.ok?0:1)"]
       interval: 5s
       timeout: 5s
       retries: 30
 
-  forgejo:
-    image: codeberg.org/forgejo/forgejo:16.0.3-rootless
-    container_name: wingman-tower-forgejo
-    restart: unless-stopped
-    environment:
-      FORGEJO__database__DB_TYPE: sqlite3
-      FORGEJO__server__ROOT_URL: ${GIT_GATEWAY_BROWSER_ORIGIN:-https://forgejo.otherstuff.studio}/
-      FORGEJO__server__HTTP_ADDR: 0.0.0.0
-      FORGEJO__server__DISABLE_SSH: "true"
-      FORGEJO__security__INSTALL_LOCK: "true"
-      FORGEJO__service__DISABLE_REGISTRATION: "false"
-      FORGEJO__service__ALLOW_ONLY_EXTERNAL_REGISTRATION: "true"
-      FORGEJO__service__REQUIRE_SIGNIN_VIEW: "true"
-      FORGEJO__service__ENABLE_INTERNAL_SIGNIN: "false"
-      FORGEJO__service__ENABLE_BASIC_AUTHENTICATION: "true"
-      FORGEJO__service__ENABLE_REVERSE_PROXY_AUTHENTICATION: "false"
-      FORGEJO__service__ENABLE_REVERSE_PROXY_AUTHENTICATION_API: "false"
-      FORGEJO__service__ENABLE_REVERSE_PROXY_AUTO_REGISTRATION: "false"
-      FORGEJO__service__ENABLE_REVERSE_PROXY_FULL_NAME: "false"
-      FORGEJO__oauth2_client__ENABLE_AUTO_REGISTRATION: "true"
-      FORGEJO__oauth2_client__USERNAME: preferred_username
-      # Preserve the existing OIDC source/subject links; never auto-link by alias.
-      FORGEJO__oauth2_client__ACCOUNT_LINKING: ${GIT_FORGEJO_OIDC_ACCOUNT_LINKING:-disabled}
-      FORGEJO__oauth2_client__OPENID_CONNECT_SCOPES: profile email
-      FORGEJO__ui__DEFAULT_SHOW_FULL_NAME: "true"
-      FORGEJO__repository__ENABLE_PUSH_CREATE_USER: "false"
-      FORGEJO__repository__ENABLE_PUSH_CREATE_ORG: "false"
-      FORGEJO__security__DISABLE_GIT_HOOKS: "true"
-      FORGEJO__actions__ENABLED: "false"
-      FORGEJO__webhook__ALLOWED_HOST_LIST: private,captain.a.otherstuff.ai,captain.b.otherstuff.ai,captain.pages.otherstuff.ai
-    volumes:
-      - tower-forgejo-data:/var/lib/gitea
-      - tower-forgejo-config:/etc/gitea
-    networks:
-      git-private:
-        ipv4_address: 10.253.91.10
-      oidc-egress:
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/healthz"]
-      interval: 5s
-      timeout: 5s
-      retries: 60
-
-  git-gateway:
-    build:
-      context: .
-      args:
-        BUN_IMAGE: ${TOWER_BUN_IMAGE:-oven/bun:1.2.23}
-        TOWER_GIT_COMMIT: ${TOWER_GIT_COMMIT:-}
-        TOWER_GIT_BRANCH: ${TOWER_GIT_BRANCH:-}
-        TOWER_BUILD_TIME: ${TOWER_BUILD_TIME:-}
-    container_name: wingman-tower-git-gateway
-    restart: unless-stopped
-    command: ["bun", "run", "git:gateway"]
-    depends_on:
-      forgejo:
-        condition: service_healthy
-    environment:
-      GIT_FORGEJO_BASE_URL: http://forgejo:3000
-      GIT_GATEWAY_BROWSER_ORIGIN: ${GIT_GATEWAY_BROWSER_ORIGIN:?set GIT_GATEWAY_BROWSER_ORIGIN}
-      GIT_GATEWAY_PORT: 3180
-    networks:
-      default:
-      git-private:
-        ipv4_address: 10.253.91.20
-    ports:
-      - "${GIT_GATEWAY_HOST_BIND_ADDRESS:-127.0.0.1}:${GIT_GATEWAY_HOST_PORT:-3180}:3180"
-    healthcheck:
-      test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:3180/ready');process.exit(r.ok?0:1)"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-
-networks:
-  git-private:
-    internal: true
-    ipam:
-      config:
-        - subnet: 10.253.91.0/24
-  oidc-egress:
-
 volumes:
   tower-postgres-data:
   tower-graph-postgres-data:
   tower-minio-data:
-  tower-forgejo-data:
-  tower-forgejo-config:
   tower-nostr-relay-data:
   tower-blossom-data:
