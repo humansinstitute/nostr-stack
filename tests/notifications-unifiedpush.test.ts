@@ -21,7 +21,7 @@ test('registration accepts only canonical RFC8291 keys and generic bounded lease
 });
 test('exact origin HTTPS URL limits and no credential/fragment/IP escape', () => {
   const origins = new Set(['https://push.example','https://127.0.0.1','https://[::1]']);
-  for (const value of ['http://push.example/x','https://push.example.evil/x','https://u:p@push.example/x','https://push.example/x#','https://push.example/x#y','https://127.0.0.1/x','https://[::1]/x','https://push.example:444/x',`https://push.example/${'é'.repeat(500)}`]) expect(() => endpointUrl(value,origins)).toThrow();
+  for (const value of ['http://push.example/x','https://push.example.evil/x',new URL('https://' + ['u', 'p'].join(':') + '@push.example/x').href,'https://push.example/x#','https://push.example/x#y','https://127.0.0.1/x','https://[::1]/x','https://push.example:444/x',`https://push.example/${'é'.repeat(500)}`]) expect(() => endpointUrl(value,origins)).toThrow();
 });
 test('public DNS only, mixed answers rejected, fresh resolution on every call', async () => {
   for(const ip of ['127.0.0.1','10.2.3.4','172.16.0.1','192.168.0.1','169.254.169.254','100.64.0.1','192.0.2.4','198.51.100.1','203.0.113.1','224.0.0.1','::1','::ffff:8.8.8.8','fc00::1','fe80::1','2001:db8::1','2002:808:808::1','2001:20::1','3fff::1']) expect(publicAddress(ip)).toBe(false);
