@@ -22,7 +22,7 @@ test('packaged shell retains exact native capability, proves identity and select
  try{
   for(const scenario of ['good','wrong-proof','missing-provider','https']){
    const context=await browser.newContext();const page=await context.newPage();const requests:string[]=[],grants:any[]=[];let ambient=0;const selectedEndpoint=scenario==='https'?payload.transports.https!.url:endpoint;
-   page.on('dialog',dialog=>dialog.accept());
+   let nativeDialogs=0;page.on('dialog',dialog=>{nativeDialogs++;return dialog.dismiss();});
    await page.route('**/*.fips*/**',route=>{ambient++;return route.abort();});
    await page.exposeFunction('fixtureSign',event=>finalizeEvent(event as any,user));
    await page.exposeFunction('fixtureConnect',grant=>{grants.push(grant);});
@@ -51,6 +51,9 @@ test('packaged shell retains exact native capability, proves identity and select
    },{userHex,available:scenario!=='missing-provider'});
    await page.goto('http://127.0.0.1:'+server.port+'/cap/index.html');expect(await page.evaluate(()=>typeof (window as any).Buffer)).toBe('undefined');
    await page.getByLabel('Shared workspace connection',{exact:true}).fill(envelope);await page.getByRole('button',{name:'Preview connection',exact:true}).click();await page.getByRole('button',{name:scenario==='https'?'Use HTTPS':'Use FIPS',exact:true}).click();
+   expect(requests).toHaveLength(0);expect(grants).toHaveLength(0);
+   await page.locator('#cancelReview').click();expect(requests).toHaveLength(0);
+   await page.getByRole('button',{name:scenario==='https'?'Use HTTPS':'Use FIPS',exact:true}).click();await page.locator('#approveReview').click();
    if(scenario==='good'||scenario==='https'){
     await page.waitForFunction(name=>document.getElementById('workspaceName')?.textContent===name,payload.name);expect(await page.locator('#workspaceName').textContent()).toBe(payload.name);
     expect(grants).toEqual(scenario==='https'?[]:[{endpoint,peerNpub:npub,purpose:'tower'}]);expect(requests).toContain('/api/v4/flightdeck-pg/workspaces');
@@ -58,7 +61,7 @@ test('packaged shell retains exact native capability, proves identity and select
     const message=scenario==='missing-provider'?'native FIPS transport':'identity proof invalid';await page.waitForFunction(message=>document.getElementById('status')?.textContent?.includes(message),message);expect(await page.locator('#status').textContent()).toContain(message);
     expect(requests.includes('/api/v4/flightdeck-pg/workspaces')).toBe(false);
    }
-   expect(ambient).toBe(0);await context.close();
+   expect(ambient).toBe(0);expect(nativeDialogs).toBe(0);await context.close();
   }
  }finally{await browser.close();server.stop(true);await rm(bundle,{recursive:true,force:true});}
 },30000);

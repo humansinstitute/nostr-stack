@@ -43,3 +43,9 @@ with CSP blocking ambient HTTP/FIPS and allowing the explicit HTTPS choice, with
 those tests is a fixture: native main-frame/consent/signing and real-device FIPS
 remain separate acceptance checks. Linux's missing native WebView message channel
 must be reported as unsupported rather than replaced by an ambient fallback.
+
+Transport confirmation stays inside the packaged document’s review dialog.
+Cancelling opens no grant and sends no backend request. The shell does not use a
+browser-native JavaScript confirmation for this step: native focus loss may
+revoke document capabilities before the operation starts. Native endpoint/peer
+consent, signer approval and real background/lock revocation remain separate.
