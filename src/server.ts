@@ -1,4 +1,3 @@
-import { gitOidcRouter } from './routes/git-oidc';
 import { installationRouter, installationHtml } from './routes/installation';
 import { managedStorageRouter } from './managed-storage/routes';
 import { consoleAsset } from './nstack-console';
@@ -125,8 +124,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v4/wapp-activity/workspaces/:workspaceId/*', hostedWriteBoundary);
   app.route('/api/v4/hosting-billing', hostingBillingRouter);
   app.route('/api/v4/groups', groupsRouter);
-  // Only explicit transitional authentication survives; GRasp owns all Git access.
-  app.route('/api/v4/git/oidc', gitOidcRouter);
+  // Legacy Git authority and OIDC endpoints are retired. GRasp owns Git access.
   app.all('/api/v4/git/*', (c) => c.json({ error: 'retired', message: 'Use the configured GRasp Git and Nostr endpoints' }, 410));
   app.route('/api/v4/graph', graphRouter);
   app.route('/api/v4/learning', learningRouter);

@@ -1,4 +1,3 @@
-import { secretEnv } from './secret-env';
 import { loadInstallationSettings } from './installation/settings';
 loadInstallationSettings();
 import { installedAdmin } from './installation/state';
@@ -36,8 +35,6 @@ function booleanEnv(name: string, fallback = false): boolean {
   if (!value) return fallback;
   return /^(1|true|yes|on)$/i.test(value);
 }
-
-const legacyOidcEnabled = booleanEnv('NSTACK_LEGACY_FORGEJO_OIDC_ENABLED');
 
 export const config = {
   port: parseInt(process.env.PORT || '3100', 10),
@@ -98,16 +95,6 @@ export const config = {
     projectionRetentionDays: positiveIntEnv('WAPP_ACTIVITY_PROJECTION_RETENTION_DAYS', 90),
     auditRetentionDays: positiveIntEnv('WAPP_ACTIVITY_AUDIT_RETENTION_DAYS', 365),
     activeMaxAgeDays: positiveIntEnv('WAPP_ACTIVITY_ACTIVE_MAX_AGE_DAYS', 365),
-  },
-  git: {
-    compatibilityEnabled: legacyOidcEnabled,
-    // Authentication only. An empty explicit Nostr allowlist denies all sign-ins.
-    oidcAllowedNpubs: csvValues(process.env.GIT_OIDC_ALLOWED_NPUBS),
-    oidcIssuer: String(process.env.GIT_OIDC_ISSUER || '').trim().replace(/\/+$/, ''),
-    oidcClientId: String(process.env.GIT_OIDC_CLIENT_ID || 'forgejo').trim(),
-    oidcClientSecret: legacyOidcEnabled ? secretEnv('GIT_OIDC_CLIENT_SECRET') : '',
-    oidcSigningKey: legacyOidcEnabled ? secretEnv('GIT_OIDC_SIGNING_KEY') : '',
-    oidcRedirectUri: String(process.env.GIT_OIDC_REDIRECT_URI || '').trim(),
   },
   tower: {
     name: String(process.env.SUPERBASED_TOWER_NAME || '').trim() || null,

@@ -1,4 +1,3 @@
-import { legacyOidcPaths } from './legacy-oidc-openapi';
 import { managedStorageCollectionPaths } from './managed-storage/openapi';
 import { workspaceMembershipAdminPaths } from './workspace-membership-admin-openapi';
 import { documentEditPaths } from './document-edit-openapi';
@@ -4422,7 +4421,6 @@ export function buildOpenApiDocument(origin: string) {
     },
     security: [{ nip98: [] }],
     paths: {
-      ...(config.git.compatibilityEnabled ? legacyOidcPaths : {}),
       ...managedStorageCollectionPaths,
       ...workspaceMembershipAdminPaths,
       ...documentEditPaths,
