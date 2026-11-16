@@ -46,7 +46,15 @@ test('packaged shell retains exact native capability, proves identity and select
     const result=respond({url:route.request().url(),headers:route.request().headers()});await route.fulfill({...result,headers:{...headers,'content-type':'application/json'}});
    });
    await page.addInitScript(({userHex,available})=>{
-    (window as any).nostr={getPublicKey:async()=>userHex,signEvent:(event:any)=>(window as any).fixtureSign(event)};
+    let signerPending=false;
+    (window as any).signerOverlaps=0;
+    (window as any).nostr={getPublicKey:async()=>userHex,signEvent:async(event:any)=>{
+     // Native approval is interactive: another request cannot enter while it is open.
+     if(signerPending){(window as any).signerOverlaps++;throw Error('Another authentication approval is pending.');}
+     signerPending=true;
+     try{await new Promise(resolve=>setTimeout(resolve,30));return await (window as any).fixtureSign(event);}
+     finally{signerPending=false;}
+    }};
     (window as any).fipsTransport={available,version:2,connect:async(input:any)=>{await (window as any).fixtureConnect(input);return {...input,fetch:async(url:string,init:any)=>{const result=await (window as any).fixtureNativeFetch({url,headers:init.headers});return new Response(result.body,{status:result.status,headers:{'content-type':'application/json'}});},disconnect:async()=>{}};}};
    },{userHex,available:scenario!=='missing-provider'});
    await page.goto('http://127.0.0.1:'+server.port+'/cap/index.html');expect(await page.evaluate(()=>typeof (window as any).Buffer)).toBe('undefined');
@@ -61,6 +69,7 @@ test('packaged shell retains exact native capability, proves identity and select
     const message=scenario==='missing-provider'?'native FIPS transport':'identity proof invalid';await page.waitForFunction(message=>document.getElementById('status')?.textContent?.includes(message),message);expect(await page.locator('#status').textContent()).toContain(message);
     expect(requests.includes('/api/v4/flightdeck-pg/workspaces')).toBe(false);
    }
+   expect(await page.evaluate(()=>(window as any).signerOverlaps)).toBe(0);
    expect(ambient).toBe(0);expect(nativeDialogs).toBe(0);await context.close();
   }
  }finally{await browser.close();server.stop(true);await rm(bundle,{recursive:true,force:true});}
