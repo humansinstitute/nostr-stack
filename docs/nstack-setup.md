@@ -93,3 +93,8 @@ Stop/uninstall does not stop the shared FIPS daemon or remove installation data.
 Re-run the launcher or `install` after an approved source update to select a new
 hash-named runner snapshot. macOS user-agent persistence is checked separately
 from fresh Linux/systemd or reboot acceptance.
+
+Existing deployments that still use Forgejo need the reviewed, explicitly
+opt-in [temporary OIDC compatibility profile](legacy-forgejo-oidc-compatibility.md)
+before API activation. This does not authorize a Git cutover or replacing their
+production Compose configuration with the fresh-install bundle.
