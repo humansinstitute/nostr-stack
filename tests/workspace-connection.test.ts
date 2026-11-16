@@ -29,3 +29,10 @@ test('both transport envelope fits an actual QR encoder at M correction',async()
  expect(envelope.length).toBeLessThanOrEqual(2200);
  expect(await QRCode.toString(envelope,{type:'svg',errorCorrectionLevel:'M'})).toContain('<svg');
 });
+
+test('opaque historical workspace authority is canonical bytes, separate from its signing service',()=>{
+ const authority=nip19.npubEncode('00'.repeat(32));
+ const historical={...payload,workspace_service_npub:authority};
+ expect(parseWorkspaceConnection(signWorkspaceConnection(historical,nip19.nsecEncode(sk))).payload.workspace_service_npub).toBe(authority);
+ expect(()=>validateWorkspaceConnection({...historical,workspace_service_npub:authority.slice(0,-1)+(authority.endsWith('q')?'p':'q')})).toThrow();
+});
