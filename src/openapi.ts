@@ -2793,6 +2793,8 @@ export function buildOpenApiDocument(origin: string) {
           additionalProperties: false,
           required: ['id', 'kind', 'endpoint', 'version', 'protocols', 'capabilities', 'features', 'availability'],
           properties: {
+            transports: { type: 'object', properties: { https: { type: 'string' }, fips: { type: 'object', properties: { endpoint: { type: 'string' }, peer_npub: { type: 'string' }, port: { type: 'integer' } }, required: ['endpoint','peer_npub','port'] } }, description: 'Independent advertised routes; availability never grants authorization or proves remote reachability.' },
+            transport: { type: 'object', properties: { kind: { const: 'fips' }, peer_npub: { type: 'string' }, port: { type: 'integer', minimum: 1, maximum: 65535 } }, required: ['kind','peer_npub','port'], description: 'Endpoint-scoped native transport required. Pin peer; no implicit HTTPS fallback.' },
             id: { type: 'string', enum: ['tower', 'relay', 'blossom', 'autopilot', 'grasp'] },
             kind: { type: 'string', enum: ['tower', 'nostr_relay', 'blossom', 'autopilot', 'grasp'] },
             endpoint: { type: 'string', format: 'uri', description: 'Canonical public origin from explicit operator configuration; never inferred from forwarding headers.' },
@@ -7789,6 +7791,9 @@ export function buildOpenApiDocument(origin: string) {
       },
       '/api/v4/installation/settings/recover': {
         post: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Retry a failed rollback to the last working installation settings', responses: { '202': { description: 'Idempotent recovery queued' }, '403': { description: 'Administrator required' }, '409': { description: 'No recovery needed or controller unavailable' } } },
+      },
+      '/api/v4/installation/host/install': {
+        post: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Request supported host FIPS setup through the local helper and OS authorization', responses: { '202': { description: 'Idempotent host operation queued; OS permission/readiness still required' }, '403': { description: 'Administrator required' }, '409': { description: 'Host helper unavailable or operation busy' } } },
       },
       '/api/v4/installation/status': {
         get: { tags: ['Installation'], summary: 'Read safe installation and transport readiness', responses: { '200': { description: 'Public readiness only, no code or credentials' } } },

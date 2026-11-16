@@ -4,10 +4,11 @@ import { FIPS_DOCKER_PORT, readFipsIngressConfig } from './fips-ingress';
 /** Byte-transparent TCP forwarder: no HTTP parsing, DNS, keys, redirects or target input.
  * The dedicated Tower listener owns the fixed Host and canonical NIP-98 boundary.
  */
-export function createFipsHostGateway() {
+export function createFipsHostGateway(targetPort: 43101 | 43111 | 17777 | 13002 | 17334 = FIPS_DOCKER_PORT) {
+  if (![43101,43111,17777,13002,17334].includes(targetPort)) throw new Error('Unsupported fixed installation service target');
   const sockets = new Set<Socket>();
   const server = createServer({ allowHalfOpen: true }, (client) => {
-    const upstream = connect({ host: '127.0.0.1', port: FIPS_DOCKER_PORT, allowHalfOpen: true });
+    const upstream = connect({ host: '127.0.0.1', port: targetPort, allowHalfOpen: true });
     sockets.add(client);
     sockets.add(upstream);
     const destroy = () => { client.destroy(); upstream.destroy(); };

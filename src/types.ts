@@ -2294,6 +2294,9 @@ export type NstackServiceId = 'tower' | 'relay' | 'blossom' | 'autopilot' | 'gra
 export type NstackServiceAvailability = 'available' | 'unavailable' | 'unknown';
 
 export interface NstackServiceDescriptor {
+  transports?: {https?:string;fips?:{endpoint:string;peer_npub:string;port:number}};
+  /** Selected FIPS routes require endpoint-scoped native peer pinning; no HTTPS fallback. */
+  transport?: {kind:'fips';peer_npub:string;port:number};
   id: NstackServiceId;
   kind: 'tower' | 'nostr_relay' | 'blossom' | 'autopilot' | 'grasp';
   endpoint: string;

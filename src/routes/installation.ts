@@ -1,3 +1,6 @@
+import {readFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {readHostStatus,hostOperations} from '../installation/host-state';
 import {getEffectiveRequestUrl} from '../auth';
 import {signConnectionChallenge} from '../services/workspace-connection';
 import {controllerStore} from '../installation/controller-store';
@@ -29,6 +32,7 @@ installationRouter.post('/claim', bodyLimit({maxSize:1024,onError:(c)=>c.json({e
   if (!signer) return c.json({error:'nip98_auth_required'},401);
   let body;
   try { body=JSON.parse(raw); } catch { return c.json({error:'invalid_json'},400); }
+  if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(k=>k!=='code'))return c.json({error:'invalid_claim_shape'},400);
   if (typeof body.code !== 'string' || !await claimInstallation(dir,body.code,signer)) {
     return c.json({error:'claim_invalid_or_closed'},409);
   }
@@ -67,15 +71,20 @@ installationRouter.get('/settings',async(c)=>{
  if(signer!==config.adminNpub)return c.json({error:'admin_required'},403);
  const dir=process.env.NSTACK_SETTINGS_DIRECTORY;if(!dir)return c.json({error:'controller_not_configured'},409);
  const store=controllerStore(dir);let operation;try{operation=store.latest();}finally{store.close();}
- return c.json({settings:readInstallationSettings(dir),locked:installationEnvironmentLocks,operation,interruption:'Applying these settings restarts only this installation’s Tower API. Existing connections will disconnect briefly.',
-  modules:{graph:'not_enabled',relay:'not_enabled',blossom:'not_enabled',git:'not_enabled'},
+ let moduleStatus={observed_at:0,modules:[]};try{moduleStatus=JSON.parse(await readFile(join(dir,'modules-status.json'),'utf8'));}catch{}
+ return c.json({host:readHostStatus(dir),settings:readInstallationSettings(dir),locked:installationEnvironmentLocks,operation,interruption:'Applying these settings restarts only this installation’s Tower API. Existing connections will disconnect briefly.',
+  modules:moduleStatus.modules,module_status_observed_at:moduleStatus.observed_at,
   reachability:{local:'ready',https:config.directHttpsUrl?'configured_not_verified':'not_configured',fips:'host_daemon_and_mesh_not_verified'}});
 });
-installationRouter.post('/settings/apply',bodyLimit({maxSize:2048,onError:c=>c.json({error:'settings_too_large'},413)}),async(c)=>{
+installationRouter.post('/settings/apply',bodyLimit({maxSize:65536,onError:c=>c.json({error:'settings_too_large'},413)}),async(c)=>{
  const signer=await verifyNip98Auth(c.req.raw);if(!signer)return c.json({error:'nip98_auth_required'},401);
  if(signer!==config.adminNpub)return c.json({error:'admin_required'},403);
  const dir=process.env.NSTACK_SETTINGS_DIRECTORY;if(!dir)return c.json({error:'controller_not_configured'},409);
- let desired;try{desired=validateInstallationSettings(await c.req.json());}catch{return c.json({error:'invalid_settings'},400);}
+ let desired;try{desired=validateInstallationSettings(await c.req.json());}catch(e){
+  const code=(e as Error).message;const messages:Record<string,string>={relay_configuration_required:'Set the relay address and allowed publishers before enabling it.',blossom_configuration_required:'Set the Blossom address and publisher before enabling it.',git_configuration_required:'Set the Git address, members, maintainers and repository reader policy before enabling it.',module_host_peer_mismatch:'The service FIPS peer must match this installation’s selected host.',duplicate_fips_service_port:'Each FIPS service needs its own port.',maintainer_outside_members:'Git maintainers must also be service members.',repository_reader_outside_members:'Repository readers must be service members and include the repository owner.',invalid_module_pubkey:'Use valid public Nostr identities in the service allowlist.'};
+  return c.json({error:messages[code]||'Invalid installation settings. Check addresses, public identities and service requirements.',code},400);
+ }
+
  const current=readInstallationSettings(dir);
  for(const field of ['https_origin','fips_desired','fips'] as const)if(installationEnvironmentLocks[field]&&JSON.stringify(desired[field])!==JSON.stringify(current[field]))return c.json({error:'setting_locked_by_environment',field},409);
  // Fixed catalogue only: no arbitrary commands, images, paths, credentials or service names.
@@ -100,4 +109,13 @@ installationRouter.post('/settings/recover',bodyLimit({maxSize:1024,onError:c=>c
  const token=c.req.header('authorization')!.slice(6).trim();const eventId=JSON.parse(Buffer.from(token,'base64').toString('utf8')).id;
  const store=controllerStore(dir);try{return c.json(store.enqueue(eventId,readInstallationSettings(dir),true),202);}
  catch(e){return c.json({error:(e as Error).message},409);}finally{store.close();}
+});
+
+installationRouter.post('/host/install',bodyLimit({maxSize:1024,onError:c=>c.json({error:'body_too_large'},413)}),async(c)=>{
+ const signer=await verifyNip98Auth(c.req.raw);if(!signer)return c.json({error:'nip98_auth_required'},401);
+ if(signer!==config.adminNpub)return c.json({error:'admin_required'},403);
+ const dir=process.env.NSTACK_SETTINGS_DIRECTORY;if(!dir)return c.json({error:'controller_not_configured'},409);
+ if(readHostStatus(dir).state==='host_helper_not_running')return c.json({error:'host_helper_not_running'},409);
+ const event=JSON.parse(Buffer.from(c.req.header('authorization')!.slice(6).trim(),'base64').toString('utf8'));
+ const store=hostOperations(dir);try{return c.json({operation:store.enqueue(event.id)},202);}catch(e){return c.json({error:(e as Error).message},409);}finally{store.close();}
 });

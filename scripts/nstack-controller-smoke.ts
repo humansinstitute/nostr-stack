@@ -1,6 +1,6 @@
 // Run only inside the disposable setup stack created by nstack-setup-smoke.ts.
 import {readFile,writeFile} from 'node:fs/promises';
-import {createHash} from 'node:crypto';import {finalizeEvent} from 'nostr-tools';
+import {createHash} from 'node:crypto';import {finalizeEvent,getPublicKey,nip19} from 'nostr-tools';
 if(process.env.DB_NAME!=='nstack')throw Error('Disposable installation only');
 const saved=JSON.parse(await readFile('/run/nstack/disposable-smoke.json','utf8'));const key=new Uint8Array(saved.key);
 const origin='http://127.0.0.1:3100';
@@ -23,6 +23,12 @@ if(mode==='status'){
 }else{
  const current=await request('/api/v4/installation/settings');if(current.status!==200)throw Error('settings denied');
  const desired={...current.body.settings,fips_desired:false};
+ if(mode==='configure-fips'){desired.fips_desired=true;desired.fips={peer_npub:process.env.NSTACK_TEST_FIPS_NPUB,mesh_address:process.env.NSTACK_TEST_FIPS_ADDRESS,port:43110};}
+ if(mode==='modules'){
+  desired.fips_desired=true;
+  if(!desired.fips)throw Error('Configure FIPS first');const peer=desired.fips.peer_npub,pubkey=getPublicKey(key),npub=nip19.npubEncode(pubkey);
+  desired.modules={graph:{enabled:true},relay:{enabled:true,origin:`ws://${peer}.fips:43112`,publishers:[pubkey]},blossom:{enabled:true,origin:`http://${peer}.fips:43113`,publisher:pubkey},git:{enabled:true,origin:`http://${peer}.fips:43114`,members:[pubkey],maintainers:[pubkey],repository_readers:{[npub+'/smoke']:[pubkey]}}};
+ }
  if(mode==='bad-https')desired.https_origin='https://127.0.0.1:1';
  if(mode==='invalid'){
   const result=await request('/api/v4/installation/settings/apply','POST',{...desired,command:'not-allowed'});

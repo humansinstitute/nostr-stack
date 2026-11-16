@@ -5,8 +5,8 @@ const html = readFileSync(new URL('index.html', root), 'utf8');
 const css = readFileSync(new URL('style.css', root), 'utf8');
 const script = readFileSync(new URL('client.js', root), 'utf8');
 
-export function buildNstackConsoleHtml(apiBaseUrl: string) {
-  return html.replace('/* CONSOLE_STYLE */', css)
+export function buildNstackConsoleHtml(apiBaseUrl: string,options:{defaultWorkspaceModel?:'typed'|'encrypted'}={}) {
+  return html.replace('/* CONSOLE_STYLE */', css).replace('<!-- WORKSPACE_MODEL -->', (options.defaultWorkspaceModel??(process.env.NSTACK_SETUP_DIRECTORY?'typed':'encrypted'))==='typed'?'selected':'')
     .replace('/* CONSOLE_SCRIPT */', () => script.replace('"__API_BASE__"', () => JSON.stringify(apiBaseUrl).replaceAll('<', '\\u003c')));
 }
 

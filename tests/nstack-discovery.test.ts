@@ -144,3 +144,17 @@ test('private GRasp discovery pins FIPS and exposes no repository or membership 
   expect((await buildNstackServiceDiscovery({config:runtime})).services.some(s=>s.id==='grasp')).toBe(false);
  }
 });
+
+test('FIPS-only discovery includes Tower and enabled public modules with explicit peer pins',async()=>{
+ const peer=nip19.npubEncode('79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798');
+ const runtime=runtimeConfig();runtime.directHttpsUrl='';
+ runtime.nstack.relay={...runtime.nstack.relay,enabled:true,publicOrigin:`ws://${peer}.fips:43112`,healthUrl:''};
+ runtime.nstack.blossom={...runtime.nstack.blossom,enabled:true,publicOrigin:`http://${peer}.fips:43113`,healthUrl:''};
+ runtime.nstack.grasp={...runtime.nstack.grasp,enabled:true,publicOrigin:`http://${peer}.fips:43114`,healthUrl:''};
+ const env={TOWER_FIPS_ENABLED:'true',TOWER_FIPS_NODE_NPUB:peer,TOWER_FIPS_MESH_ADDRESS:'fd13:2f39:a98c:31ba:addb:a652:5f5d:43f2',TOWER_FIPS_PORT:'43110'};
+ const discovery=await buildNstackServiceDiscovery({config:runtime,env});
+ expect(discovery.services.map(s=>s.id)).toEqual(['tower','grasp','relay','blossom']);
+ for(const service of discovery.services){expect(service.transport?.peer_npub).toBe(peer);expect(service.protocols).toContain('fips');}
+ runtime.nstack.relay.publicOrigin='ws://npub1bad.fips:43112';
+ expect((await buildNstackServiceDiscovery({config:runtime,env})).services.some(s=>s.id==='relay')).toBe(false);
+});

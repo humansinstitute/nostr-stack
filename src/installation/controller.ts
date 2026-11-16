@@ -1,14 +1,16 @@
+import {createModuleRuntime} from './module-runtime';
+import {defaultModuleSettings} from './modules';
 import {controllerStore} from './controller-store';
 import {randomBytes} from 'node:crypto';
 import {verifyEvent,nip19} from 'nostr-tools';
 import {readFile,writeFile,rename,mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
-import {validateInstallationSettings,defaultSettings,type InstallationSettings} from './settings';
+import {validateInstallationSettings,readInstallationSettings,defaultSettings,type InstallationSettings} from './settings';
 export interface ControllerOperation {id:string;state:'pending'|'applying'|'verifying'|'committed'|'rolled_back'|'recovery_required';desired:InstallationSettings;previous?:InstallationSettings;error?:string;}
 export async function atomicJson(path:string,value:unknown){
  const temp=path+'.tmp';await writeFile(temp,JSON.stringify(value),{mode:0o600});await rename(temp,path);
 }
-export async function runControllerOperation(directory:string,operation:ControllerOperation,adapter:{restart:()=>Promise<void>;verify:()=>Promise<boolean>;persist?:(operation:ControllerOperation)=>void}){
+export async function runControllerOperation(directory:string,operation:ControllerOperation,adapter:{restart:()=>Promise<void>;verify:()=>Promise<boolean>;persist?:(operation:ControllerOperation)=>void;apply?:(previous:InstallationSettings,desired:InstallationSettings)=>Promise<void>}){
  const journal=join(directory,'operation.json'),settings=join(directory,'settings.json');
  const persist=async()=>{if(adapter.persist)adapter.persist(operation);else await atomicJson(journal,operation);};
  validateInstallationSettings(operation.desired);
@@ -19,14 +21,16 @@ export async function runControllerOperation(directory:string,operation:Controll
  try{
   if(recovering)throw Error('interrupted_operation');
   operation.state='applying';await persist();
+  await adapter.apply?.(previous,operation.desired);
   await atomicJson(settings,operation.desired);await adapter.restart();
   operation.state='verifying';await persist();
   if(!await adapter.verify())throw Error('health_verification_failed');
   operation.state='committed';await persist();
- }catch{
-  operation.error=recovering?'interrupted_operation':'apply_or_verify_failed';
+ }catch(error){
+  const detail=(error as Error).message;
+  operation.error=recovering?'interrupted_operation':/^(module_|private_git_|graph_)[a-z0-9_]+$/.test(detail)?detail:'apply_or_verify_failed';
   await atomicJson(settings,previous);
-  try{await adapter.restart();if(!await adapter.verify())throw Error();operation.state='rolled_back';}
+  try{await adapter.apply?.(operation.desired,previous);await adapter.restart();if(!await adapter.verify())throw Error();operation.state='rolled_back';}
   catch{operation.state='recovery_required';}
   await persist();
  }
@@ -48,12 +52,20 @@ if(import.meta.main){
   if(!Array.isArray(containers)||containers.length!==1||! /^[a-f0-9]{64}$/.test(containers[0].Id))throw Error('installation_container_ambiguous');
   await docker('/containers/'+containers[0].Id+'/restart?t=10','POST');
  };
+ const modules=createModuleRuntime({project});
+ const reconcile=async(previous:InstallationSettings,desired:InstallationSettings)=>{
+  const result=await modules.apply(previous.modules||defaultModuleSettings(),desired.modules||defaultModuleSettings());
+  if(result.state!=='committed')throw Error(result.error||'module_apply_failed');
+  await modules.connectTower(desired.modules||defaultModuleSettings());
+  if(desired.modules?.graph.enabled)await atomicJson(join(directory,'graph.json'),await modules.graphEnvironment());
+ };
  const verify=async()=>{
   for(let i=0;i<30;i++){
    try{
     const r=await fetch('http://tower:3100/health',{signal:AbortSignal.timeout(2000)});
     if(r.ok){
      const local=await r.json();const settings=validateInstallationSettings(JSON.parse(await readFile(join(directory,'settings.json'),'utf8')));
+     if(!await modules.verify(settings.modules||defaultModuleSettings()))return false;
      if(!settings.https_origin)return true;
      const nonce=randomBytes(32).toString('hex');const url=settings.https_origin+'/api/v4/installation/identity-proof?nonce='+nonce;
      const remote=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(5000)});if(!remote.ok)return false;
@@ -66,8 +78,9 @@ if(import.meta.main){
  const store=controllerStore(directory);
  while(true){
   try{
+   await atomicJson(join(directory,'modules-status.json'),{observed_at:Date.now(),modules:await modules.status(readInstallationSettings(directory).modules||defaultModuleSettings())});
    const operation=store.latest();
-   if(operation&&['pending','applying','verifying'].includes(operation.state))await runControllerOperation(directory,operation,{restart,verify,persist:store.save});
+   if(operation&&['pending','applying','verifying'].includes(operation.state))await runControllerOperation(directory,operation,{restart,verify,persist:store.save,apply:reconcile});
   }catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')console.error('Installation controller cannot process operation; inspect local recovery status.');}
   await Bun.sleep(2000);
  }

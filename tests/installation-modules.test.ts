@@ -16,11 +16,12 @@ function fakeDocker(){
  const containers=new Map<string,any>(),networks=new Map<string,any>(),volumes=new Map<string,any>(),execs=new Map<string,any>();
  const calls:{path:string;method:string;body:any}[]=[];
  let seq=1;const id=()=>String(seq++).padStart(64,'0');
- let missingImage='',failStart='',failProbe='',failRollback=false,failUpload=false;
+ let pullSucceeds=false;let missingImage='',failStart='',failProbe='',failRollback=false,failUpload=false;
  const ok=(x?:any)=>x===undefined?new Response(null,{status:204}):Response.json(x);
  const docker:DockerRequest=async(path,method='GET',body?:any)=>{
   calls.push({path,method,body});const u=new URL('http://docker'+path),p=u.pathname.split('/').filter(Boolean);
   if(p[0]==='images'){
+   if(p[1]==='create'){if(pullSucceeds){missingImage='';return new Response(JSON.stringify({status:'Download complete'})+'\n');}return new Response(JSON.stringify({error:'fixture registry unavailable'})+'\n');}
    if(decodeURIComponent(p[1]).includes(missingImage)&&missingImage)return new Response('',{status:404});
    return ok({Id:'sha256:'+'a'.repeat(64),Config:{Labels:{'org.opencontainers.image.revision':'nstack-repository-access-v1'}}});
   }
@@ -58,7 +59,7 @@ function fakeDocker(){
   }
   throw Error('unhandled fake API '+method+' '+path);
  };
- return {docker,calls,containers,networks,volumes,setMissingImage:(s:string)=>missingImage=s,setStartFailure:(s:string)=>failStart=s,setProbeFailure:(s:string)=>failProbe=s,setRollbackFailure:()=>failRollback=true,setUploadFailure:()=>failUpload=true};
+ return {docker,calls,containers,networks,volumes,allowPull:()=>pullSucceeds=true,setMissingImage:(s:string)=>missingImage=s,setStartFailure:(s:string)=>failStart=s,setProbeFailure:(s:string)=>failProbe=s,setRollbackFailure:()=>failRollback=true,setUploadFailure:()=>failUpload=true};
 }
 function runtime(f:ReturnType<typeof fakeDocker>){return createModuleRuntime({project:'test-installation',docker:f.docker,probeAttempts:1,probeDelayMs:0});}
 
@@ -145,8 +146,16 @@ describe('fixed Docker lifecycle',()=>{
  test('image provisioning fails before prior service is stopped',async()=>{
   const f=fakeDocker(),r=runtime(f),on=configured();await r.apply(defaultModuleSettings(),on);const before=f.calls.length;
   const next=structuredClone(on);next.relay.publishers=[other];f.setMissingImage('nostr-rs-relay');
-  const result=await r.apply(on,next);expect(result.error).toBe('module_image_not_provisioned_relay');expect(result.state).toBe('rolled_back');
+  const result=await r.apply(on,next);expect(result.error).toBe('module_image_provision_failed_relay');expect(result.state).toBe('rolled_back');
   expect(f.calls.slice(before).some(c=>c.path.includes('/stop'))).toBe(false);expect(await r.verify(on)).toBe(true);
+ });
+ test('cold public image is provisioned only from fixed catalogue before service start',async()=>{
+  const f=fakeDocker(),r=runtime(f),desired=defaultModuleSettings();desired.relay=configured().relay;f.setMissingImage('nostr-rs-relay');f.allowPull();
+  expect((await r.apply(defaultModuleSettings(),desired)).state).toBe('committed');
+  const pull=f.calls.find(c=>c.path.startsWith('/images/create?'));expect(pull?.path).toBe('/images/create?fromImage='+encodeURIComponent(MODULE_CATALOGUE.relay.image));
+  const privateMissing=fakeDocker();privateMissing.setMissingImage('nstack-grasp');const git=defaultModuleSettings();git.git=configured().git;
+  expect((await runtime(privateMissing).apply(defaultModuleSettings(),git)).error).toBe('module_image_distribution_unavailable_git');
+  expect(privateMissing.calls.some(c=>c.path.startsWith('/images/create?'))).toBe(false);
  });
  test('foreign containers and volumes are not mutated',async()=>{
   const f=fakeDocker(),r=runtime(f),m=defaultModuleSettings();m.graph.enabled=true;

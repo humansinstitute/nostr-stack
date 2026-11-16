@@ -51,6 +51,15 @@ groups, record sync, storage, service discovery, and connection/bootstrap packag
 defines the selected-workspace private ciphertext and per-user recovery-pointer
 contract for NBrowser, including owner-managed namespace registration.
 
+## Progressive new installation
+
+The additive [NStack setup bundle](docs/nstack-setup.md) starts local administration
+without an authored env file, generates durable credentials/identity and safely
+claims the instance with Nostr. It preserves existing production deployments.
+[Optional module lifecycle](docs/nstack-modules.md) covers graph, relay, Blossom
+and private Git configuration, probes and rollback. Source availability is separate
+from shared-runtime activation and remote/device acceptance.
+
 ## Production
 
 Optional, explicitly configured mesh transport is documented in

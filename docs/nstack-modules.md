@@ -103,7 +103,7 @@ ownership labels fails closed. Docker list results never authorize broad
 cleanup. The runtime never deletes volumes or networks, uses bind mounts, runs
 Compose, removes orphans, exposes a Docker API, or pulls a caller-selected image.
 It resolves the fixed digest to an immutable image ID before stopping an old
-service. Missing images are reported as `module_image_not_provisioned_<name>`.
+service. Missing published graph/relay/Blossom images are pulled only from the fixed digest catalogue before any existing service is stopped. Pull failure is explicit; no caller can select an image. Private Git is a separate reviewed distribution requirement.
 
 Each module has its own durable `-data` volume. Graph additionally has a
 protected `-state` volume containing distinct generated admin/app passwords.
@@ -131,10 +131,7 @@ signed events and private Git rejects anonymous repository reads.
 
 ## Image provisioning and validation
 
-Run `sh deploy/setup-modules/prepare-images.sh` as a host operator to pull only
-the three fixed published digests and check for the reviewed private Git image.
-This preflight does not start containers or touch data. Lifecycle apply itself
-does not pull/build images or alter an existing deployment.
+Lifecycle apply automatically provisions missing published graph/relay/Blossom images from the fixed digest catalogue. It streams bounded progress and refuses registry errors before interrupting an existing service. The optional operator preflight `deploy/setup-modules/prepare-images.sh` checks the same catalogue; it is not needed for ordinary UI setup.
 
 Private Git's fixed `nstack-grasp@sha256:4aaf778f0bf938745821a146e20dadd48b6b677138bd3350384807ddb1b72194`
 is a locally prepared reviewed build, not a publicly provisioned registry image.

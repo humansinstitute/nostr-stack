@@ -31,7 +31,7 @@ function archive(files:Record<string,string>):Uint8Array {
 export function createModuleRuntime(options:{project:string;docker?:DockerRequest;probeAttempts?:number;probeDelayMs?:number}) {
   const project=options.project;
   if(!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(project))throw Error('exact_module_project_required');
-  const request:DockerRequest=options.docker??(async(path,method='GET',body)=>fetch('http://localhost/v1.47'+path,{method,unix:'/var/run/docker.sock',headers:body instanceof Uint8Array?{'content-type':'application/x-tar'}:{'content-type':'application/json'},body:body===undefined?undefined:body instanceof Uint8Array?new Uint8Array(body).buffer:JSON.stringify(body),signal:AbortSignal.timeout(15000)}));
+  const request:DockerRequest=options.docker??(async(path,method='GET',body)=>fetch('http://localhost/v1.47'+path,{method,unix:'/var/run/docker.sock',headers:body instanceof Uint8Array?{'content-type':'application/x-tar'}:{'content-type':'application/json'},body:body===undefined?undefined:body instanceof Uint8Array?new Uint8Array(body).buffer:JSON.stringify(body),signal:AbortSignal.timeout(path.startsWith('/images/create?')?180000:15000)}));
   async function api(path:string,method='GET',body?:unknown):Promise<any>{
     const r=await request(path,method,body);
     if(!r.ok)throw Error(`module_docker_${r.status}`);
@@ -79,8 +79,21 @@ export function createModuleRuntime(options:{project:string;docker?:DockerReques
   }
   async function spec(module:ModuleName,m:ModuleSettings){
     const catalogue=MODULE_CATALOGUE[module];
-    const imageResponse=await request('/images/'+encodeURIComponent(catalogue.image)+'/json');
-    if(imageResponse.status===404)throw Error('module_image_not_provisioned_'+module);
+    let imageResponse=await request('/images/'+encodeURIComponent(catalogue.image)+'/json');
+    if(imageResponse.status===404){
+      if(module==='git')throw Error('module_image_distribution_unavailable_git');
+      const pulled=await request('/images/create?fromImage='+encodeURIComponent(catalogue.image),'POST');
+      if(!pulled.ok||!pulled.body)throw Error('module_image_provision_failed_'+module);
+      const reader=pulled.body.getReader();const decoder=new TextDecoder();let pending='';
+      try{
+        while(true){const chunk=await reader.read();if(chunk.done)break;pending+=decoder.decode(chunk.value,{stream:true});
+          if(pending.length>1048576)throw Error('module_image_progress_invalid');
+          let newline;while((newline=pending.indexOf('\n'))>=0){const line=pending.slice(0,newline);pending=pending.slice(newline+1);if(line.trim()){const item=JSON.parse(line);if(item.error||item.errorDetail)throw Error('module_image_provision_failed_'+module);}}
+        }
+        if(pending.trim()){const item=JSON.parse(pending);if(item.error||item.errorDetail)throw Error('module_image_provision_failed_'+module);}
+      }finally{await reader.cancel();}
+      imageResponse=await request('/images/'+encodeURIComponent(catalogue.image)+'/json');
+    }
     if(!imageResponse.ok)throw Error('module_image_inspection_failed_'+module);
     const image=await imageResponse.json();if(!/^sha256:[a-f0-9]{64}$/.test(image.Id))throw Error('invalid_module_image_id');
     if(module==='git'&&image.Config?.Labels?.['org.opencontainers.image.revision']!=='nstack-repository-access-v1')throw Error('private_git_patch_required');

@@ -7,3 +7,5 @@
 p,footer{overflow-wrap:anywhere}
 
 .archive-toggle{display:flex;align-items:center;gap:10px;min-height:44px}.archive-toggle input{width:20px;height:20px;min-height:20px;padding:0;flex:none;accent-color:var(--purple)}
+
+input[type="checkbox"]{width:auto;min-height:auto;margin-left:12px}

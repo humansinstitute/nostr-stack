@@ -20,7 +20,9 @@
     "db:cleanup-wapp-activity": "bun run src/schema/cleanup-wapp-activity.ts",
     "nstack:smoke": "bun run scripts/nstack-smoke.ts",
     "console:build": "bun scripts/build-console.ts",
-    "console:test": "bun test tests/nstack-console.browser.test.ts"
+    "console:test": "bun test tests/nstack-console.browser.test.ts",
+    "nstack:setup": "bun scripts/nstack-start.ts",
+    "nstack:host": "bun scripts/nstack-host.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1162.0",

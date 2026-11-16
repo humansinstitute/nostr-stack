@@ -1,3 +1,5 @@
+import {canonicalFipsOrigin} from '../fips-endpoint';
+import {readFipsIngressConfig} from '../fips-ingress';
 import { inboxApiEnabled } from './notification-core';
 import { agentNotificationApiEnabled } from './agent-notifications';
 import { config } from '../config';
@@ -16,10 +18,11 @@ function configuredPublicOrigin(value: string, kind: 'https' | 'wss'): string | 
   try {
     if (!value) return null;
     const url = new URL(value);
+    const fips=canonicalFipsOrigin(value,kind==='wss');
     const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
     const allowed = kind === 'https'
-      ? (url.protocol === 'https:' || (local && url.protocol === 'http:'))
-      : (url.protocol === 'wss:' || (local && url.protocol === 'ws:'));
+      ? (url.protocol === 'https:' || ((local||fips) && url.protocol === 'http:'))
+      : (url.protocol === 'wss:' || ((local||fips) && url.protocol === 'ws:'));
     if (!allowed || url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '')) return null;
     return url.origin;
   } catch {
@@ -27,16 +30,7 @@ function configuredPublicOrigin(value: string, kind: 'https' | 'wss'): string | 
   }
 }
 
-export function configuredGraspOrigin(value: string): string | null {
-  const https = configuredPublicOrigin(value, 'https');
-  if (https) return https;
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'http:' || !/^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}\.fips$/.test(url.hostname)
-      || !url.port || url.username || url.password || url.search || url.hash || url.pathname !== '/') return null;
-    return url.origin;
-  } catch { return null; }
-}
+export function configuredGraspOrigin(value: string): string | null { return configuredPublicOrigin(value,'https'); }
 
 function configuredHealthUrl(value: string): string | null {
   try {
@@ -90,6 +84,7 @@ export async function buildNstackServiceDiscovery(
     config?: DiscoveryConfig;
     fetchImpl?: FetchLike;
     now?: () => Date;
+    env?: Record<string,string|undefined>;
   } = {},
 ): Promise<NstackServiceDiscoveryV1> {
   const runtime = input.config ?? config;
@@ -98,7 +93,8 @@ export async function buildNstackServiceDiscovery(
   const ttl = runtime.nstack.descriptorCacheTtlSeconds;
   const services: NstackServiceDescriptor[] = [];
 
-  const towerOrigin = configuredPublicOrigin(runtime.directHttpsUrl, 'https');
+  let fipsTower=null;try{fipsTower=readFipsIngressConfig(input.env??process.env);}catch{}
+  const towerOrigin = configuredPublicOrigin(runtime.directHttpsUrl, 'https') || fipsTower?.origin;
   if (towerOrigin) {
     services.push({
       id: 'tower',
@@ -176,6 +172,18 @@ export async function buildNstackServiceDiscovery(
     });
   }
 
+  const transportEnv=input.env??process.env;
+  for(const service of services){
+    const fips=canonicalFipsOrigin(service.endpoint,service.id==='relay');
+    if(fips){service.transport={kind:'fips',peer_npub:fips.peer_npub,port:fips.port};service.transports={fips:{endpoint:service.endpoint,peer_npub:fips.peer_npub,port:fips.port}};service.protocols=[...service.protocols.map(p=>p==='https'?'http':p),'fips'];}
+    else if(['https:','wss:'].includes(new URL(service.endpoint).protocol)){
+      service.transports={https:service.endpoint};
+      if(fipsTower&&(service.id==='tower'||transportEnv.NSTACK_MODULE_FIPS_ROUTES==='true'&&['relay','blossom','grasp'].includes(service.id))){
+        const port=service.id==='tower'?fipsTower.port:Number(transportEnv[service.id==='relay'?'NSTACK_RELAY_FIPS_PORT':service.id==='blossom'?'NSTACK_BLOSSOM_FIPS_PORT':'NSTACK_GRASP_FIPS_PORT']);
+        if(Number.isInteger(port)&&port>=1&&port<=65535)service.transports.fips={endpoint:`${service.id==='relay'?'ws':'http'}://${fipsTower.nodeNpub}.fips:${port}`,peer_npub:fipsTower.nodeNpub,port};
+      }
+    }
+  }
   return {
     schema: DESCRIPTOR_SCHEMA,
     schema_version: 1,

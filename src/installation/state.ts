@@ -1,3 +1,4 @@
+import {nip19} from 'nostr-tools';
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -6,7 +7,7 @@ import { writeOnce } from './bootstrap';
 
 export function installedAdmin(directory = process.env.NSTACK_SETUP_DIRECTORY): string {
   if (!directory) return '';
-  try { return JSON.parse(readFileSync(join(directory, 'claim.json'), 'utf8')).admin_npub; }
+  try { const claim=JSON.parse(readFileSync(join(directory, 'claim.json'), 'utf8'));const decoded=nip19.decode(claim.admin_npub);if(claim.version!==1||decoded.type!=='npub'||nip19.npubEncode(decoded.data)!==claim.admin_npub)throw Error('invalid_claim');return claim.admin_npub; }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
     throw new Error('Cannot read installation ownership; refusing to reset');

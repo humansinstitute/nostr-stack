@@ -1,5 +1,6 @@
 import { generateSecretKey, getPublicKey, nip19 } from '/ui/assets/crypto.js';
-const API_BASE = "__API_BASE__";
+let API_BASE = "__API_BASE__";
+let apiTransport=null, shellConnection=null, shellTransport=null, shellVerifier=null;
 const $ = (id) => document.getElementById(id);
 const state = { pubkey: null, npub: null, workspaces: [], active: null, generation: 0, session: 0, view: 'overview', apps: [], offset: 0, review: null, connecting: false };
 const ownerOf = (w) => w?.kind === 'typed' ? 'typed:' + w.workspace_id : w?.workspace_owner_npub;
@@ -36,6 +37,35 @@ function showView(view) {
   $('context').textContent = view === 'allApps' ? 'All accessible workspaces' : state.active ? 'Active workspace · ' + state.active.name : 'Welcome to NStack';
 }
 async function digest(raw) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw)))).map(b => b.toString(16).padStart(2, '0')).join(''); }
+async function transportFetch(url,init) {
+  const target=new URL(url);
+  if(target.hostname.endsWith('.fips')){
+    if(!apiTransport||apiTransport.endpoint!==target.origin)throw Error('Open the packaged NStack shell in a supported native FIPS browser and approve this exact endpoint. No HTTPS fallback is used.');
+    return apiTransport.fetch(url,init);
+  }
+  if(apiTransport)throw Error('Selected FIPS requests must stay on the approved endpoint.');
+  if(API_BASE&&target.origin!==new URL(API_BASE).origin)throw Error('Request escaped the selected backend.');
+  return fetch(url,{...init,redirect:'error',credentials:'omit'});
+}
+async function connectShellTransport(){
+  if(!shellConnection||shellTransport!=='fips'||apiTransport)return;
+  if(!window.fipsTransport?.available||window.fipsTransport.version<2)throw Error('This runtime does not provide the approved native FIPS transport. Use a supported NStack shell.');
+  const fips=shellConnection.transports.fips;
+  apiTransport=await window.fipsTransport.connect({endpoint:API_BASE,peerNpub:fips.peer_npub,purpose:'tower'});
+  if(apiTransport.endpoint!==API_BASE||apiTransport.peerNpub!==fips.peer_npub){await apiTransport.disconnect();apiTransport=null;throw Error('Native transport endpoint mismatch');}
+}
+async function verifyShellWorkspace(){
+  if(!shellConnection)return;
+  const nonce=Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
+  const path='/api/v4/flightdeck-pg/workspaces/'+shellConnection.workspace_id+'/connection-proof?nonce='+nonce;
+  const response=await signedFetch(path);if(!response.ok)throw Error('This identity cannot access the exact scanned workspace. No other workspace will be selected.');
+  const result=await response.json();shellVerifier.verifyProof(shellConnection,result.proof,nonce,API_BASE+path);
+  const pinKey='nstack.shell.service.'+API_BASE,pinned=localStorage.getItem(pinKey);
+  if(pinned&&pinned!==shellConnection.service_npub)throw Error('Stored backend identity mismatch');
+  const authorityKey='nstack.shell.workspace.'+API_BASE+'.'+shellConnection.workspace_id,authorityPin=localStorage.getItem(authorityKey);
+  if(authorityPin&&authorityPin!==shellConnection.workspace_service_npub)throw Error('Stored workspace authority mismatch');
+  localStorage.setItem(pinKey,shellConnection.service_npub);localStorage.setItem(authorityKey,shellConnection.workspace_service_npub);
+}
 async function signedFetch(path, method = 'GET', body) {
   const session = state.session;
   if (!state.pubkey || !window.nostr?.signEvent) throw new Error('Connect a Nostr browser signer first.');
@@ -46,7 +76,7 @@ async function signedFetch(path, method = 'GET', body) {
   if (raw) tags.push(['payload', await digest(raw)]);
   const event = await window.nostr.signEvent({ kind: 27235, created_at: Math.floor(Date.now() / 1000), tags, content: '' });
   if (session !== state.session || event.pubkey !== expected) throw new Error('Connection changed. Try again with the current signer.');
-  return fetch(url, { method, cache: 'no-store', headers: { Authorization: 'Nostr ' + btoa(JSON.stringify(event)), ...(raw ? { 'Content-Type': 'application/json' } : {}) }, ...(raw ? { body: raw } : {}) });
+  return transportFetch(url, { method, cache: 'no-store', headers: { Authorization: 'Nostr ' + btoa(JSON.stringify(event)), ...(raw ? { 'Content-Type': 'application/json' } : {}) }, ...(raw ? { body: raw } : {}) });
 }
 async function api(path, method = 'GET', body) {
   const session = state.session;
@@ -87,18 +117,22 @@ async function loadWorkspaces(preferred) {
   }
   $('workspaceCoverage').textContent = (legacy.status === 'rejected' ? 'Encrypted-record list unavailable. ' : '') + (typed.status === 'rejected' ? 'Typed app workspace list unavailable. ' : '') + 'Lists are limited to workspaces accessible to your current identity; typed app list is capped at 500.';
   renderWorkspaceOptions();
-  const chosen = state.workspaces.find(w => ownerOf(w) === preferred) || state.workspaces[0];
+  const chosen=shellConnection?state.workspaces.find(w=>w.kind==='typed'&&w.workspace_id===shellConnection.workspace_id&&w.workspace_service_npub===shellConnection.workspace_service_npub):state.workspaces.find(w => ownerOf(w) === preferred) || state.workspaces[0];
+  if(shellConnection&&!chosen)throw Error('The exact scanned workspace is unavailable; no substitute was selected.');
   if (chosen) await selectWorkspace(ownerOf(chosen));
   else { resetWorkspace(); showView('overview'); status('No accessible workspaces yet. Create your first workspace to get started.'); }
 }
 async function connect() {
   if (!window.nostr?.getPublicKey || !window.nostr?.signEvent) throw new Error('A Nostr browser signer is needed. Enable your signer, then choose Connect with Nostr again.');
+  await connectShellTransport();
   state.pubkey = await window.nostr.getPublicKey(); state.npub = nip19.npubEncode(state.pubkey); state.session++;
   $('connect').hidden = true; $('disconnect').hidden = false; $('newWorkspace').disabled = false; $('refresh').disabled = false;
+  await verifyShellWorkspace();
   status('Connected. Loading accessible workspaces…');
   await loadWorkspaces();
 }
 function disconnect() {
+  const priorTransport=apiTransport;apiTransport=null;priorTransport?.disconnect().catch(()=>{});
   state.session++; resetWorkspace(); state.npub = null; state.pubkey = null; state.workspaces = [];
   renderWorkspaceOptions(); $('workspaceCoverage').textContent = ''; $('connect').hidden = false; $('disconnect').hidden = true;
   $('newWorkspace').disabled = true; $('refresh').disabled = true; empty('allApps', 'Connect to load accessible workspaces.');
@@ -311,6 +345,16 @@ function reviewWorkspace(event) {
   const name = $('newName').value.trim(), description = $('newDescription').value.trim(), session = state.session;
   if (!name) return;
   if (!state.npub) return status('Connect your signer first.', true);
+  if($('workspaceModel').value==='typed'){
+    $('setupDialog').close();
+    review('Create shared workspace '+name+'?', [details([['Name',name],['Description',description||'No description'],['Owner and initial member',state.npub]]),text('p','Create a shared workspace with its own UUID and standard access groups. This requires instance administration. App connection and consent remain separate; the resulting connection QR grants no membership.')], 'Create shared workspace',async()=>{
+      if(session!==state.session)throw Error('Signer changed. Start again.');
+      const result=await api('/api/v4/admin/flightdeck-pg/workspaces','POST',{workspace_name:name,workspace_description:description,creator_npub:state.npub});
+      if(session!==state.session)return;
+      $('setupForm').reset();showView('overview');await loadWorkspaces('typed:'+result.workspace_id);
+      status('Shared workspace created. Use Connect to this workspace · QR to connect your apps.');
+    });return;
+  }
   if (!window.nostr?.nip44?.encrypt) return $('setupError').textContent = 'Your signer needs NIP-44 encryption for workspace setup. Enable it in your signer or use a compatible signer, then try again.';
   $('setupDialog').close();
   let preparedPayload = null;
@@ -438,11 +482,45 @@ async function installationSettings() {
   root.append(text('p','FIPS is enabled by default as a desired setting. A host daemon and tested ingress are required before remote use. HTTPS needs DNS and TLS configured externally; saving an address does not issue a certificate.','hint'));
   const label=text('label','Public HTTPS origin (optional)'),https=document.createElement('input');https.type='url';https.placeholder='https://nstack.example';https.value=result.settings.https_origin;https.disabled=result.locked?.https_origin;label.append(https);root.append(label);
   const fipsLabel=text('label','Enable FIPS'),fips=document.createElement('input');fips.type='checkbox';fips.checked=result.settings.fips_desired;fips.disabled=result.locked?.fips_desired;fipsLabel.append(fips);root.append(fipsLabel);
-  const inputs={};for(const [key,title,value] of [['peer_npub','Host daemon public npub',result.settings.fips?.peer_npub||''],['mesh_address','Host daemon mesh IPv6',result.settings.fips?.mesh_address||''],['port','Mesh service port',result.settings.fips?.port||43100]]){const l=text('label',title),i=document.createElement('input');i.value=String(value);i.disabled=result.locked?.fips;i.autocomplete='off';l.append(i);root.append(l);inputs[key]=i;}
-  root.append(text('p','Environment-controlled settings are locked. Generated credentials and service identity are protected and cannot be rotated here. Optional graph, relay, Blossom and Git modules are not enabled in this bundle.','hint'));
+  const detected=result.host?.state==='ready'?{peer_npub:result.host.peer_npub,mesh_address:result.host.mesh_address,port:result.settings.fips?.port||43110}:result.settings.fips;
+  root.append(text('h3','FIPS transport'),text('p',result.host?.state==='ready'?'Host daemon ready. NStack will reuse its persistent identity.':result.host?.requirement||'Host readiness has not been checked.'));
+  if(result.host?.state==='install_required')root.append(button('Set up FIPS on this computer',async()=>{if(!confirm('Install the supported host FIPS runtime using the normal OS authorization dialog? Existing daemon identities will be preserved.'))return;await api('/api/v4/installation/host/install','POST',{});status('Host setup queued. Complete the OS authorization dialog, then reopen Services and setup.');}));
+  const advanced=document.createElement('details');advanced.append(text('summary','Advanced transport details'));
+  const inputs={};for(const [key,title,value] of [['peer_npub','Host daemon public npub',detected?.peer_npub||''],['mesh_address','Host daemon mesh IPv6',detected?.mesh_address||''],['port','Mesh service port',detected?.port||43110]]){const l=text('label',title),i=document.createElement('input');i.value=String(value);i.disabled=result.locked?.fips;i.autocomplete='off';l.append(i);advanced.append(l);inputs[key]=i;}
+  root.append(advanced);
+  const moduleDefaults={graph:{enabled:false},relay:{enabled:false,origin:'',publishers:[]},blossom:{enabled:false,origin:'',publisher:''},git:{enabled:false,origin:'',members:[],maintainers:[],repository_readers:{}}};
+  const modules=structuredClone(result.settings.modules||moduleDefaults),moduleInputs={};
+  const keyText=keys=>(keys||[]).map(k=>nip19.npubEncode(k)).join(', ');
+  for(const [name,title,port,scheme] of [['graph','Graph memory',0,''],['relay','Nostr relay',43112,'ws'],['blossom','Blossom files',43113,'http'],['git','Private Git',43114,'http']]){
+    const card=document.createElement('section');card.className='panel';const current=modules[name],fields={};
+    const report=(result.modules||[]).find(m=>m.module===name);
+    card.append(text('h3',title),text('p',report?report.runtime:'Not enabled or not checked','hint'));
+    const enable=document.createElement('input');enable.type='checkbox';enable.checked=current.enabled;const label=text('label','Enable '+title);label.append(enable);card.append(label);fields.enabled=enable;
+    if(name!=='graph'){
+      const origin=document.createElement('input');origin.value=current.origin|| (detected?.peer_npub?scheme+'://'+detected.peer_npub+'.fips:'+port:'');origin.placeholder='Service root address';const l=text('label','Service address');l.append(origin);card.append(l);fields.origin=origin;
+      const keys=document.createElement('textarea');keys.value=keyText(name==='relay'?current.publishers:name==='blossom'?(current.publisher?[current.publisher]:[]):current.members);const k=text('label',name==='git'?'Members (public npubs, comma separated)':'Allowed publisher public npub'+(name==='relay'?'s':''));k.append(keys);card.append(k);fields.keys=keys;
+      card.append(text('p','Enabling this service authorizes only the listed identities. Instance administration does not grant publishing, repository membership or file access.','hint'));
+      if(name==='git'){
+        const maintainers=document.createElement('textarea');maintainers.value=keyText(current.maintainers);const m=text('label','Maintainer public npubs');m.append(maintainers);card.append(m);fields.maintainers=maintainers;
+        const readers=document.createElement('textarea');readers.value=JSON.stringify(current.repository_readers,null,2);const r=text('label','Repository reader policy (advanced public-key JSON)');r.append(readers);card.append(r);fields.readers=readers;
+      }
+    }else card.append(text('p','Graph database stays private. Credentials are generated and retained; no database port is published.','hint'));
+    moduleInputs[name]=fields;root.append(card);
+  }
+  root.append(text('p','Environment-controlled settings are locked. Generated credentials and service identity are protected and cannot be rotated here. Optional services apply independently and retain their data when disabled.','hint'));
   if(result.operation?.state==='recovery_required')root.append(button('Retry recovery',async()=>{await api('/api/v4/installation/settings/recover','POST',{});status('Recovery queued. Reopen settings after the API reconnects.');}));
   root.append(button('Validate and apply',async()=>{
-    const desired={version:1,https_origin:https.value.trim(),fips_desired:fips.checked};
+    const publicKeys=value=>value.split(/[\s,]+/).filter(Boolean).map(k=>{if(/^[a-f0-9]{64}$/.test(k))return k;const d=nip19.decode(k);if(d.type!=='npub')throw Error('Use public npubs only.');return d.data;});
+    for(const [name,fields] of Object.entries(moduleInputs)){
+      modules[name].enabled=fields.enabled.checked;
+      if(name!=='graph'){
+        modules[name].origin=fields.origin.value.trim();const keys=publicKeys(fields.keys.value);
+        if(name==='relay')modules[name].publishers=keys;
+        if(name==='blossom'){if(keys.length>1)throw Error('Blossom takes one publisher identity.');modules[name].publisher=keys[0]||'';}
+        if(name==='git'){modules[name].members=keys;modules[name].maintainers=publicKeys(fields.maintainers.value);modules[name].repository_readers=JSON.parse(fields.readers.value);}
+      }
+    }
+    const desired={version:1,https_origin:https.value.trim(),fips_desired:fips.checked,modules,...(result.settings.fips_service_ports?{fips_service_ports:result.settings.fips_service_ports}:{})};
     if(inputs.peer_npub.value.trim()||inputs.mesh_address.value.trim())desired.fips={peer_npub:inputs.peer_npub.value.trim(),mesh_address:inputs.mesh_address.value.trim(),port:Number(inputs.port.value)};
     if(!confirm(result.interruption+' Apply these settings?'))return;
     const applied=await api('/api/v4/installation/settings/apply','POST',desired);
@@ -451,3 +529,24 @@ async function installationSettings() {
   $('objectDetails').replaceChildren(root);$('objectDialog').showModal();
 }
 $('installationSettings').addEventListener('click',()=>run($('installationSettings'),installationSettings));
+
+if(window.__NSTACK_PACKAGED_SHELL__===true){
+  shellVerifier=await import('/ui/assets/shell.js');
+  const panel=document.createElement('section');panel.className='panel';
+  const title=text('h2','Connect NStack'),input=document.createElement('textarea');input.setAttribute('aria-label','Shared workspace connection');input.placeholder='Paste nstack:workspace:v3:…';
+  const preview=document.createElement('div');panel.append(title,text('p','Paste the signed workspace connection from your NStack. This packaged shell uses its approved native transport; no HTTPS bootstrap is required.'),input,button('Preview connection',async()=>{
+    const parsed=shellVerifier.parse(input.value.trim());
+    preview.replaceChildren(details([['Workspace',parsed.name||parsed.workspace_id],['Workspace UUID',parsed.workspace_id],['Service identity',parsed.service_npub],['Workspace authority',parsed.workspace_service_npub]]),text('p','Trust the QR source and compare the full identities. A connection grants no workspace access. Your own signer and exact workspace are checked before use.'));
+    for(const transport of ['fips','https'])if(parsed.transports[transport])preview.append(button('Use '+transport.toUpperCase(),async()=>{
+      if(!confirm('Connect to this exact backend and workspace using '+transport.toUpperCase()+'?'))return;
+      const f=parsed.transports.fips;const endpoint=transport==='fips'?'http://'+f.host+':'+f.port:parsed.transports.https.url;
+      const pinned=localStorage.getItem('nstack.shell.service.'+endpoint);if(pinned&&pinned!==parsed.service_npub)throw Error('Stored backend identity mismatch');
+      disconnect();shellConnection=parsed;shellTransport=transport;API_BASE=endpoint;$('backend').textContent=endpoint;
+      try{await connect();}catch(error){disconnect();status(error.message,true);throw error;}
+      for(const link of document.querySelectorAll('.advanced a')){const path=link.dataset.nstackApiPath||new URL(link.href).pathname;link.href=endpoint+path;link.target='_blank';link.rel='noopener';}
+      status('Verified the selected backend and exact workspace.');
+    }));
+  }),preview);document.querySelector('main').prepend(panel);
+  $('connect').disabled=true; // The explicit preview choice performs connection and proof.
+}
+window.addEventListener('pagehide',()=>{const prior=apiTransport;apiTransport=null;prior?.disconnect().catch(()=>{});});

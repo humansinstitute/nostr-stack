@@ -27,7 +27,7 @@ Recreation with the same project reuses all credentials, identity and ownership.
 
 FIPS desired state defaults on, but this first installation milestone reports it
 as unverified until a host daemon and ingress have been validated. HTTPS is
-optional. Open **Advanced tools → Installation settings** after connecting your administrator
+optional. Open **Services and setup** after connecting your administrator
 signer. Settings apply restarts only this installation’s Tower API. A durable
 controller verifies health and, when configured, a nonce-signed identity proof
 through the HTTPS origin. Failed changes restore previous working settings.
@@ -41,8 +41,7 @@ file bytes; no public storage admin endpoint is required. Workspace administrato
 can display a signed app-independent QR from a typed workspace card. A configured
 HTTPS/FIPS route is required for QR generation; local HTTP alone is not published.
 
-Current limits: optional graph/relay/Blossom/Git enablement, host FIPS provisioning,
-all-service remote acceptance and mobile release remain subsequent stages. Local
+Optional graph/relay/Blossom/private Git modules now have typed configuration, isolated lifecycle and probes. Published images provision from a fixed digest catalogue. Private Git still requires the reviewed image distribution; a missing image is shown honestly and never replaced by unpatched upstream. All-service remote/device acceptance and owner mobile release remain explicit gates. Local
 startup or configuration alone does not establish remote transport readiness.
 
 ## Controller security boundary
@@ -55,3 +54,28 @@ command execution, arbitrary mount or service selector. Controller state uses a
 SQLite transaction and signed-event ID for durable enqueue/idempotency; restart
 recovery restores prior settings before trying again. Keep the project identity
 stable and do not attach this bundle to existing deployment volumes.
+
+## Host transport helper
+
+The Docker-only command always starts local administration. For automatic host
+FIPS discovery, UI-driven installation through normal OS authorization, and
+service route supervision, use `bun run nstack:setup` (or run
+`bun scripts/nstack-host.ts supervise <project>` alongside an already-started
+bundle). The source launcher currently requires host Bun and Docker; distributing
+a standalone signed launcher is separate release packaging. It prints the local
+claim code only when unclaimed. It does not read or replace existing host keys.
+
+A healthy existing persistent daemon is reused. A missing runtime can be installed
+from checksum-verified Linux/macOS packages after an administrator's explicit UI
+action and OS authorization. An existing but stopped/denied/uninspectable daemon
+is **not** reinstalled: repair its control access and recheck. Installer exit status
+alone never establishes readiness. Linux requires its normal supported desktop
+administrator authorization; headless/OS differences remain explicit deployment
+requirements. Current host validation covers macOS reuse, not a fresh Linux host.
+
+The normal UI populates daemon identity/address from validated public host status.
+Advanced values remain inspectable. Each enabled user-facing module gets its own
+FIPS service port and root route; internal graph/Postgres/MinIO administration
+stays private. FIPS and HTTPS metadata are independent. Same-host ingress/protocol
+checks do not prove reachability from another device. See the
+[packaged shell contract](nstack-shell.md) for FIPS-only administration UI.
