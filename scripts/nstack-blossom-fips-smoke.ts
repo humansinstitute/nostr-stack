@@ -1,0 +1,13 @@
+// Actual full-Blossom protocol probe using only the isolated smoke identity.
+import {request} from 'node:http';import {createHash,randomBytes} from 'node:crypto';import {inspectHostFips} from '../src/installation/host-fips';
+const project=process.argv[2];if(!project||!/^[a-z0-9][a-z0-9_-]*$/.test(project))throw Error('Disposable project required');
+const host=await inspectHostFips();if(host.state!=='ready')throw Error('Ready host required');
+const origin=`http://${host.peer_npub}.fips:43113`,content='Disposable Blossom '+randomBytes(16).toString('hex'),sha256=createHash('sha256').update(content).digest('hex');
+async function signed(action:string){const p=Bun.spawn(['docker','compose','-p',project,'-f','docker-compose.setup.yml','exec','-T','tower','sh','-ec','set -a; . /run/nstack/runtime.env; bun scripts/nstack-fixture-sign.ts'],{stdin:'pipe',stdout:'pipe',stderr:'pipe'});p.stdin.write(JSON.stringify({kind:'blossom',url:origin,action,sha256}));p.stdin.end();const [code,out]=await Promise.all([p.exited,new Response(p.stdout).text()]);if(code)throw Error('Disposable fixture unavailable');return JSON.parse(out);}
+async function api(path:string,method='GET',body?:string,authorization?:Record<string,string>){return new Promise<{status:number;body:string}>((resolve,reject)=>{const req=request({host:host.mesh_address,port:43113,path,method,headers:{host:new URL(origin).host,'content-type':'text/plain',...(body?{'content-length':String(Buffer.byteLength(body))}:{}),...authorization},timeout:10000},res=>{let body='';res.setEncoding('utf8');res.on('data',c=>body+=c);res.on('end',()=>resolve({status:res.statusCode!,body}));});req.on('error',reject);req.on('timeout',()=>req.destroy(Error('Blossom timeout')));req.end(body);});}
+const denied=await api('/upload','PUT',content);if(![401,403].includes(denied.status))throw Error('Anonymous Blossom upload admitted');
+const uploaded=await api('/upload','PUT',content,await signed('upload'));if(![200,201].includes(uploaded.status))throw Error('Authorized Blossom upload failed: '+uploaded.status);
+const descriptor=JSON.parse(uploaded.body);if(descriptor.sha256!==sha256||!descriptor.url.startsWith(origin+'/'))throw Error('Blossom descriptor escaped selected transport: '+String(descriptor.url));
+const download=await api('/'+sha256);if(download.status!==200||download.body!==content)throw Error('Blossom bytes mismatch');
+const deleted=await api('/'+sha256,'DELETE',undefined,await signed('delete'));if(![200,204].includes(deleted.status))throw Error('Blossom fixture cleanup failed');
+console.log(JSON.stringify({same_host_mesh_ingress:true,full_blossom_signed_upload_download_delete:true,anonymous_upload_denied:true,descriptor_transport_pinned:true,remote_device:'not_tested'}));

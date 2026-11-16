@@ -162,3 +162,13 @@ limited to newly created resources carrying that unique project's labels.
 Tests never restart the existing Tower stack. The supervising manager must
 separately rebuild/restart the authorized local Tower installation and run its
 integration smoke checks before declaring shared-runtime validation complete.
+
+The managed full-Blossom adapter leaves upstream `publicDomain` empty: the
+pinned server expects a bare hostname there, not a URL. Descriptors follow the
+incoming Host and protocol so a FIPS request stays on its selected peer even
+when HTTPS is advertised separately. A TLS reverse proxy must preserve the
+public Host and set its trusted forwarded protocol. The adapter revision is
+part of its runtime fingerprint; an approved apply replaces an older malformed
+Blossom configuration while retaining data and other modules. The disposable
+`scripts/nstack-blossom-fips-smoke.ts` checks actual signed upload, exact descriptor
+origin, byte readback, signed deletion and anonymous upload denial over mesh.

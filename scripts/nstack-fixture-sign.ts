@@ -7,7 +7,11 @@ const saved=JSON.parse(await readFile('/run/nstack/disposable-smoke.json','utf8'
 const input=JSON.parse(await Bun.stdin.text());const settings=readInstallationSettings();
 if(input.kind==='metadata'){console.log(JSON.stringify({workspace_id:saved.workspace_id,service_npub:saved.service_npub,actor_npub:nip19.npubEncode(getPublicKey(key))}));process.exit(0);}
 const url=new URL(input.url);if(!settings.fips||url.hostname!==settings.fips.peer_npub+'.fips')throw Error('Fixture endpoint mismatch');
-if(input.kind==='relay-publish'){
+if(input.kind==='blossom'){
+ if(url.origin!==settings.modules?.blossom.origin||!['upload','delete'].includes(input.action)||!/^[a-f0-9]{64}$/.test(input.sha256))throw Error('Fixture Blossom mismatch');
+ const event=finalizeEvent({kind:24242,created_at:Math.floor(Date.now()/1000),content:'Disposable module probe',tags:[['t',input.action],['x',input.sha256],['expiration',String(Math.floor(Date.now()/1000)+120)]]},key);
+ console.log(JSON.stringify({authorization:'Nostr '+Buffer.from(JSON.stringify(event)).toString('base64')}));
+}else if(input.kind==='relay-publish'){
  if(url.origin!==settings.modules?.relay.origin)throw Error('Fixture relay mismatch');
  console.log(JSON.stringify(finalizeEvent({kind:1,created_at:Math.floor(Date.now()/1000),tags:[],content:'Disposable progressive setup '+input.nonce},key)));
 }else if(input.kind==='relay'){

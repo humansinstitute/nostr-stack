@@ -99,13 +99,13 @@ export function createModuleRuntime(options:{project:string;docker?:DockerReques
     if(module==='git'&&image.Config?.Labels?.['org.opencontainers.image.revision']!=='nstack-repository-access-v1')throw Error('private_git_patch_required');
     const network=await resource(module,'networks','network',module==='graph');
     const data=await resource(module,'volumes','data');
-    const configVolume=await resource(module,'volumes','config-'+hash(m[module]).slice(0,16));
+    const configVolume=await resource(module,'volumes','config-'+hash(m[module],module).slice(0,16));
     const env:string[]=[];
     const mounts:any[]=[{Type:'volume',Source:configVolume,Target:'/run/module-config'},{Type:'volume',Source:data,Target:module==='graph'?'/var/lib/postgresql/data':module==='relay'?'/usr/src/app/db':module==='blossom'?'/app/data':'/data'}];
     let entrypoint:string[]|undefined;let cmd:string[]|undefined;
     if(module==='relay'){
       entrypoint=['/bin/bash','/run/module-config/relay.sh'];env.push('NOSTR_RELAY_PUBLIC_ORIGIN='+m.relay.origin,'NOSTR_RELAY_PUBLISH_PUBKEYS='+m.relay.publishers.join(','));
-    }else if(module==='blossom'){entrypoint=['deno'];cmd=['run','-P','--env-file=.env','main.ts','/run/module-config/config.yml'];env.push('BLOSSOM_REQUIRE_CONFIG=1','BLOSSOM_PUBLIC_DOMAIN='+m.blossom.origin,'BLOSSOM_PUBLISH_PUBKEY='+m.blossom.publisher);}
+    }else if(module==='blossom'){entrypoint=['deno'];cmd=['run','-P','--env-file=.env','main.ts','/run/module-config/config.yml'];env.push('BLOSSOM_REQUIRE_CONFIG=1','BLOSSOM_PUBLIC_DOMAIN=','BLOSSOM_PUBLISH_PUBKEY='+m.blossom.publisher);}
     else if(module==='graph'){
       const state=await resource(module,'volumes','state');mounts.push({Type:'volume',Source:state,Target:'/run/module-state'});
       entrypoint=['/bin/sh','/run/module-config/graph.sh'];cmd=['postgres','-c','shared_preload_libraries=age'];
@@ -113,9 +113,10 @@ export function createModuleRuntime(options:{project:string;docker?:DockerReques
       env.push('NGIT_DOMAIN='+new URL(m.git.origin).host,'NGIT_PRIVATE_PUBLIC_ORIGIN='+m.git.origin,'NGIT_PRIVATE_MODE=true','NGIT_PRIVATE_REPOSITORY_READERS_FILE=/run/module-config/repository-readers.json','NGIT_PRIVATE_MEMBERS='+m.git.members.map(k=>nip19.npubEncode(k)).join(','),'NGIT_REPOSITORY_WHITELIST='+m.git.maintainers.map(k=>nip19.npubEncode(k)).join(','),'NGIT_GRASP06_ENABLE=false','NGIT_SYNC_PLUS_ENABLED=false','NGIT_USER_INDEX_RELAYS=','NGIT_SYNC_PLUS_FALLBACK_RELAYS=','NGIT_DATABASE_BACKEND=lmdb','NGIT_BIND_ADDRESS=0.0.0.0:7334','NGIT_RELAY_NAME=Wingman private GRasp','NGIT_GIT_DATA_PATH=/data/git','NGIT_RELAY_DATA_PATH=/data/relay');
     }
     const port=catalogue.port+'/tcp';
-    return {Image:image.Id,Env:env,...(entrypoint?{Entrypoint:entrypoint}:{}),...(cmd?{Cmd:cmd}:{}),Labels:{...labels(module),[CONFIG]:hash(m[module])},ExposedPorts:{[port]:{}},HostConfig:{NetworkMode:network,Mounts:mounts,RestartPolicy:{Name:'unless-stopped'},ReadonlyRootfs:module!=='graph'&&module!=='git',SecurityOpt:['no-new-privileges:true'],...(module==='graph'?{}:module==='git'?{CapDrop:['ALL'],CapAdd:['CHOWN','FOWNER','SETUID','SETGID','DAC_OVERRIDE']}:{CapDrop:['ALL']}),PidsLimit:256,Memory:module==='blossom'?2147483648:1073741824,NanoCpus:1000000000,Tmpfs:module==='blossom'?{'/tmp':'size=268435456,mode=1777','/deno-dir':'size=1073741824,mode=1777,exec'}:{'/tmp':'size=8388608,mode=1777'},PortBindings:catalogue.hostPort?{[port]:[{HostIp:'127.0.0.1',HostPort:String(catalogue.hostPort)}]}:{}},NetworkingConfig:{EndpointsConfig:{[network]:{Aliases:['nstack-module-'+module]}}}};
+    return {Image:image.Id,Env:env,...(entrypoint?{Entrypoint:entrypoint}:{}),...(cmd?{Cmd:cmd}:{}),Labels:{...labels(module),[CONFIG]:hash(m[module],module)},ExposedPorts:{[port]:{}},HostConfig:{NetworkMode:network,Mounts:mounts,RestartPolicy:{Name:'unless-stopped'},ReadonlyRootfs:module!=='graph'&&module!=='git',SecurityOpt:['no-new-privileges:true'],...(module==='graph'?{}:module==='git'?{CapDrop:['ALL'],CapAdd:['CHOWN','FOWNER','SETUID','SETGID','DAC_OVERRIDE']}:{CapDrop:['ALL']}),PidsLimit:256,Memory:module==='blossom'?2147483648:1073741824,NanoCpus:1000000000,Tmpfs:module==='blossom'?{'/tmp':'size=268435456,mode=1777','/deno-dir':'size=1073741824,mode=1777,exec'}:{'/tmp':'size=8388608,mode=1777'},PortBindings:catalogue.hostPort?{[port]:[{HostIp:'127.0.0.1',HostPort:String(catalogue.hostPort)}]}:{}},NetworkingConfig:{EndpointsConfig:{[network]:{Aliases:['nstack-module-'+module]}}}};
   }
-  const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  // Version only the changed adapter so an approved apply replaces its old runtime.
+  const hash=(value:unknown,module:ModuleName)=>createHash('sha256').update(JSON.stringify(module==='blossom'?{adapter:'request-authority-v2',settings:value}:value)).digest('hex');
   async function stop(c:any){if(c.State?.Running)await api('/containers/'+c.Id+'/stop?t=30','POST');}
   async function remove(c:any){await stop(c);await api('/containers/'+c.Id+'?v=0','DELETE');}
   const probes:Record<ModuleName,string[]>={
@@ -160,7 +161,7 @@ export function createModuleRuntime(options:{project:string;docker?:DockerReques
       for(const module of MODULE_NAMES){
         const current=await inspect(module);
         if(!desired[module].enabled){if(current?.State?.Running){stopped.push(module);await stop(current);}continue;}
-        if(current&&current.Config.Labels[CONFIG]===hash(desired[module])){
+        if(current&&current.Config.Labels[CONFIG]===hash(desired[module],module)){
           if(desired[module].enabled){if(!current.State?.Running){startedExisting.push(module);await api('/containers/'+current.Id+'/start','POST');}await wait(module);}else await stop(current);
           continue;
         }
@@ -200,7 +201,7 @@ export function createModuleRuntime(options:{project:string;docker?:DockerReques
       try{
         const found=await inspect(module);
         if(!desired[module].enabled){result.runtime=found?.State?.Running?'unhealthy':'disabled';return result;}
-        result.runtime=!found?'missing':!found.State?.Running?'stopped':found.Config.Labels[CONFIG]!==hash(desired[module])?'unhealthy':await probe(module)?'ready':'unhealthy';
+        result.runtime=!found?'missing':!found.State?.Running?'stopped':found.Config.Labels[CONFIG]!==hash(desired[module],module)?'unhealthy':await probe(module)?'ready':'unhealthy';
       }catch(e){result.runtime='unavailable';result.error=e instanceof Error?e.message:'module_status_failed';}
       return result;
     }));

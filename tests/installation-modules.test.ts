@@ -51,7 +51,7 @@ function fakeDocker(){
   }
   if(p[0]==='exec'){
    const e=execs.get(p[1]);
-   if(p[2]==='json')return ok({Running:false,ExitCode:failProbe&&e.container.Config.Env.some((v:string)=>v.includes(failProbe))?1:0});
+   if(p[2]==='json'){const moduleFailure=Boolean(failProbe&&e.container.Config.Labels['io.wingman.nstack.module']===failProbe);const failed=moduleFailure||Boolean(failProbe&&e.container.Config.Env.some((v:string)=>v.includes(failProbe)));if(moduleFailure)failProbe='';return ok({Running:false,ExitCode:failed?1:0});}
    let data='';
    if(e.cmd.join(' ').includes('cat /run/module-state/admin-password /run/module-state/app-password'))data='a'.repeat(64)+'\n'+'b'.repeat(64)+'\n';
    else if(e.container.Config.Labels['io.wingman.nstack.module']==='git')data=JSON.stringify({supported_nips:[1,42]});
@@ -115,6 +115,7 @@ describe('fixed Docker lifecycle',()=>{
    expect(c.Config.Env.some((e:string)=>/NSEC|DB_PASSWORD|S3_SECRET/.test(e))).toBe(false);
    for(const binding of Object.values(c.HostConfig.PortBindings) as any[])expect(binding[0].HostIp).toBe('127.0.0.1');
   }
+  expect(f.containers.get('test-installation-module-blossom').Config.Env).toContain('BLOSSOM_PUBLIC_DOMAIN=');
   expect(f.networks.get('test-installation-module-graph-network').Internal).toBe(true);
   expect(f.containers.get('test-installation-module-graph').HostConfig.PortBindings).toEqual({});
   const relay=f.containers.get('test-installation-module-relay');expect(relay.Config.Entrypoint).toEqual(['/bin/bash','/run/module-config/relay.sh']);
@@ -130,7 +131,7 @@ describe('fixed Docker lifecycle',()=>{
  });
  test('failed readiness restores working container and configuration across multiple modules',async()=>{
   const f=fakeDocker(),r=runtime(f),on=configured();await r.apply(defaultModuleSettings(),on);
-  const ids=[...f.containers.values()].map(c=>c.Id).sort();const changed=structuredClone(on);changed.relay.origin='wss://new-relay.example.com';changed.blossom.origin='https://bad.example.com';f.setProbeFailure('bad.example.com');
+  const ids=[...f.containers.values()].map(c=>c.Id).sort();const changed=structuredClone(on);changed.relay.origin='wss://new-relay.example.com';changed.blossom.origin='https://bad.example.com';f.setProbeFailure('blossom');
   const result=await r.apply(on,changed);expect(result.state).toBe('rolled_back');expect(result.error).toBe('module_readiness_failed_blossom');
   expect([...f.containers.values()].map(c=>c.Id).sort()).toEqual(ids);expect(await r.verify(on)).toBe(true);
  });
@@ -172,7 +173,7 @@ describe('fixed Docker lifecycle',()=>{
  test('rollback failures remain explicit and protected graph state is never in status',async()=>{
   const f=fakeDocker(),r=runtime(f),on=configured();await r.apply(defaultModuleSettings(),on);
   const env=await r.graphEnvironment();expect(env.GRAPH_DB_ADMIN_PASSWORD).toHaveLength(64);expect(env.GRAPH_DB_APP_PASSWORD).toHaveLength(64);expect(JSON.stringify(await r.status(on))).not.toContain(env.GRAPH_DB_ADMIN_PASSWORD);
-  const next=structuredClone(on);next.relay.origin='wss://bad.example.com';f.setProbeFailure('bad.example.com');f.setRollbackFailure();expect((await r.apply(on,next)).state).toBe('recovery_required');
+  const next=structuredClone(on);next.relay.origin='wss://bad.example.com';f.setProbeFailure('blossom');f.setRollbackFailure();expect((await r.apply(on,next)).state).toBe('recovery_required');
  });
  test('optional Docker unavailability is reported as status, never thrown to core UI',async()=>{
   const r=createModuleRuntime({project:'test-installation',docker:async()=>{throw Error('docker_unavailable');}});
