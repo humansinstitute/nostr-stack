@@ -20,7 +20,7 @@ test('packaged shell retains exact native capability, proves identity and select
  }});
  const browser=await chromium.launch({headless:true});
  try{
-  for(const scenario of ['good','wrong-proof','missing-provider','https']){
+  for(const scenario of ['good','signer-denied','wrong-proof','missing-provider','https']){
    const context=await browser.newContext();const page=await context.newPage();const requests:string[]=[],grants:any[]=[];let ambient=0;const selectedEndpoint=scenario==='https'?payload.transports.https!.url:endpoint;
    let nativeDialogs=0;page.on('dialog',dialog=>{nativeDialogs++;return dialog.dismiss();});
    await page.route('**/*.fips*/**',route=>{ambient++;return route.abort();});
@@ -45,26 +45,32 @@ test('packaged shell retains exact native capability, proves identity and select
     if(route.request().method()==='OPTIONS'){await route.fulfill({status:204,headers});return;}
     const result=respond({url:route.request().url(),headers:route.request().headers()});await route.fulfill({...result,headers:{...headers,'content-type':'application/json'}});
    });
-   await page.addInitScript(({userHex,available})=>{
+   await page.addInitScript(({userHex,available,rejectFirst})=>{
     let signerPending=false;
+    let rejectNext=rejectFirst;
     (window as any).signerOverlaps=0;
     (window as any).nostr={getPublicKey:async()=>userHex,signEvent:async(event:any)=>{
      // Native approval is interactive: another request cannot enter while it is open.
      if(signerPending){(window as any).signerOverlaps++;throw Error('Another authentication approval is pending.');}
      signerPending=true;
-     try{await new Promise(resolve=>setTimeout(resolve,30));return await (window as any).fixtureSign(event);}
+     try{await new Promise(resolve=>setTimeout(resolve,30));if(rejectNext){rejectNext=false;throw Error('Signature denied');}return await (window as any).fixtureSign(event);}
      finally{signerPending=false;}
     }};
     (window as any).fipsTransport={available,version:2,connect:async(input:any)=>{await (window as any).fixtureConnect(input);return {...input,fetch:async(url:string,init:any)=>{const result=await (window as any).fixtureNativeFetch({url,headers:init.headers});return new Response(result.body,{status:result.status,headers:{'content-type':'application/json'}});},disconnect:async()=>{}};}};
-   },{userHex,available:scenario!=='missing-provider'});
+   },{userHex,available:scenario!=='missing-provider',rejectFirst:scenario==='signer-denied'});
    await page.goto('http://127.0.0.1:'+server.port+'/cap/index.html');expect(await page.evaluate(()=>typeof (window as any).Buffer)).toBe('undefined');
    await page.getByLabel('Shared workspace connection',{exact:true}).fill(envelope);await page.getByRole('button',{name:'Preview connection',exact:true}).click();await page.getByRole('button',{name:scenario==='https'?'Use HTTPS':'Use FIPS',exact:true}).click();
    expect(requests).toHaveLength(0);expect(grants).toHaveLength(0);
    await page.locator('#cancelReview').click();expect(requests).toHaveLength(0);
    await page.getByRole('button',{name:scenario==='https'?'Use HTTPS':'Use FIPS',exact:true}).click();await page.locator('#approveReview').click();
-   if(scenario==='good'||scenario==='https'){
+   if(scenario==='signer-denied'){
+    await page.waitForFunction(()=>document.getElementById('status')?.textContent?.includes('Signature denied'));
+    expect(requests).toHaveLength(0);
+    await page.getByRole('button',{name:'Use FIPS',exact:true}).click();await page.locator('#approveReview').click();
+   }
+   if(scenario==='good'||scenario==='https'||scenario==='signer-denied'){
     await page.waitForFunction(name=>document.getElementById('workspaceName')?.textContent===name,payload.name);expect(await page.locator('#workspaceName').textContent()).toBe(payload.name);
-    expect(grants).toEqual(scenario==='https'?[]:[{endpoint,peerNpub:npub,purpose:'tower'}]);expect(requests).toContain('/api/v4/flightdeck-pg/workspaces');
+    expect(grants).toEqual(scenario==='https'?[]:Array.from({length:scenario==='signer-denied'?2:1},()=>({endpoint,peerNpub:npub,purpose:'tower'})));expect(requests).toContain('/api/v4/flightdeck-pg/workspaces');
    }else{
     const message=scenario==='missing-provider'?'native FIPS transport':'identity proof invalid';await page.waitForFunction(message=>document.getElementById('status')?.textContent?.includes(message),message);expect(await page.locator('#status').textContent()).toContain(message);
     expect(requests.includes('/api/v4/flightdeck-pg/workspaces')).toBe(false);
