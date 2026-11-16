@@ -1042,6 +1042,7 @@ adminRouter.get('/workspaces/:workspaceId/connection-token', async (c) => {
   if (authNpub instanceof Response) return authNpub;
   const adminError = requireAdminNpub(authNpub);
   if (adminError) return adminError;
+  if(!config.directHttpsUrl)return c.json({error:'Legacy v2 connections require a configured HTTPS endpoint. Use a shared v3 workspace connection for FIPS-only access.',code:'legacy_connection_requires_https'},409);
 
   const workspaceId = String(c.req.param('workspaceId') || '').trim();
   const appNpub = String(c.req.query('app_npub') || '').trim();

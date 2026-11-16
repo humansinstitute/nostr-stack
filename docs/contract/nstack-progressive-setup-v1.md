@@ -88,3 +88,7 @@ requires workspace.manage. Uses only configured public transport metadata and
 returns `{ envelope, qr_available }`. No advertised route yields 409
 `connection_transport_unavailable`; local HTTP is deliberately not put into a
 public connection QR. Consumer app identity is not embedded.
+
+Legacy v2 generation returns `409 legacy_connection_requires_https` on a FIPS-only
+installation instead of emitting an invalid empty-HTTPS token. Configured legacy
+installations retain their existing v2 bytes and app namespace semantics.

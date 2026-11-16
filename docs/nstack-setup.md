@@ -61,7 +61,7 @@ The Docker-only command always starts local administration. For automatic host
 FIPS discovery, UI-driven installation through normal OS authorization, and
 service route supervision, use `bun run nstack:setup` (or run
 `bun scripts/nstack-host.ts supervise <project>` alongside an already-started
-bundle). The source launcher currently requires host Bun and Docker; distributing
+bundle). The launcher installs a per-project launchd user agent (macOS) or systemd user service (Linux) using a hash-named source snapshot, so closing the terminal does not stop FIPS routes. User services restart on login; Linux operation before login requires the operator’s explicit linger policy. The source launcher currently requires host Bun and Docker; distributing
 a standalone signed launcher is separate release packaging. It prints the local
 claim code only when unclaimed. It does not read or replace existing host keys.
 
@@ -79,3 +79,17 @@ FIPS service port and root route; internal graph/Postgres/MinIO administration
 stays private. FIPS and HTTPS metadata are independent. Same-host ingress/protocol
 checks do not prove reachability from another device. See the
 [packaged shell contract](nstack-shell.md) for FIPS-only administration UI.
+
+Manage only this installation’s helper with:
+
+```sh
+bun scripts/nstack-host-service.ts status <project>
+bun scripts/nstack-host-service.ts start <project>
+bun scripts/nstack-host-service.ts stop <project>
+bun scripts/nstack-host-service.ts uninstall <project>
+```
+
+Stop/uninstall does not stop the shared FIPS daemon or remove installation data.
+Re-run the launcher or `install` after an approved source update to select a new
+hash-named runner snapshot. macOS user-agent persistence is checked separately
+from fresh Linux/systemd or reboot acceptance.

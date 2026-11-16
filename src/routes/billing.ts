@@ -374,6 +374,7 @@ async function appConnectionTokenResponse(c: any) {
   const appNpub = String(c.req.param('appNpub') || '').trim();
   const authError = await requireWorkspaceManager(c, workspaceOwnerNpub, auth.userNpub);
   if (authError) return authError;
+  if(!config.directHttpsUrl)return c.json({error:'Legacy v2 connections require a configured HTTPS endpoint. Use a shared v3 workspace connection for FIPS-only access.',code:'legacy_connection_requires_https'},409);
 
   const billingBlock = await getInsufficientCreditsBlock(workspaceOwnerNpub);
   if (billingBlock) return c.json(billingBlock, 402);
