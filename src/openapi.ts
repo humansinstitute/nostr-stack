@@ -7772,6 +7772,30 @@ export function buildOpenApiDocument(origin: string) {
           },
         },
       },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/connection-envelope': {
+        get: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Generate app-independent signed workspace v3 connection envelope', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Envelope and QR availability; workspace.manage required' }, '403': { description: 'Permission denied' }, '409': { description: 'No configured public transport' } } },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/connection-proof': {
+        get: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Prove service and exact authorized workspace identity against a fresh client nonce', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'nonce', in: 'query', required: true, schema: { type: 'string', pattern: '^[a-f0-9]{64}$' } }], responses: { '200': { description: 'Service-signed kind-30384 proof; 60-second expiry' }, '403': { description: 'Workspace access denied' } } },
+      },
+      '/api/v4/installation/settings': {
+        get: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Read administrator installation settings, environment locks and durable operation status', responses: { '200': { description: 'Typed settings; no secrets' }, '403': { description: 'Administrator required' }, '409': { description: 'Installation controller unavailable' } } },
+      },
+      '/api/v4/installation/settings/apply': {
+        post: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Validate and queue a fixed Tower settings apply/restart with rollback', responses: { '202': { description: 'Durable operation queued; only labelled installation Tower restarts' }, '400': { description: 'Invalid or unknown settings' }, '403': { description: 'Administrator required' }, '409': { description: 'Busy, locked or recovery required' } } },
+      },
+      '/api/v4/installation/identity-proof': {
+        get: { tags: ['Installation'], summary: 'Public nonce-bound service identity proof for operator reachability verification', parameters: [{ name: 'nonce', in: 'query', required: true, schema: { type: 'string', pattern: '^[a-f0-9]{64}$' } }], responses: { '200': { description: 'Service-signed kind-30384 proof; no credentials or access grant' }, '400': { description: 'Invalid nonce' } } },
+      },
+      '/api/v4/installation/settings/recover': {
+        post: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Retry a failed rollback to the last working installation settings', responses: { '202': { description: 'Idempotent recovery queued' }, '403': { description: 'Administrator required' }, '409': { description: 'No recovery needed or controller unavailable' } } },
+      },
+      '/api/v4/installation/status': {
+        get: { tags: ['Installation'], summary: 'Read safe installation and transport readiness', responses: { '200': { description: 'Public readiness only, no code or credentials' } } },
+      },
+      '/api/v4/installation/claim': {
+        post: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Claim a fresh installation using signed possession and local one-time code', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { code: { type: 'string', pattern: '^[a-f0-9]{48}$' } }, required: ['code'], additionalProperties: false } } } }, responses: { '201': { description: 'Administrator durably claimed' }, '401': { description: 'Invalid NIP-98 proof' }, '409': { description: 'Invalid local code or claim closed' } } },
+      },
       '/api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/connection-token': {
         get: {
           tags: ['Billing'],

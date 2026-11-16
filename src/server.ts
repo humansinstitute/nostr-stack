@@ -1,3 +1,4 @@
+import { installationRouter, installationHtml } from './routes/installation';
 import { managedStorageRouter } from './managed-storage/routes';
 import { consoleAsset } from './nstack-console';
 import { buildAdvancedDashboardHtml } from './openapi';
@@ -54,6 +55,9 @@ export function createApp(options: CreateAppOptions = {}) {
     await next();
   });
 
+  app.route('/api/v4/installation', installationRouter);
+  app.get('/setup', (c) => { c.header('Cache-Control', 'no-store'); return c.html(installationHtml()); });
+
   app.get('/health', (c) => {
     return c.json({
       status: 'ok',
@@ -98,6 +102,7 @@ export function createApp(options: CreateAppOptions = {}) {
   });
   app.get('/ui/advanced', (c) => c.html(buildAdvancedDashboardHtml(new URL(c.req.url).origin)));
   app.get('/ui', (c) => {
+    if (process.env.NSTACK_SETUP_DIRECTORY && !config.adminNpub) return c.redirect('/setup');
     c.header('Cache-Control', 'no-store');
     const origin = new URL(c.req.url).origin;
     return c.html(buildSuperbasedDashboardHtml(origin));

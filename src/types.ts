@@ -3769,3 +3769,14 @@ export interface NotificationFcmHintV1 {
   v: 1; installation_id: string; origin: string; tower_service_npub: string;
   workspace_id: string; notification_id: string; change_seq: number;
 }
+
+/** Public installation state; bootstrap credentials/code are never returned. */
+export interface NstackInstallationStatus {
+  version: 1;
+  claim_available: boolean;
+  claimed: boolean;
+  fips: { desired_enabled: boolean; runtime: 'not_verified'; requirement: string };
+  https: { configured: boolean };
+}
+
+export type { WorkspaceConnectionV3 } from './services/workspace-connection';

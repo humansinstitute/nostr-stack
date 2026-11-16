@@ -1,3 +1,9 @@
+import { loadInstallationSettings } from './installation/settings';
+loadInstallationSettings();
+import { installedAdmin } from './installation/state';
+
+const setupMode = Boolean(process.env.NSTACK_SETUP_DIRECTORY);
+
 function csvValues(value: string | undefined): string[] {
   return String(value || '')
     .split(',')
@@ -32,12 +38,12 @@ function booleanEnv(name: string, fallback = false): boolean {
 
 export const config = {
   port: parseInt(process.env.PORT || '3100', 10),
-  directHttpsUrl: requiredEnv('SUPERBASED_DIRECT_HTTPS_URL'),
-  adminNpub: requiredNpubEnv('ADMIN_NPUB'),
+  directHttpsUrl: setupMode ? String(process.env.SUPERBASED_DIRECT_HTTPS_URL || '') : requiredEnv('SUPERBASED_DIRECT_HTTPS_URL'),
+  adminNpub: setupMode ? installedAdmin() || String(process.env.ADMIN_NPUB || '') : requiredNpubEnv('ADMIN_NPUB'),
   storage: {
     blossomPublicOrigin: String(process.env.BLOSSOM_PUBLIC_ORIGIN || '').trim(),
     s3Endpoint: (process.env.STORAGE_S3_ENDPOINT || 'http://127.0.0.1:9000').trim(),
-    s3PublicEndpoint: requiredEnv('STORAGE_S3_ENDPOINT_PUBLIC'),
+    s3PublicEndpoint: setupMode ? String(process.env.STORAGE_S3_ENDPOINT_PUBLIC || '') : requiredEnv('STORAGE_S3_ENDPOINT_PUBLIC'),
     s3Region: (process.env.STORAGE_S3_REGION || 'us-east-1').trim(),
     s3AccessKey: requiredEnv('STORAGE_S3_ACCESS_KEY'),
     s3SecretKey: requiredEnv('STORAGE_S3_SECRET_KEY'),
@@ -61,10 +67,10 @@ export const config = {
       host: process.env.GRAPH_DB_HOST || '127.0.0.1',
       port: parseInt(process.env.GRAPH_DB_PORT || '5432', 10),
       database: process.env.GRAPH_DB_NAME || 'tower_graph',
-      adminUser: requiredEnv('GRAPH_DB_ADMIN_USER'),
-      adminPassword: requiredEnv('GRAPH_DB_ADMIN_PASSWORD'),
-      appUser: requiredEnv('GRAPH_DB_APP_USER'),
-      appPassword: requiredEnv('GRAPH_DB_APP_PASSWORD'),
+      adminUser: (/^(1|true|yes)$/i.test(process.env.GRAPH_ENABLED || '') ? requiredEnv('GRAPH_DB_ADMIN_USER') : String(process.env.GRAPH_DB_ADMIN_USER || '')),
+      adminPassword: (/^(1|true|yes)$/i.test(process.env.GRAPH_ENABLED || '') ? requiredEnv('GRAPH_DB_ADMIN_PASSWORD') : String(process.env.GRAPH_DB_ADMIN_PASSWORD || '')),
+      appUser: (/^(1|true|yes)$/i.test(process.env.GRAPH_ENABLED || '') ? requiredEnv('GRAPH_DB_APP_USER') : String(process.env.GRAPH_DB_APP_USER || '')),
+      appPassword: (/^(1|true|yes)$/i.test(process.env.GRAPH_ENABLED || '') ? requiredEnv('GRAPH_DB_APP_PASSWORD') : String(process.env.GRAPH_DB_APP_PASSWORD || '')),
       max: parseInt(process.env.GRAPH_DB_MAX_CONNECTIONS || '10', 10),
     },
     allowedNpubs: csvValues(process.env.GRAPH_ALLOWED_NPUBS),

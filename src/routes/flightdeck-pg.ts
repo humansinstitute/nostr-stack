@@ -1,3 +1,6 @@
+import QRCode from 'qrcode';
+import { readFipsIngressConfig } from '../fips-ingress';
+import { signWorkspaceConnection, signConnectionChallenge, WORKSPACE_QR_MAX_BYTES, type WorkspaceConnectionV3 } from '../services/workspace-connection';
 import { inlineContentDisposition } from '../content-disposition';
 import { ensureWorkspaceGeneral } from '../services/flightdeck-pg-general';
 import { runFlightDeckPgChannelMove, ChannelMoveError } from '../services/flightdeck-pg-channel-move';
@@ -2095,6 +2098,44 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/descriptor', async (c) => {
   return c.json(serializeFlightDeckPgWorkspaceDescriptor(context.workspace, {
     towerBaseUrl: new URL(c.req.url).origin,
   }));
+});
+
+flightDeckPgRouter.get('/workspaces/:workspaceId/connection-envelope', async (c) => {
+  const auth = await requireNip98AuthResolved(c); if (auth instanceof Response) return auth;
+  const result = await requireFlightDeckPgContext(c, auth.userNpub); if ('response' in result) return result.response;
+  const {context, identity} = result;
+  const denied = await requireFlightDeckPgWorkspaceManage(c, auth.userNpub, context, identity); if (denied) return denied;
+  const transports: WorkspaceConnectionV3['transports'] = {};
+  if (config.directHttpsUrl) {
+    try { const url = new URL(config.directHttpsUrl); if (url.protocol === 'https:') transports.https = {url:url.origin}; } catch {}
+  }
+  try {
+    const fips=readFipsIngressConfig(process.env);
+    if(fips)transports.fips={peer_npub:fips.nodeNpub,host:`${fips.nodeNpub}.fips`,port:fips.port};
+  } catch {}
+  if(!transports.https&&!transports.fips)return c.json({error:'connection_transport_unavailable'},409);
+  const envelope=signWorkspaceConnection({type:'nstack-workspace',version:3,service_npub:config.service.npub,
+    workspace_id:context.workspace.id,workspace_service_npub:context.workspace.workspace_service_npub,
+    name:context.workspace.name.slice(0,128),transports,policy:{preferred:transports.fips?'fips':'https',fallback:'none'}},config.service.nsec);
+  c.header('Cache-Control','no-store');
+  const qr_available=Buffer.byteLength(envelope)<=WORKSPACE_QR_MAX_BYTES;
+  const qr_svg=qr_available ? await QRCode.toString(envelope,{type:'svg',errorCorrectionLevel:'M'}) : null;
+  return c.json({envelope,qr_available,qr_svg,qr_error:qr_available?null:'qr_payload_too_large'});
+});
+
+flightDeckPgRouter.get('/workspaces/:workspaceId/connection-proof', async (c) => {
+  const nonce=c.req.query('nonce')||'';
+  if(!/^[a-f0-9]{64}$/.test(nonce))return c.json({error:'invalid_nonce'},400);
+  const auth=await requireNip98AuthResolved(c);if(auth instanceof Response)return auth;
+  const result=await requireFlightDeckPgContext(c,auth.userNpub);if('response' in result)return result.response;
+  const {context,identity}=result;
+  const decision=await authorizeFlightDeckPgOperation({actorNpub:auth.userNpub,appNpub:context.workspace.app_npub,
+    workspaceId:context.workspace.id,permission:'workspace.read',resource:{type:'workspace'}});
+  if(!decision.allowed)return authorizationError(c,decision,identity,'workspace.read');
+  const proof=signConnectionChallenge({nonce,service_npub:config.service.npub,workspace_id:context.workspace.id,
+    workspace_service_npub:context.workspace.workspace_service_npub,request_url:getEffectiveRequestUrl(c.req.raw).href,
+    expires_at:Math.floor(Date.now()/1000)+60},config.service.nsec);
+  c.header('Cache-Control','no-store');return c.json({proof});
 });
 
 flightDeckPgRouter.patch('/workspaces/:workspaceId', async (c) => {

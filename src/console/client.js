@@ -233,6 +233,7 @@ async function loadInventory(w, generation) {
 function typedAppCard(w) {
   const card = document.createElement('article');
   card.append(text('span', 'Typed workspace app identity', 'badge'), text('h3', w.app_npub === 'npub1hd37reqgfcnz3pvzj4grknd2nkzc94p9ercmunrxx22razr2rfxsw6dns5' ? 'Ambulando / Flight Deck namespace' : 'Typed app namespace'), text('p', w.app_npub, 'app-id'), text('p', 'Source: flightdeck_pg_workspaces.app_npub. Shared public flightdeck_pg_* tables hold typed data partitioned by workspace UUID. Several workspaces and clients can use the same app identity. Client branding does not establish a separate namespace. This is not an installed-app or online-connection inventory.', 'hint'));
+  card.append(button('Connect to this workspace · QR', () => workspaceConnectionQr(w)));
   return card;
 }
 async function loadAllApps() {
@@ -416,3 +417,37 @@ for (const b of document.querySelectorAll('[data-view], [data-go]')) b.addEventL
 for (const id of ['visibility', 'completion']) $(id).addEventListener('change', () => { state.offset = 0; state.generation++; loadStorage(); });
 $('previous').addEventListener('click', () => { state.offset = Math.max(0, state.offset - 20); state.generation++; loadStorage(); });
 $('next').addEventListener('click', () => { state.offset += 20; state.generation++; loadStorage(); });
+
+async function workspaceConnectionQr(w) {
+  const generation=state.generation;
+  const result=await api('/api/v4/flightdeck-pg/workspaces/'+encodeURIComponent(w.workspace_id)+'/connection-envelope');
+  if(!still(generation))return;
+  const intro=text('p','Connect to this workspace in Alexandria or Ambulando. This code identifies the backend and exact workspace; it grants no access. It may disclose the workspace name.');
+  const output=document.createElement('textarea');output.readOnly=true;output.value=result.envelope;output.setAttribute('aria-label','Workspace connection envelope');
+  const children=[intro,details([['Workspace',w.name],['Workspace UUID',w.workspace_id],['Workspace authority',w.workspace_service_npub]])];
+  if(result.qr_available&&result.qr_svg){const img=document.createElement('img');img.alt='Connect to this workspace';img.style.width='100%';img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(result.qr_svg);children.push(img);}
+  else children.push(text('p','This connection is too large for a QR. Copy and paste the envelope.'));
+  children.push(output,button('Copy connection',()=>navigator.clipboard.writeText(result.envelope)));
+  $('objectDetails').replaceChildren(...children);$('objectDialog').showModal();
+}
+
+async function installationSettings() {
+  const result=await api('/api/v4/installation/settings');
+  const root=document.createElement('div');root.append(text('h2','Installation settings'),text('p',result.interruption));
+  root.append(details([['Local UI',result.reachability.local],['FIPS',result.reachability.fips],['HTTPS',result.reachability.https],['Last operation',result.operation?.state||'No changes applied']]));
+  root.append(text('p','FIPS is enabled by default as a desired setting. A host daemon and tested ingress are required before remote use. HTTPS needs DNS and TLS configured externally; saving an address does not issue a certificate.','hint'));
+  const label=text('label','Public HTTPS origin (optional)'),https=document.createElement('input');https.type='url';https.placeholder='https://nstack.example';https.value=result.settings.https_origin;https.disabled=result.locked?.https_origin;label.append(https);root.append(label);
+  const fipsLabel=text('label','Enable FIPS'),fips=document.createElement('input');fips.type='checkbox';fips.checked=result.settings.fips_desired;fips.disabled=result.locked?.fips_desired;fipsLabel.append(fips);root.append(fipsLabel);
+  const inputs={};for(const [key,title,value] of [['peer_npub','Host daemon public npub',result.settings.fips?.peer_npub||''],['mesh_address','Host daemon mesh IPv6',result.settings.fips?.mesh_address||''],['port','Mesh service port',result.settings.fips?.port||43100]]){const l=text('label',title),i=document.createElement('input');i.value=String(value);i.disabled=result.locked?.fips;i.autocomplete='off';l.append(i);root.append(l);inputs[key]=i;}
+  root.append(text('p','Environment-controlled settings are locked. Generated credentials and service identity are protected and cannot be rotated here. Optional graph, relay, Blossom and Git modules are not enabled in this bundle.','hint'));
+  if(result.operation?.state==='recovery_required')root.append(button('Retry recovery',async()=>{await api('/api/v4/installation/settings/recover','POST',{});status('Recovery queued. Reopen settings after the API reconnects.');}));
+  root.append(button('Validate and apply',async()=>{
+    const desired={version:1,https_origin:https.value.trim(),fips_desired:fips.checked};
+    if(inputs.peer_npub.value.trim()||inputs.mesh_address.value.trim())desired.fips={peer_npub:inputs.peer_npub.value.trim(),mesh_address:inputs.mesh_address.value.trim(),port:Number(inputs.port.value)};
+    if(!confirm(result.interruption+' Apply these settings?'))return;
+    const applied=await api('/api/v4/installation/settings/apply','POST',desired);
+    root.append(text('p','Change queued ('+applied.operation.state+'). The API will restart briefly. Reopen installation settings to check whether it committed or rolled back.','hint'));
+  },'primary'));
+  $('objectDetails').replaceChildren(root);$('objectDialog').showModal();
+}
+$('installationSettings').addEventListener('click',()=>run($('installationSettings'),installationSettings));

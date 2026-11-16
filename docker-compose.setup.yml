@@ -1,0 +1,90 @@
+# Additive fresh-install bundle. Never attach existing production volumes here.
+services:
+  bootstrap:
+    build:
+      context: .
+      args:
+        BUN_IMAGE: ${NSTACK_BUN_IMAGE:-oven/bun:1.4.4}
+        TOWER_GIT_COMMIT: ${NSTACK_BUILD_COMMIT:-setup-development}
+        TOWER_GIT_BRANCH: main
+        TOWER_BUILD_TIME: ${NSTACK_BUILD_TIME:-unspecified}
+    image: nstack-setup-local:0.2.0
+    command: ["bun", "src/installation/bootstrap.ts"]
+    environment:
+      NSTACK_UNSUPPORTED_OVERRIDES: "${DB_USER:+DB_USER }${DB_PASSWORD:+DB_PASSWORD }${STORAGE_S3_ACCESS_KEY:+STORAGE_S3_ACCESS_KEY }${STORAGE_S3_SECRET_KEY:+STORAGE_S3_SECRET_KEY }${SUPERBASED_SERVICE_NSEC:+SUPERBASED_SERVICE_NSEC }"
+    volumes: ["bootstrap:/run/nstack", "database-credentials:/run/nstack-db", "storage-credentials:/run/nstack-storage"]
+    restart: "no"
+  postgres:
+    image: postgres:16-alpine
+    entrypoint: ["sh", "-ec", "set -a; . /run/nstack-db/runtime.env; export POSTGRES_USER=$$DB_USER POSTGRES_PASSWORD=$$DB_PASSWORD POSTGRES_DB=$$DB_NAME; exec /usr/local/bin/docker-entrypoint.sh postgres"]
+    depends_on:
+      bootstrap: { condition: service_completed_successfully }
+    volumes: ["database-credentials:/run/nstack-db:ro", "postgres:/var/lib/postgresql/data"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "nstack", "-d", "nstack"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+  minio:
+    image: minio/minio:latest
+    entrypoint: ["sh", "-ec", "set -a; . /run/nstack-storage/runtime.env; export MINIO_ROOT_USER=$$STORAGE_S3_ACCESS_KEY MINIO_ROOT_PASSWORD=$$STORAGE_S3_SECRET_KEY; exec minio server /data --console-address :9001"]
+    depends_on:
+      bootstrap: { condition: service_completed_successfully }
+    volumes: ["storage-credentials:/run/nstack-storage:ro", "storage:/data"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+  storage-init:
+    image: minio/mc:latest
+    entrypoint: ["sh", "-ec", "set -a; . /run/nstack-storage/runtime.env; mc alias set local http://minio:9000 $$STORAGE_S3_ACCESS_KEY $$STORAGE_S3_SECRET_KEY >/dev/null; mc mb --ignore-existing local/$$STORAGE_S3_BUCKET; mc anonymous set none local/$$STORAGE_S3_BUCKET"]
+    depends_on:
+      minio: { condition: service_healthy }
+    volumes: ["storage-credentials:/run/nstack-storage:ro"]
+  tower:
+    build:
+      context: .
+      args:
+        BUN_IMAGE: ${NSTACK_BUN_IMAGE:-oven/bun:1.4.4}
+        TOWER_GIT_COMMIT: ${NSTACK_BUILD_COMMIT:-setup-development}
+        TOWER_GIT_BRANCH: main
+        TOWER_BUILD_TIME: ${NSTACK_BUILD_TIME:-unspecified}
+    image: nstack-setup-local:0.2.0
+    entrypoint: ["sh", "-ec", "set -a; . /run/nstack/runtime.env; exec sh docker/entrypoint.sh"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      storage-init: { condition: service_completed_successfully }
+    environment:
+      PORT: "3100"
+      NSTACK_SETTINGS_DIRECTORY: /run/nstack-settings
+    volumes: ["bootstrap:/run/nstack", "settings:/run/nstack-settings"]
+    ports: ["127.0.0.1:${NSTACK_LOCAL_PORT:-3101}:3100", "127.0.0.1:43111:43101"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bun", "-e", "process.exit((await fetch('http://127.0.0.1:3100/health')).ok?0:1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+  controller:
+    image: nstack-setup-local:0.2.0
+    command: ["bun", "src/installation/controller.ts"]
+    environment:
+      NSTACK_SETTINGS_DIRECTORY: /run/nstack-settings
+      NSTACK_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME}
+    volumes: ["settings:/run/nstack-settings", "/var/run/docker.sock:/var/run/docker.sock"]
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+    depends_on:
+      tower: { condition: service_healthy }
+volumes:
+  settings:
+  database-credentials:
+  storage-credentials:
+  bootstrap:
+  postgres:
+  storage:
