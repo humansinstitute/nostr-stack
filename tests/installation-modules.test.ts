@@ -185,6 +185,10 @@ describe('fixed Docker lifecycle',()=>{
   const tower={Id:'f'.repeat(64),Name:'my-tower',Config:{Labels:{'com.docker.compose.project':'test-installation','com.docker.compose.service':'tower'}},State:{Running:true},NetworkSettings:{Networks:{'unrelated-network':{NetworkID:'e'.repeat(64)}}}};
   f.containers.set(tower.Name,tower);await r.connectTower(on);
   expect(Object.keys(tower.NetworkSettings.Networks).length).toBe(5);
+  // A Compose recreation loses attachments, while desired module state stays.
+  tower.NetworkSettings.Networks={'unrelated-network':{NetworkID:'f'.repeat(64)}};
+  await r.connectTower(on);expect(Object.keys(tower.NetworkSettings.Networks)).toHaveLength(5);
+  await r.initializeTowerGraph();expect(f.calls.some(c=>c.body?.Cmd?.join(' ').includes('exec bun run graph:init'))).toBe(true);
   await r.connectTower(defaultModuleSettings());expect(Object.keys(tower.NetworkSettings.Networks)).toEqual(['unrelated-network']);
   expect(f.calls.filter(c=>c.path.endsWith('/disconnect')).every(c=>c.body.Container===tower.Id&&c.body.Force===false)).toBe(true);
  });

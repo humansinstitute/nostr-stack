@@ -1,4 +1,5 @@
 // Run only inside the disposable setup stack created by nstack-setup-smoke.ts.
+import {defaultModuleSettings} from '../src/installation/modules';
 import {readFile,writeFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';import {finalizeEvent,getPublicKey,nip19} from 'nostr-tools';
 if(process.env.DB_NAME!=='nstack')throw Error('Disposable installation only');
@@ -24,6 +25,7 @@ if(mode==='status'){
  const current=await request('/api/v4/installation/settings');if(current.status!==200)throw Error('settings denied');
  const desired={...current.body.settings,fips_desired:false};
  if(mode==='configure-fips'){desired.fips_desired=true;desired.fips={peer_npub:process.env.NSTACK_TEST_FIPS_NPUB,mesh_address:process.env.NSTACK_TEST_FIPS_ADDRESS,port:43110};}
+ if(mode==='graph-only')desired.modules={...defaultModuleSettings(),graph:{enabled:true}};
  if(mode==='modules'){
   desired.fips_desired=true;
   if(!desired.fips)throw Error('Configure FIPS first');const peer=desired.fips.peer_npub,pubkey=getPublicKey(key),npub=nip19.npubEncode(pubkey);

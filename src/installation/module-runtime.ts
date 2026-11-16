@@ -62,7 +62,11 @@ export function createModuleRuntime(options:{project:string;docker?:DockerReques
   }
   async function exec(module:ModuleName,cmd:string[]):Promise<{ok:boolean;output:string}>{
     const c=await inspect(module);if(!c||!c.State?.Running)return {ok:false,output:''};
-    const e=await api('/containers/'+c.Id+'/exec','POST',{AttachStdout:true,AttachStderr:true,Cmd:cmd,User:'0'});
+    return execContainer(c.Id,cmd);
+  }
+  async function execContainer(id:string,cmd:string[]):Promise<{ok:boolean;output:string}>{
+    if(!idPattern.test(id))throw Error('invalid_module_container_id');
+    const e=await api('/containers/'+id+'/exec','POST',{AttachStdout:true,AttachStderr:true,Cmd:cmd,User:'0'});
     if(!idPattern.test(e.Id))throw Error('invalid_module_exec_id');
     const r=await request('/exec/'+e.Id+'/start','POST',{Detach:false,Tty:false});
     if(!r.ok)throw Error('module_exec_failed');
@@ -218,13 +222,22 @@ export function createModuleRuntime(options:{project:string;docker?:DockerReques
   }
   /** Attach only this installation's uniquely labelled Tower. No caller IDs,
    * network names or arbitrary endpoints cross the controller boundary. */
-  async function connectTower(value:ModuleSettings){
-    const desired=validateModuleSettings(value);
+  async function ownedTower(){
     const filters=encodeURIComponent(JSON.stringify({label:[`${projectLabel}=${project}`,'com.docker.compose.service=tower']}));
     const matches=await api('/containers/json?all=1&filters='+filters);
     if(!Array.isArray(matches)||matches.length!==1||!idPattern.test(matches[0].Id))throw Error('module_tower_container_ambiguous');
     const tower=await api('/containers/'+matches[0].Id+'/json');
     if(tower.Id!==matches[0].Id||tower.Config?.Labels?.[projectLabel]!==project||tower.Config?.Labels?.['com.docker.compose.service']!=='tower')throw Error('module_tower_container_not_owned');
+    return tower;
+  }
+  async function initializeTowerGraph(){
+    const tower=await ownedTower();
+    const result=await execContainer(tower.Id,['sh','-ec','set -a; . /run/nstack/runtime.env; exec bun run graph:init']);
+    if(!result.ok)throw Error('graph_schema_initialization_failed');
+  }
+  async function connectTower(value:ModuleSettings){
+    const desired=validateModuleSettings(value);
+    const tower=await ownedTower();
     for(const module of MODULE_NAMES){
       const networkName=name(module)+'-network';
       const response=await request('/networks/'+networkName);
@@ -238,5 +251,5 @@ export function createModuleRuntime(options:{project:string;docker?:DockerReques
       if(!desired[module].enabled&&connected)await api('/networks/'+network.Id+'/disconnect','POST',{Container:tower.Id,Force:false});
     }
   }
-  return {apply,status,verify,graphEnvironment,connectTower};
+  return {apply,status,verify,graphEnvironment,connectTower,initializeTowerGraph};
 }

@@ -172,3 +172,10 @@ part of its runtime fingerprint; an approved apply replaces an older malformed
 Blossom configuration while retaining data and other modules. The disposable
 `scripts/nstack-blossom-fips-smoke.ts` checks actual signed upload, exact descriptor
 origin, byte readback, signed deletion and anonymous upload denial over mesh.
+
+The controller restores approved, owned network attachments after Tower container
+recreation. This never creates/replaces or starts a module outside signed apply.
+An approved graph enablement also runs the fixed Tower `graph:init` migration
+before committing readiness; credentials remain inside protected runtime/state
+volumes. Fresh graph enablement and forced Tower recreation are integration
+checks, including a query as the restricted `nstack_graph_app` role.

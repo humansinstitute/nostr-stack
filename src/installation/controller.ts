@@ -66,6 +66,7 @@ if(import.meta.main){
     if(r.ok){
      const local=await r.json();const settings=validateInstallationSettings(JSON.parse(await readFile(join(directory,'settings.json'),'utf8')));
      if(!await modules.verify(settings.modules||defaultModuleSettings()))return false;
+     if(settings.modules?.graph.enabled)await modules.initializeTowerGraph();
      if(!settings.https_origin)return true;
      const nonce=randomBytes(32).toString('hex');const url=settings.https_origin+'/api/v4/installation/identity-proof?nonce='+nonce;
      const remote=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(5000)});if(!remote.ok)return false;
@@ -81,6 +82,11 @@ if(import.meta.main){
    await atomicJson(join(directory,'modules-status.json'),{observed_at:Date.now(),modules:await modules.status(readInstallationSettings(directory).modules||defaultModuleSettings())});
    const operation=store.latest();
    if(operation&&['pending','applying','verifying'].includes(operation.state))await runControllerOperation(directory,operation,{restart,verify,persist:store.save,apply:reconcile});
+   else if(!operation||['committed','rolled_back'].includes(operation.state)){
+    // Compose recreation replaces its network attachments. Restore only already
+    // approved owned networks; never start/replace modules without a signed apply.
+    await modules.connectTower(readInstallationSettings(directory).modules||defaultModuleSettings());
+   }
   }catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')console.error('Installation controller cannot process operation; inspect local recovery status.');}
   await Bun.sleep(2000);
  }
