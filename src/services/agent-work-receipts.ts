@@ -7,7 +7,7 @@ import { type Sql, isUuid } from './notification-core';
  * A client names it explicitly with `origin_notification_id`; Tower never infers one.
  * - On a create (doc/task/file/audio note) a receipt is minted in the create transaction. It grants the creating bot
  *   access to the version IT wrote, never later human edits, comments or newer versions.
- * - On a message carrying a structured self-mention it makes the message eligible for a `self_mention` notification.
+ * - On a message it records optional provenance; a signed structured self-mention is eligible independently.
  */
 
 export type ReceiptEntityType = 'doc' | 'task' | 'file' | 'audio_note';

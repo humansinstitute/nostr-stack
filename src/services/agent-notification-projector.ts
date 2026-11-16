@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { getDb } from '../db';
 import { type Sql, MAX_INTAKE_ATTEMPTS, isUuid } from './notification-core';
 import { AGENT_ORIGIN_METADATA_KEY, storedSignatureBindsRevision } from './flightdeck-pg-message-signatures';
-import { liveOrigin } from './agent-work-receipts';
 
 /**
  * Strict agent notification projection (addressed-only).
@@ -212,8 +211,8 @@ async function assignmentEpoch(tx: Sql, workspaceId: string, taskId: string, bef
 
 /**
  * Deliberate self-address: the author's own structured mention in this revision, eligible only when the STORED
- * instruction signature binds this exact revision (body, location and `mentions_sha256`) and the message names a live
- * non-self origin notification of the author in the same channel and thread. Ordinary own output never qualifies.
+ * instruction signature binds this exact revision (body, location and `mentions_sha256`). Origin is optional
+ * provenance, not permission: Autopilot applies its instructor policy after delivery. Ordinary own output never qualifies.
  */
 async function selfAddress(tx: Sql, w: string, ob: OutboxRow, message: { id: string; thread_id: string | null; channel_id: string; created_by_actor_id: string; row_version: number; metadata: any; body?: string }, revised: boolean): Promise<AgentAddress | null> {
   const payload = ob.payload ?? {};
@@ -225,16 +224,17 @@ async function selfAddress(tx: Sql, w: string, ob: OutboxRow, message: { id: str
   // Only the revision this event was produced by; a later edit makes the event ineligible (fail closed).
   if (Number(message.row_version) !== Number(ob.entity_row_version ?? -1)) return null;
   const origin = message.metadata?.[AGENT_ORIGIN_METADATA_KEY];
-  if (typeof origin !== 'string' || !isUuid(origin)) return null;
   const [row] = await tx<{ body: string }[]>`SELECT body FROM flightdeck_pg_messages WHERE workspace_id = ${w} AND id = ${message.id}`;
   if (!row) return null;
+  // A create-thread request cannot sign the server-allocated thread id. Only that thread's root may omit it.
+  const [root] = !revised && message.thread_id ? await tx`SELECT 1 FROM flightdeck_pg_threads
+    WHERE workspace_id = ${w} AND id = ${message.thread_id} AND source_message_id = ${message.id} AND deleted_at IS NULL` : [];
   const bound = storedSignatureBindsRevision({
     signature: message.metadata?.agent_instruction_signature, body: row.body, mentions: message.metadata?.mentions, authorNpub: author.npub,
-    workspaceId: w, channelId: message.channel_id, threadId: message.thread_id, messageId: message.id, revision: Number(message.row_version), revised,
+    workspaceId: w, channelId: message.channel_id, threadId: message.thread_id, messageId: message.id, revision: Number(message.row_version), revised, createdThread: Boolean(root),
   });
   if (!bound) return null;
-  if (!await liveOrigin(tx, { workspaceId: w, actorId: message.created_by_actor_id, notificationId: origin, channelId: message.channel_id, threadId: message.thread_id })) return null;
-  return { actorId: message.created_by_actor_id, npub: author.npub, kind: 'chat_mention', reason: 'self_mention', originNotificationId: origin };
+  return { actorId: message.created_by_actor_id, npub: author.npub, kind: 'chat_mention', reason: 'self_mention', originNotificationId: typeof origin === 'string' && isUuid(origin) ? origin : null };
 }
 
 /** Resolve addresses to eligible recipients (human/agent label independent, member, not author unless self_mention, current ACL). */

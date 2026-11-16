@@ -42,7 +42,7 @@ export const agentNotificationSchemas = {
     properties: {
       id: uuid, seq: { type: 'integer', description: 'Recipient-local, commit-ordered sequence' },
       kind: { enum: ['chat_mention', 'direct_message', 'agent_direct_recipient', 'task_assigned', 'task_mention', 'task_comment_mention', 'document_mention', 'document_comment_mention', 'invocation', 'document_review'] },
-      reason: { type: 'string', description: "Addressing rule, e.g. canonical_mention. 'self_mention' (kind chat_mention) is a verified deliberate self-address: it binds no write and its context stops at its origin" },
+      reason: { type: 'string', description: "Addressing rule, e.g. canonical_mention. 'self_mention' (kind chat_mention) is a verified deliberate self-address; the harness applies instructor policy and context follows current ACL" },
       state: { const: 'active' },
       source: {
         type: 'object', additionalProperties: false, required: ['type', 'id', 'version', 'channel_id', 'thread_id', 'task_id', 'doc_id'],
@@ -52,7 +52,7 @@ export const agentNotificationSchemas = {
         },
       },
       author_npub: { type: ['string', 'null'] }, occurred_at: { type: 'string', format: 'date-time' },
-      origin_notification_id: { ...uuid, nullable: true, description: "Non-null only for reason 'self_mention': the live non-self notification it depends on" },
+      origin_notification_id: { ...uuid, nullable: true, description: "Optional provenance for reason 'self_mention'; not required for delivery or execution" },
     },
   },
   AgentWorkReceipt: {

@@ -341,7 +341,7 @@ function serializeEnvelope(row: NotificationRow) {
     },
     author_npub: row.author_npub,
     occurred_at: new Date(row.source_created_at).toISOString(),
-    // Non-null only for reason 'self_mention': the live non-self notification this self-address depends on.
+    // Optional provenance for self-address; delivery does not depend on this notification.
     origin_notification_id: row.origin_notification_id ?? null,
   };
 }
@@ -548,34 +548,6 @@ export async function docBody(tx: Sql, workspaceId: string, docId: string) {
   return { id: doc.id, title: doc.title, row_version: doc.row_version, channel_id: doc.channel_id, body, body_too_large: tooLarge, canonical_version: canonical };
 }
 
-/**
- * Context of a deliberate self-address: never more than the ORIGIN's own context authorizes right now (its trigger and
- * bounded transcript, built by the origin's policy), plus the bot's later messages that it both wrote and last
- * updated. The trigger (verified bot revision) and those own messages expose only attachments the bot linked itself.
- */
-async function selfAddressWindow(t: Sql, r: Recipient, n: FullNotification, trigger: MessageRow, policy: ContextPolicy) {
-  const ownIds = new Set<string>([trigger.id]);
-  const [origin] = await t<FullNotification[]>`
-    SELECT * FROM flightdeck_pg_agent_notifications WHERE id = ${n.origin_notification_id} AND workspace_id = ${r.workspaceId}
-      AND recipient_actor_id = ${r.actorId} AND source_type = 'message' AND reason <> 'self_mention'`;
-  const originMessage = origin ? await loadMessage(t, r.workspaceId, origin.source_id) : null;
-  if (!originMessage) return { rows: [] as MessageRow[], truncated: false, ownIds };
-  const originWindow = policy === 'bounded_transcript' && originMessage.thread_id
-    ? await boundedTranscript(t, r.workspaceId, originMessage)
-    : { rows: [] as MessageRow[], truncated: false };
-  const at = (row: { created_at: Date; id: string }) => [new Date(row.created_at).getTime(), row.id] as const;
-  const after = (row: MessageRow, pivot: MessageRow) => { const [a, ai] = at(row); const [b, bi] = at(pivot); return a > b || (a === b && ai > bi); };
-  const own = trigger.thread_id
-    ? (await boundedTranscript(t, r.workspaceId, trigger)).rows
-      .filter((row) => after(row, originMessage) && row.created_by_actor_id === r.actorId && row.updated_by_actor_id === r.actorId)
-    : [];
-  for (const row of own) ownIds.add(row.id);
-  const byId = new Map<string, MessageRow>();
-  for (const row of [...originWindow.rows, originMessage, ...own]) if (row.id !== trigger.id) byId.set(row.id, row);
-  const rows = [...byId.values()].sort((x, y) => { const [a, ai] = at(x); const [b, bi] = at(y); return a - b || (ai < bi ? -1 : ai > bi ? 1 : 0); });
-  return { rows, truncated: originWindow.truncated, ownIds };
-}
-
 export async function buildContext(sql: Sql, r: Recipient, notificationId: string) {
   return buildContextThen(sql, r, notificationId, async (context) => context);
 }
@@ -612,10 +584,9 @@ export async function contextIn(t: Sql, r: Recipient, n: FullNotification, polic
         if (!row) throw gone();
         thread = row;
       }
-      const self = n.reason === 'self_mention' ? await selfAddressWindow(t, r, n, message, policy) : null;
-      const transcript = self ?? (policy === 'bounded_transcript' && message.thread_id ? await boundedTranscript(t, w, message) : { rows: [] as MessageRow[], truncated: false });
-      const attachments = await attachmentDescriptors(t, w, 'message', [message.id, ...transcript.rows.map((m) => m.id)],
-        self ? { actorId: r.actorId, entityIds: self.ownIds } : undefined);
+      // A self-mention has the same current-ACL bounded context as any other addressed message.
+      const transcript = policy === 'bounded_transcript' && message.thread_id ? await boundedTranscript(t, w, message) : { rows: [] as MessageRow[], truncated: false };
+      const attachments = await attachmentDescriptors(t, w, 'message', [message.id, ...transcript.rows.map((m) => m.id)]);
       return {
         ...base, thread,
         trigger: { type: 'message', message: serializeMessage(message, attachments.get(message.id) ?? []) },

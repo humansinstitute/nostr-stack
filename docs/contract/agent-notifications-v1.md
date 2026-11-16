@@ -55,7 +55,7 @@ All routes are under `/api/v4/flightdeck-pg/workspaces/{ws}/agent-notifications`
   "author_npub": "npub1…", "occurred_at": "…", "origin_notification_id": null }
 ```
 
-`origin_notification_id` is non-null only for `reason: "self_mention"` (see Deliberate self-address).
+`origin_notification_id` may contain optional provenance for `reason: "self_mention"`; delivery and execution do not depend on it.
 
 When the recipient lost the source ACL, or the canonical relationship is gone, the row is delivered as a **minimal tombstone**: `{ "id", "seq", "state": "revoked" }`. It carries no routing metadata. Consumers ack it as `suppressed`.
 
@@ -176,15 +176,11 @@ A structured mention of the author in their own message is projected to the auth
 1. The source is a channel message, and this exact revision is still the stored one (a later edit makes the event ineligible).
 2. Its structured mentions name the author (not body text, DM participation, assignments or invocations).
 3. The STORED kind-33358 instruction signature verifies against this revision: signer is the author (messages are signed by the acting npub itself, so workspace-key-signed self-address is not supported), body and location tags match, and a `mentions_sha256` tag binds the saved mentions. The tag is the lowercase hex SHA-256 of the UTF-8 bytes of `JSON.stringify([{type, npub}, …])`, with lowercase values, deduped, sorted by `npub` then `type` (empty list: `"[]"`). A present tag that does not match is refused at write (400). Without the tag nothing is projected; ordinary messages are unaffected.
-4. The message names `origin_notification_id`: the author's own live non-self notification in the same channel and thread (inside an active floor, current ACL, relationship `ok`). It is validated at write (403 `origin_notification_invalid`) and again at projection. The client never sets it through `metadata`.
+4. The recipient is an active member with current read permission. A new-thread root may omit the server-allocated thread ID in its create signature; only the exact root at revision 1 receives that exception. Existing-thread messages and revisions must bind their thread as usual.
 
-Such a row:
+An origin is optional provenance. If named, the existing write-time origin validation still applies; it grants no execution authority. A self-notification stays eligible independently of that origin, while its own mention, source revision, subscription floor and current ACL remain valid. Its bounded context and attachments follow the same current-ACL rules as other addressed messages.
 
-- stays eligible only while its origin is (the relationship oracle checks the origin, so it is revoked with it), and only while its trigger is still the projected revision last updated by the bot (an edit after projection revokes it);
-- binds no write by itself;
-- gets a context that never exceeds the ORIGIN's: the window is exactly what the origin's own context authorizes now (its trigger and bounded transcript, current versions, by the origin's policy), plus later messages the bot both wrote and last updated. On the trigger and those own messages only attachments the bot linked itself are listed or downloadable. Thread and channel descriptors are the same current values the origin context shows.
-
-Autopilot still decides whether to execute it (instructor grant). A notification never authorizes execution.
+Autopilot decides whether to execute the verified instruction using the author's instructor grant. Tower does not replicate that policy. Ordinary own output without a signed structured self-mention never projects a self-notification. Duplicate projection and execution remain idempotent.
 
 ## Work receipts
 

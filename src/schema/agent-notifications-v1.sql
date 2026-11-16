@@ -67,8 +67,8 @@ CREATE TABLE IF NOT EXISTS flightdeck_pg_agent_notifications (
   UNIQUE (workspace_id, recipient_actor_id, dedupe_key)
 );
 CREATE INDEX IF NOT EXISTS idx_fd_agent_notifications_created ON flightdeck_pg_agent_notifications (created_at);
--- Deliberate self-address (reason 'self_mention'): the live non-self notification the author named as its origin.
--- No foreign key: retention removes rows by per-recipient seq prefix; a missing origin makes the row ineligible.
+-- Optional provenance for a deliberate self-address (reason 'self_mention'); never execution authority.
+-- No foreign key: retention removes rows by per-recipient seq prefix; retention may remove provenance without invalidating the self-instruction.
 ALTER TABLE flightdeck_pg_agent_notifications ADD COLUMN IF NOT EXISTS origin_notification_id UUID;
 
 -- Version-bound work-output receipts: minted in the SAME transaction as a create that names a live origin
@@ -218,12 +218,9 @@ BEGIN
       RETURN 'source_gone';
     END IF;
     IF n.kind = 'chat_mention' THEN ok := flightdeck_pg_agent_mentions_contain(meta->'mentions', n.recipient_actor_id, rnpub);
-      -- A self-address is eligible only while its origin is: the recipient's own non-self notification in the same
-      -- channel and thread, inside an active subscription floor, with its canonical relationship intact.
+      -- Self-address authorization is the recipient harness's instructor policy. Origin is provenance only.
       IF ok AND n.reason = 'self_mention' THEN
-        ok := flightdeck_pg_agent_origin_live(n.origin_notification_id, n.workspace_id, n.recipient_actor_id, n.channel_id)
-          AND EXISTS (SELECT 1 FROM flightdeck_pg_agent_notifications o WHERE o.id = n.origin_notification_id
-            AND o.source_type = 'message' AND o.thread_id IS NOT DISTINCT FROM n.thread_id)
+        ok := TRUE
           -- The trigger must still be the exact bot-signed revision that was projected (no later edit by anyone).
           AND EXISTS (SELECT 1 FROM flightdeck_pg_messages m WHERE m.workspace_id = n.workspace_id AND m.id = n.source_id
             AND m.row_version = n.source_version AND m.updated_by_actor_id = n.recipient_actor_id);

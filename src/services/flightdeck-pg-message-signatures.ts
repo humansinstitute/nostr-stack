@@ -180,6 +180,8 @@ export function storedSignatureBindsRevision(input: {
   messageId: string;
   revision: number;
   revised: boolean;
+  /** The source is the root of the thread allocated by its create request. */
+  createdThread?: boolean;
 }): boolean {
   const wrapper = input.signature && typeof input.signature === 'object' ? input.signature as Record<string, unknown> : null;
   const event = wrapper && isEventLike(wrapper.nostr_event) ? wrapper.nostr_event : null;
@@ -188,7 +190,8 @@ export function storedSignatureBindsRevision(input: {
   if (nip19.npubEncode(event.pubkey) !== input.authorNpub || event.content !== input.body) return false;
   if (eventTagValue(event, 'body_sha256') !== sha256Hex(input.body)) return false;
   if (eventTagValue(event, 'workspace_id') !== input.workspaceId || eventTagValue(event, 'channel_id') !== input.channelId) return false;
-  if ((eventTagValue(event, 'thread_id') ?? null) !== input.threadId) return false;
+  const threadTag = eventTagValue(event, 'thread_id');
+  if (threadTag !== input.threadId && !(threadTag === null && input.createdThread && !input.revised && input.revision === 1)) return false;
   if (input.revised && (eventTagValue(event, 'message_id') !== input.messageId || eventTagValue(event, 'revision') !== String(input.revision))) return false;
   return eventTagValue(event, 'mentions_sha256') === canonicalMentionsSha256(input.mentions);
 }

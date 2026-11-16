@@ -134,7 +134,7 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
   });
 
   // ------------------------------------------------------------------------------------------------ self-address
-  test('verified self-address: projected with its origin; context stops at the origin plus own messages; no extra human content', async () => {
+  test('verified self-address: optional origin and ordinary current-ACL bounded transcript', async () => {
     const o = await origin('self-1');
     const ownReply = await post(ch1, 'own progress reply', { actor: A, threadId: o.threadId });
     expect(ownReply.status).toBe(201);
@@ -154,13 +154,13 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     const ids = context.body.window.messages.map((m: any) => m.id);
     expect(ids).toContain(o.messageId);
     expect(ids).toContain(ownReply.body.message.id);
-    expect(context.text).not.toContain('SENTINEL-UNADDRESSED-HUMAN-AFTER-ORIGIN');
+    expect(context.text).toContain('SENTINEL-UNADDRESSED-HUMAN-AFTER-ORIGIN');
     // The origin's own context (human-addressed) is unchanged by the self-address.
     const originContext = await request(`${inbox()}/${o.notificationId}/context`, 'GET', A, undefined, true);
     expect(originContext.status).toBe(200);
   });
 
-  test('self-address eligibility fails closed: no mentions_sha256, no origin, unrelated origin, or a revision after the event', async () => {
+  test('self-address requires signed mentions and exact revision, not a live human origin', async () => {
     const o = await origin('self-2');
     const noTag = await post(ch1, 'self without tag', { actor: A, threadId: o.threadId, mentions: [A], origin: o.notificationId, mentionsTag: 'none' });
     const noOrigin = await post(ch1, 'self without origin', { actor: A, threadId: o.threadId, mentions: [A], mentionsTag: 'canonical' });
@@ -186,14 +186,20 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     await db`UPDATE flightdeck_pg_messages SET metadata = metadata || '{"mentions": []}'::jsonb WHERE id = ${late.messageId}`;
     await drain();
     const all = await notifications(A);
-    for (const message of [noTag, noOrigin, revisedLater, beforeWithdraw]) {
+    for (const message of [noTag, revisedLater]) {
       expect(all.some((x) => x.source?.id === message.body.message.id)).toBe(false);
       // Not merely hidden: no row is projected at all.
       expect(Number((await db`SELECT COUNT(*)::int AS n FROM flightdeck_pg_agent_notifications WHERE source_id = ${message.body.message.id}`)[0]!.n)).toBe(0);
     }
+    for (const message of [noOrigin, beforeWithdraw]) expect(all.some((x) => x.source?.id === message.body.message.id)).toBe(true);
+    const noOriginRow = all.find((x) => x.source?.id === noOrigin.body.message.id)!;
+    expect(noOriginRow.origin_notification_id).toBeNull();
+    const noOriginContext = await request(`${inbox()}/${noOriginRow.id}/context`, 'GET', A, undefined, true);
+    expect(noOriginContext.status).toBe(200);
+    expect(noOriginContext.body.trigger.message.id).toBe(noOrigin.body.message.id);
   });
 
-  test('a self_mention is revoked with its origin; the bot keeps writing by its ordinary ACL', async () => {
+  test('a self_mention stays live independently of its optional origin', async () => {
     const o = await origin('self-3');
     const self = await post(ch1, 'self before withdrawal', { actor: A, threadId: o.threadId, mentions: [A], origin: o.notificationId, mentionsTag: 'canonical' });
     expect(self.status).toBe(201);
@@ -210,10 +216,31 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     expect(withdraw.status).toBe(200);
     const after = await notifications(A);
     expect(after.find((x) => x.id === o.notificationId)?.state).toBe('revoked');
-    // The self-address depends on its origin: it is revoked with it.
-    expect(after.find((x) => x.id === selfRow.id)).toEqual({ id: selfRow.id, seq: selfRow.seq, state: 'revoked' });
+    // A permitted self-instruction is independent of the former human mention.
+    expect(after.find((x) => x.id === selfRow.id)?.state).toBe('active');
     // Writing is not a notification binding: the bot still writes where its ACL allows.
     expect((await post(ch1, 'still here?', { actor: A, threadId: o.threadId })).status).toBe(201);
+  });
+
+  test('cross-thread self-instruction creates exactly one notification without a human origin', async () => {
+    const self = await post(ch2, 'self-start a new thread', { actor: A, createThread: true, mentions: [A], mentionsTag: 'canonical' });
+    expect(self.status).toBe(201);
+    await drain();
+    await drain(); // intake retries do not duplicate projection
+    const all = await notifications(A);
+    const rows = all.filter((n) => n.source?.id === self.body.message.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'chat_mention', reason: 'self_mention', origin_notification_id: null, state: 'active' });
+    const context = await request(`${inbox()}/${rows[0].id}/context`, 'GET', A, undefined, true);
+    expect(context.status).toBe(200);
+    expect(context.body.trigger.message.id).toBe(self.body.message.id);
+    expect(context.body.thread.id).toBe(self.body.message.thread_id);
+    // Removing current channel read permission still revokes delivery.
+    await db`DELETE FROM flightdeck_pg_permission_grants WHERE workspace_id = ${w1} AND principal_actor_id = ${actors[A]!}
+      AND resource_channel_id = ${ch2} AND permission = 'channel.read'`;
+    expect((await notifications(A)).find((n) => n.id === rows[0].id)?.state).toBe('revoked');
+    await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission)
+      VALUES(${w1},'actor',${actors[A]!},'channel',${ch2},'channel.read')`;
   });
 
   // ------------------------------------------------------------------------------------------------ receipts
@@ -308,7 +335,7 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     expect((await request(fd(w2, `/channels/${w2ch}/tasks`), 'POST', B, { title: 'cross workspace' })).status).toBe(403);
   });
 
-  test('self context is a subset of the origin context plus verified bot-own messages; human edits/links on bot messages stay out', async () => {
+  test('self context follows current ACL like other addressed messages, including later edits and links', async () => {
     const o = await origin('self-subset');
     const botLater = await post(ch1, 'bot later message', { actor: A, threadId: o.threadId });
     const botEdited = await post(ch1, 'bot message a human will edit', { actor: A, threadId: o.threadId });
@@ -327,19 +354,19 @@ describe.skipIf(!port || port === 5432)('self-address and work receipts against 
     expect([selfContext.status, originContext.status]).toEqual([200, 200]);
     const originMessages = new Map<string, any>([originContext.body.trigger.message, ...originContext.body.window.messages].map((m: any) => [m.id, m]));
     for (const m of selfContext.body.window.messages) {
-      if (m.id === botLater.body.message.id) continue; // verified bot-own later message
+      if ([botLater.body.message.id, botEdited.body.message.id].includes(m.id)) continue;
       expect(originMessages.has(m.id)).toBe(true);
       expect(m.body).toBe(originMessages.get(m.id).body);
       expect(m.attachments).toEqual(originMessages.get(m.id).attachments);
     }
     const ids = selfContext.body.window.messages.map((m: any) => m.id);
     expect(ids).toContain(botLater.body.message.id);
-    expect(ids).not.toContain(botEdited.body.message.id);
-    expect(selfContext.text).not.toContain('SENTINEL-HUMAN-EDIT-OF-BOT-MESSAGE');
-    expect(selfContext.body.window.messages.find((m: any) => m.id === botLater.body.message.id).attachments).toEqual([]);
+    expect(ids).toContain(botEdited.body.message.id);
+    expect(selfContext.text).toContain('SENTINEL-HUMAN-EDIT-OF-BOT-MESSAGE');
+    expect(selfContext.body.window.messages.find((m: any) => m.id === botLater.body.message.id).attachments).toHaveLength(1);
     const download = await request(`${inbox()}/${n.id}/attachments/${humanObject}`, 'GET', A, undefined, true);
-    expect(download.status).toBe(404);
-    expect(download.text).not.toContain('SENTINEL-HUMAN-LINKED-BYTES');
+    expect(download.status).toBe(200);
+    expect(download.text).toContain('SENTINEL-HUMAN-LINKED-BYTES');
   });
 
   test('a self_mention whose trigger is edited after projection is revoked; no changed trigger is served', async () => {

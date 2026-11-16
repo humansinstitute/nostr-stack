@@ -7,6 +7,8 @@ import {
   AGENT_INSTRUCTION_SIGNATURE_KIND,
   AGENT_INSTRUCTION_SIGNATURE_PROTOCOL,
   validateFlightDeckPgMessageInstructionSignature,
+  canonicalMentionsSha256,
+  storedSignatureBindsRevision,
 } from '../src/services/flightdeck-pg-message-signatures';
 
 function makeSignature(input: {
@@ -101,5 +103,26 @@ describe('Flight Deck PG message instruction signatures', () => {
 
     expect(result.signature).toBeNull();
     expect(result.errors.map((error) => error.code)).toContain('invalid');
+  });
+});
+
+
+describe('self-address location binding', () => {
+  test('omitted thread is valid only for unthreaded messages or the server-created root revision', () => {
+    const secretKey = generateSecretKey();
+    const authorNpub = nip19.npubEncode(getPublicKey(secretKey));
+    const mentions = [{ type: 'agent', npub: authorNpub }];
+    const signature = makeSignature({ body: 'Start', actorNpub: authorNpub, secretKey, workspaceId: 'w', channelId: 'c' });
+    signature.nostr_event = finalizeEvent({ kind: signature.nostr_event.kind, content: 'Start', created_at: 1781000000,
+      tags: [...signature.nostr_event.tags, ['mentions_sha256', canonicalMentionsSha256(mentions)]] }, secretKey);
+    const input = { signature, body: 'Start', mentions, authorNpub, workspaceId: 'w', channelId: 'c', threadId: 'allocated', messageId: 'root', revision: 1, revised: false };
+    expect(storedSignatureBindsRevision(input)).toBe(false); // no arbitrary cross-thread replay
+    expect(storedSignatureBindsRevision({ ...input, threadId: null })).toBe(true);
+    expect(storedSignatureBindsRevision({ ...input, createdThread: true })).toBe(true);
+    expect(storedSignatureBindsRevision({ ...input, createdThread: true, revision: 2 })).toBe(false);
+    expect(storedSignatureBindsRevision({ ...input, createdThread: true, revised: true })).toBe(false);
+    expect(storedSignatureBindsRevision({ ...input, createdThread: true, mentions: [] })).toBe(false);
+    expect(storedSignatureBindsRevision({ ...input, createdThread: true, body: 'Tampered' })).toBe(false);
+    expect(storedSignatureBindsRevision({ ...input, createdThread: true, channelId: 'other' })).toBe(false);
   });
 });
