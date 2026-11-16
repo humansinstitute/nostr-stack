@@ -59,15 +59,34 @@ export async function packageLauncher(options:{root:string;out:string;runtime:st
   await writeFile(join(destination,'HOST-DEPENDENCY-NOTICES.md'),notices.join('\n\n'));
   await mkdir(join(destination,'runtime'));await copyFile(runtime,join(destination,'runtime/bun'));await chmod(join(destination,'runtime/bun'),0o755);
   const license=await readFile(runtimeLicense);if(!license.length)throw Error('Runtime license notices required');await writeFile(join(destination,'runtime/LICENSE.md'),license);
-  const [os,arch]=platform.split('-');
-  const shell=`#!/bin/sh\nset -eu\nhere=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n[ "$(uname -s)" = "${os==='darwin'?'Darwin':'Linux'}" ] && [ "$(uname -m)" = "${arch==='arm64'?'aarch64':'unsupported'}" ${os==='darwin'?' -o "$(uname -m)" = "arm64"':''} ] || { echo 'Unsupported bundle platform' >&2; exit 1; }\nif command -v shasum >/dev/null 2>&1; then\n actual=$(shasum -a 256 "$here/runtime/bun"); actual=\${actual%% *}\nelif command -v sha256sum >/dev/null 2>&1; then\n actual=$(sha256sum "$here/runtime/bun"); actual=\${actual%% *}\nelse echo 'OS SHA256 tool unavailable' >&2; exit 1; fi\n[ "$actual" = "${runtimeSha}" ] || { echo 'Bundled runtime hash mismatch' >&2; exit 1; }\nexec "$here/runtime/bun" "$here/scripts/nstack-bundle-entry.js" "$@"\n`;
-  await writeFile(join(destination,'nstack'),shell,{mode:0o755});
   const files:Record<string,string>={};
   async function walk(directory:string){for(const name of (await readdir(directory)).sort()){
    const path=join(directory,name),stat=await lstat(path);if(stat.isSymbolicLink())throw Error('Symlink in source archive: '+path);
    if(stat.isDirectory())await walk(path);else if(stat.isFile())files[path.slice(destination.length+1)]=sha(await readFile(path));else throw Error('Non-file archive entry');
   }}await walk(destination);
   await writeFile(join(destination,'bundle.json'),JSON.stringify({format:1,version,platform,source_commit:commit,signature_status:'unsigned archive; no release signature or notarization',runtime:{version:runtimeVersion,sha256:runtimeSha,provenance},files},null,2)+'\n');
+  const os=platform.split('-')[0];
+  const verifierSha=sha(await readFile(join(destination,'scripts/nstack-bundle-entry.js')));
+  const manifestSha=sha(await readFile(join(destination,'bundle.json')));
+  const shell=`#!/bin/sh
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ "$(uname -s)" = "${os==='darwin'?'Darwin':'Linux'}" ] && [ "$(uname -m)" = "${os==='darwin'?'arm64':'aarch64'}" ] || { echo 'Unsupported bundle platform' >&2; exit 1; }
+check_hash() {
+ if command -v shasum >/dev/null 2>&1; then
+  actual=$(shasum -a 256 "$here/$1")
+ elif command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$here/$1")
+ else echo 'OS SHA256 tool unavailable' >&2; exit 1; fi
+ actual=\${actual%% *}
+ [ "$actual" = "$2" ] || { echo "Bundled $1 hash mismatch" >&2; exit 1; }
+}
+check_hash runtime/bun ${runtimeSha}
+check_hash scripts/nstack-bundle-entry.js ${verifierSha}
+check_hash bundle.json ${manifestSha}
+exec "$here/runtime/bun" "$here/scripts/nstack-bundle-entry.js" "$@"
+`;
+  await writeFile(join(destination,'nstack'),shell,{mode:0o755});
   const artifact=join(out,name+'.tar.gz');if(await Bun.file(artifact).exists())throw Error('Artifact already exists; choose a new version/output directory');
   await run(['tar','-czf',artifact,'-C',work,name],root);
   const digest=sha(await readFile(artifact));await writeFile(artifact+'.sha256',digest+'  '+name+'.tar.gz\n');

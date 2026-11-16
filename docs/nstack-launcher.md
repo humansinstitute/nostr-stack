@@ -57,8 +57,9 @@ apply. Use normal OS review/authorization; the launcher never disables quarantin
 bypasses Gatekeeper or requests unattended privilege escalation.
 
 `bundle.json` records source commit, runtime version/SHA/provenance, signing status
-and every shipped file's SHA256. The shell checks platform and runtime SHA before
-executing Bun; JavaScript checks source/assets before launching any operation.
+and each payload file's SHA256. The shell pins the runtime, verifier and manifest
+hashes before executing Bun; JavaScript checks source/assets before launching
+any operation. The separately distributed archive checksum covers the shell too.
 Checksums detect corruption relative to the reviewed archive, not publisher
 identity. Obtain the archive/checksum from a trusted release channel.
 

@@ -33,8 +33,14 @@ test('archive relocates without host Bun/Git/modules and rejects altered source/
   const verified=await run([join(bundle,'nstack'),'verify'],work,env);expect(verified.code).toBe(0);expect(JSON.parse(verified.out).state).toBe('verified');
   const manifest=JSON.parse(await readFile(join(bundle,'bundle.json'),'utf8'));expect(manifest.files['.env']).toBeUndefined();expect(manifest.files['.git/config']).toBeUndefined();expect(manifest.files['node_modules']).toBeUndefined();
   const launched=await run([join(bundle,'nstack'),'setup','fixture'],work,env);expect(launched.code).toBe(0);expect(JSON.parse(launched.out).args).toEqual(['fixture']);expect(JSON.parse(launched.out).directory).toBe(await realpath(join(bundle,'scripts')));
+  const verifier=await readFile(join(bundle,'scripts/nstack-bundle-entry.js'));
+  await writeFile(join(bundle,'scripts/nstack-bundle-entry.js'),'console.log("must not execute")');
+  const badVerifier=await run([join(bundle,'nstack'),'verify'],work,env);expect(badVerifier.code).not.toBe(0);expect(badVerifier.out).not.toContain('must not execute');
+  await writeFile(join(bundle,'scripts/nstack-bundle-entry.js'),verifier);
+  const manifestBytes=await readFile(join(bundle,'bundle.json'));await writeFile(join(bundle,'bundle.json'),'{}');
+  expect((await run([join(bundle,'nstack'),'verify'],work,env)).code).not.toBe(0);await writeFile(join(bundle,'bundle.json'),manifestBytes);
   await writeFile(join(bundle,'docker-compose.setup.yml'),'altered');expect((await run([join(bundle,'nstack'),'verify'],work,env)).code).not.toBe(0);
-  await writeFile(join(bundle,'runtime/bun'),'altered');const badRuntime=await run([join(bundle,'nstack'),'verify'],work,env);expect(badRuntime.code).not.toBe(0);expect(badRuntime.err).toContain('runtime hash mismatch');
+  await writeFile(join(bundle,'runtime/bun'),'altered');const badRuntime=await run([join(bundle,'nstack'),'verify'],work,env);expect(badRuntime.code).not.toBe(0);expect(badRuntime.err).toContain('runtime/bun hash mismatch');
   await writeFile(join(root,'scripts/nstack-start.ts'),'dirty');await expect(packageLauncher(options)).rejects.toThrow('worktree must be clean');
  }finally{await rm(work,{recursive:true,force:true});}
 },60000);
