@@ -92,3 +92,13 @@ public connection QR. Consumer app identity is not embedded.
 Legacy v2 generation returns `409 legacy_connection_requires_https` on a FIPS-only
 installation instead of emitting an invalid empty-HTTPS token. Configured legacy
 installations retain their existing v2 bytes and app namespace semantics.
+
+`workspace_service_npub` is the exact durable authority identifier from the
+workspace record. Historical Tower workspaces derive its 32 bytes from a hash;
+it need not lift to a secp256k1 curve point. Consumers validate canonical
+NIP-19 checksum/encoding and exactly 32 bytes for this field, then compare it
+unchanged in proof and authorized workspace records. Do not replace it with a
+new signing key or reject existing workspaces for lacking a curve point.
+`service_npub` and FIPS `peer_npub` remain actual cryptographic identities;
+service signatures, peer pinning, and all nonce/UUID/authority equality checks
+remain mandatory.
