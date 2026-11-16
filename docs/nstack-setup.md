@@ -59,10 +59,14 @@ stable and do not attach this bundle to existing deployment volumes.
 
 The Docker-only command always starts local administration. For automatic host
 FIPS discovery, UI-driven installation through normal OS authorization, and
-service route supervision, use `bun run nstack:setup` (or run
+service route supervision, use the [self-contained host launcher](nstack-launcher.md)
+with `./nstack setup <project>`. It includes a verified Bun runtime and clean
+Compose build source; no host Bun/Git installation or env editing is required.
+Source developers can still use `bun run nstack:setup` (or run
 `bun scripts/nstack-host.ts supervise <project>` alongside an already-started
-bundle). The launcher installs a per-project launchd user agent (macOS) or systemd user service (Linux) using a hash-named source snapshot, so closing the terminal does not stop FIPS routes. User services restart on login; Linux operation before login requires the operator’s explicit linger policy. The source launcher currently requires host Bun and Docker; distributing
-a standalone signed launcher is separate release packaging. It prints the local
+bundle). The launcher installs a per-project launchd user agent (macOS) or systemd user service (Linux) using a hash-named source snapshot, so closing the terminal does not stop FIPS routes. User services restart on login; Linux operation before login requires the operator’s explicit linger policy. The source launcher requires host Bun and Docker; the packaged launcher uses
+its included runtime. Archives are unsigned candidates pending release review;
+upstream runtime signing does not sign the launcher. It prints the local
 claim code only when unclaimed. It does not read or replace existing host keys.
 
 A healthy existing persistent daemon is reused. A missing runtime can be installed

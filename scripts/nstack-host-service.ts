@@ -23,7 +23,9 @@ export async function manageHostService(action:string,project='nstack'){
   await mkdir(join(installation,'revisions'),{recursive:true,mode:0o700});
   snapshot=join(installation,'staging-'+crypto.randomUUID());
   await mkdir(join(snapshot,'scripts'),{recursive:true,mode:0o700});await mkdir(join(snapshot,'deploy/setup-fips'),{recursive:true,mode:0o700});await mkdir(directory,{recursive:true,mode:0o700});
-  const built=await Bun.build({entrypoints:[join(root,'scripts/nstack-host.ts')],target:'bun',outdir:join(snapshot,'scripts'),naming:'nstack-host.js'});if(!built.success)throw Error('Host runner build failed');
+  const bundled=join(root,'scripts/nstack-host.js');
+  if(await Bun.file(bundled).exists())await copyFile(bundled,join(snapshot,'scripts/nstack-host.js'));
+  else{const built=await Bun.build({entrypoints:[join(root,'scripts/nstack-host.ts')],target:'bun',outdir:join(snapshot,'scripts'),naming:'nstack-host.js'});if(!built.success)throw Error('Host runner build failed');}
   const files=['docker-compose.setup.yml',...['prepare-linux.sh','prepare-macos.sh','configure-linux.sh','configure-macos.sh'].map(n=>'deploy/setup-fips/'+n)];
   for(const file of files)await copyFile(join(root,file),join(snapshot,file));
   const hashes:Record<string,string>={};for(const file of [...files,'scripts/nstack-host.js'])hashes[file]=createHash('sha256').update(await readFile(join(snapshot,file))).digest('hex');
