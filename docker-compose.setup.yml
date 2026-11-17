@@ -8,7 +8,8 @@ services:
         TOWER_GIT_COMMIT: ${NSTACK_BUILD_COMMIT:-setup-development}
         TOWER_GIT_BRANCH: main
         TOWER_BUILD_TIME: ${NSTACK_BUILD_TIME:-unspecified}
-    image: nstack-setup-local:0.2.0
+    image: nstack-setup-local:${NSTACK_BUILD_COMMIT:-0.2.0}
+    pull_policy: never
     command: ["bun", "src/installation/bootstrap.ts"]
     environment:
       NSTACK_UNSUPPORTED_OVERRIDES: "${DB_USER:+DB_USER }${DB_PASSWORD:+DB_PASSWORD }${STORAGE_S3_ACCESS_KEY:+STORAGE_S3_ACCESS_KEY }${STORAGE_S3_SECRET_KEY:+STORAGE_S3_SECRET_KEY }${SUPERBASED_SERVICE_NSEC:+SUPERBASED_SERVICE_NSEC }"
@@ -27,19 +28,24 @@ services:
       timeout: 3s
       retries: 40
   minio:
-    image: minio/minio:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.setup-storage
+    image: nstack-storage-local:2025-10-15
+    pull_policy: never
     entrypoint: ["sh", "-ec", "set -a; . /run/nstack-storage/runtime.env; export MINIO_ROOT_USER=$$STORAGE_S3_ACCESS_KEY MINIO_ROOT_PASSWORD=$$STORAGE_S3_SECRET_KEY; exec minio server /data --console-address :9001"]
     depends_on:
       bootstrap: { condition: service_completed_successfully }
     volumes: ["storage-credentials:/run/nstack-storage:ro", "storage:/data"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/live"]
       interval: 3s
       timeout: 3s
       retries: 40
   storage-init:
-    image: minio/mc:latest
+    image: nstack-storage-local:2025-10-15
+    pull_policy: never
     entrypoint: ["sh", "-ec", "set -a; . /run/nstack-storage/runtime.env; mc alias set local http://minio:9000 $$STORAGE_S3_ACCESS_KEY $$STORAGE_S3_SECRET_KEY >/dev/null; mc mb --ignore-existing local/$$STORAGE_S3_BUCKET; mc anonymous set none local/$$STORAGE_S3_BUCKET"]
     depends_on:
       minio: { condition: service_healthy }
@@ -52,7 +58,8 @@ services:
         TOWER_GIT_COMMIT: ${NSTACK_BUILD_COMMIT:-setup-development}
         TOWER_GIT_BRANCH: main
         TOWER_BUILD_TIME: ${NSTACK_BUILD_TIME:-unspecified}
-    image: nstack-setup-local:0.2.0
+    image: nstack-setup-local:${NSTACK_BUILD_COMMIT:-0.2.0}
+    pull_policy: never
     entrypoint: ["sh", "-ec", "set -a; . /run/nstack/runtime.env; exec sh docker/entrypoint.sh"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -69,7 +76,8 @@ services:
       timeout: 5s
       retries: 40
   controller:
-    image: nstack-setup-local:0.2.0
+    image: nstack-setup-local:${NSTACK_BUILD_COMMIT:-0.2.0}
+    pull_policy: never
     command: ["bun", "src/installation/controller.ts"]
     environment:
       NSTACK_SETTINGS_DIRECTORY: /run/nstack-settings

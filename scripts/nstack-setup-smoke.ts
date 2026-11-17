@@ -33,6 +33,11 @@ if(!resume){
 }else{
  const saved=JSON.parse(await readFile(statePath,'utf8'));
  check(before.service_npub===saved.service_npub,'service identity changed');
+ if(saved.storage_object_id){
+  const persisted=await request('/api/v4/storage/'+saved.storage_object_id+'/content');
+  check(persisted.ok&&await persisted.text()===saved.storage_content,'stored bytes after restart/recreation changed');
+  console.log(JSON.stringify({stored_bytes_preserved:true}));
+ }
  const nonce=randomBytes(32).toString('hex');const path=`/api/v4/flightdeck-pg/workspaces/${saved.workspace_id}/connection-proof?nonce=${nonce}`;
  const r=await request(path);const result=await r.json();check(r.ok,'workspace after recreate unavailable: '+JSON.stringify(result));
  check(verifyEvent(result.proof),'invalid backend proof');const proof=JSON.parse(result.proof.content);
@@ -47,6 +52,7 @@ if(!resume){
  const download=await request('/api/v4/storage/'+metadata.object_id+'/content');
  check(download.ok&&await download.text()===content,'private download bytes mismatch');
  check((await fetch(origin+'/api/v4/storage/'+metadata.object_id+'/content')).status===401,'private anonymous read accepted');
+ await writeFile(statePath,JSON.stringify({...saved,storage_object_id:metadata.object_id,storage_content:content}),{mode:0o600});
  console.log(JSON.stringify({private_upload_download:true,internal_storage_private:true}));
  console.log(JSON.stringify({recreation_identity_preserved:true,workspace_preserved:true,ownership_preserved:true,nonce_bound_proof:true,unauthorized_denied:true}));
 }

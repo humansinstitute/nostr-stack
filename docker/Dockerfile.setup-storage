@@ -1,0 +1,21 @@
+# MinIO CE is source-only; Docker Hub images have been removed and Quay denies
+# anonymous pulls. Build the official, unmodified release sources instead.
+FROM golang:1.24.8-bookworm AS build
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local
+WORKDIR /build
+RUN curl -fL --retry 3 https://codeload.github.com/minio/minio/tar.gz/9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a -o minio.tar.gz \
+ && echo '45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841  minio.tar.gz' | sha256sum -c - \
+ && mkdir minio && tar -xzf minio.tar.gz -C minio --strip-components=1
+RUN cd minio && go build -mod=readonly -trimpath -o /out/minio .
+RUN curl -fL --retry 3 https://codeload.github.com/minio/mc/tar.gz/7394ce0dd2a80935aded936b09fa12cbb3cb8096 -o mc.tar.gz \
+ && echo '95cd293c7119f16921a6dc515a1fb74a2227f19fd994b9c8b770a154e802ac44  mc.tar.gz' | sha256sum -c - \
+ && mkdir mc && tar -xzf mc.tar.gz -C mc --strip-components=1
+RUN cd mc && go build -mod=readonly -trimpath -o /out/mc .
+
+FROM alpine:3.22
+COPY --from=build /out/minio /out/mc /usr/bin/
+# Retain exact corresponding source and AGPL license notices with the binaries.
+COPY --from=build /build/minio.tar.gz /build/mc.tar.gz /usr/share/nstack-storage/
+COPY --from=build /build/minio/LICENSE /usr/share/nstack-storage/MINIO-LICENSE
+COPY --from=build /build/mc/LICENSE /usr/share/nstack-storage/MC-LICENSE
+CMD ["minio", "server", "/data"]

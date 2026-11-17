@@ -93,3 +93,33 @@ Verification covers packaged paths without host Bun/Git/node_modules, source
 mutation and runtime corruption rejection, and exact user-service snapshots.
 Cold registry downloads, fresh host FIPS installation, Linux service persistence,
 reboot, Gatekeeper and remote/mobile acceptance are separate release gates.
+
+## Cold builds and retry safety
+
+Setup checks Docker/Compose before touching the installation, downloads the external
+Postgres runtime, and builds the application and storage images before starting
+services. Controller and storage initialization use those local images with pulls
+disabled. A failed download/build exits with the original dependency error; retry
+`./nstack setup <same-name>` after connectivity returns. Keep the same project name:
+its named volumes retain generated credentials, service identity, claim and data.
+Setup never runs `down -v`, prunes Docker caches, or adopts other projects' volumes.
+
+MinIO CE's Docker Hub images are no longer available, and the checked Quay releases
+deny anonymous pulls. The setup bundle therefore builds **unmodified official
+sources**, rather than requiring a registry account or substituting another storage
+engine. `docker/Dockerfile.setup-storage` pins the server release
+`RELEASE.2025-10-15T17-29-55Z` (commit `9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a`)
+and client release `RELEASE.2025-08-13T08-35-41Z`
+(commit `7394ce0dd2a80935aded936b09fa12cbb3cb8096`) with archive SHA256 checks.
+The image retains both corresponding source archives and AGPL license notices in
+`/usr/share/nstack-storage/`. Existing MinIO volume layout and bucket privacy are
+retained. Source and build instructions: [server](https://github.com/minio/minio/tree/9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a),
+[client](https://github.com/minio/mc/tree/7394ce0dd2a80935aded936b09fa12cbb3cb8096).
+MinIO CE is now unmaintained; this pinned compatibility build is not a promise of
+ongoing upstream security support.
+
+A cold setup needs access to Docker Hub (Bun, Postgres, Go and Alpine), GitHub source
+archives, the Go module proxy/checksum service, and the locked Bun package registry.
+The first storage compile can take several minutes and more memory than subsequent
+starts. Go and build tools run inside Docker; no extra host tools or manual pulls
+are required. Network or registry failures are reported as failures, never success.
