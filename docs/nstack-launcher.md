@@ -166,3 +166,65 @@ Nostr identity. The text file is **not monitored or automatically erased when th
 claim occurs**. The next setup/recovery rewrites it with the URL and “already
 claimed” status, omitting the code. Copies and backups may retain the now-useless
 old code. Recovery never issues a replacement code or reopens administrator setup.
+
+## Test from one Git clone
+
+For source testing, install **Git, host Bun 1.4.4 and Docker with Compose** first
+(on macOS, start Docker Desktop). Host Bun is an explicit source-development
+prerequisite; release archives include their own runtime. No Node, authored env
+file, manual image pulls or manual Docker commands are needed. Cold builds still
+need the network services listed above.
+
+Clone the public repository once, into a permanent folder:
+
+```sh
+git clone https://github.com/humansinstitute/nostr-stack.git
+cd nostr-stack
+bun install --frozen-lockfile
+bun run nstack:setup my-nstack
+```
+
+For an existing rc.5/rc.6 installation, replace `my-nstack` with its **exact existing
+project name**, use the same Docker context, and retain the old extracted folder
+until the clone setup has succeeded and you have checked the installation. Setup
+reuses that project's volumes, generated credentials, service identity, claimed
+administrator and data, and preserves its known local port. It rebuilds the local
+application and rebinds that project's OS helper to the clone's absolute Bun path
+and versioned script snapshot. It never resets the administrator or issues a new
+claim code after claiming. Keep host Bun and this clone at their selected paths.
+
+To recover the URL/code from an already running installation before adopting it:
+
+```sh
+bun run nstack:recovery my-nstack
+```
+
+Recovery does not rebuild or rebind the helper. Until explicit setup from the
+clone succeeds, the existing archive helper still references its old folder and
+bundled runtime: keep that folder. Recovery saves the same private setup text file
+in the clone; refresh after claiming to omit the old, now-invalid code.
+
+For each subsequent update, from that same clone:
+
+```sh
+git pull --ff-only
+bun install --frozen-lockfile
+bun run nstack:setup my-nstack
+bun run nstack:recovery my-nstack
+```
+
+Run these commands in order, continuing only when each succeeds. If Git reports
+local changes or a divergent branch, resolve those before installing/running;
+never force-reset your checkout to update. If setup fails, keep both folders and
+retry setup with the same name after addressing the reported error. Setup restarts
+only that installation as needed, so existing connections may briefly disconnect.
+Verify the reported URL, sign in with the existing administrator, and check your
+workspace/files before removing the old archive folder. Pulling alone does not
+activate new server code or move the helper. Archives remain available for users
+who prefer a bundled runtime; no new archive download is required for this flow.
+
+The first-admin page now displays signer connection/signing progress and asks you
+to review the public identity **in the page** before signing. Cancel before sending
+leaves the installation unclaimed; dismiss any pending external signer prompt
+before retrying. After a send with an uncertain response, check status before
+retrying. The server remains the authority for the one-time claim.

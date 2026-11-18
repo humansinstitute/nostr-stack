@@ -22,7 +22,8 @@
     "console:build": "bun scripts/build-console.ts",
     "console:test": "bun test tests/nstack-console.browser.test.ts",
     "nstack:setup": "bun scripts/nstack-start.ts",
-    "nstack:host": "bun scripts/nstack-host.ts"
+    "nstack:host": "bun scripts/nstack-host.ts",
+    "nstack:recovery": "bun scripts/nstack-recovery.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1162.0",
