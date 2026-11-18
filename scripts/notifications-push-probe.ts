@@ -1,5 +1,5 @@
 /**
- * Live probe for push delivery. Run by the supervising manager AFTER the local Tower was rebuilt/restarted:
+ * Live probe for push delivery. Run by the supervising manager AFTER the local NStack was rebuilt/restarted:
  *
  *   SESSION_ID=<broker session> WINGMAN_CAPABILITY=<token> \
  *   bun scripts/notifications-push-probe.ts --tower http://127.0.0.1:3100 --workspace <workspace-id> [--register-fake] \
@@ -13,7 +13,7 @@
  *  --send-real       registers the DEVICE TOKEN YOU PASS (a human copies it from the phone/app log; never read from disk), publishes ONE
  *                    ephemeral self-addressed probe event through a temporary producer source and waits for the alert worker to report
  *                    the outcome. Requires effective workspace.manage and a configured provider. The visible text is the generic
- *                    "New activity". A human must confirm physical receipt on the device; the script reports only Tower's side
+ *                    "New activity". A human must confirm physical receipt on the device; the script reports only NStack's side
  *                    (alert state, provider status). It never claims a physical receipt.
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -42,7 +42,7 @@ const advert = descriptor.notifications ?? {};
 console.log('descriptor.notifications:', JSON.stringify({ transports: advert.transports, alerts: advert.alerts, transport_status: advert.transport_status }));
 check('descriptor advertises apns without advertising unimplemented kinds', Array.isArray(advert.transports) && advert.transports.includes('apns') && !advert.transports.includes('fcm') && !advert.transports.includes('webpush'), advert.transports);
 const providerReady = advert.transport_status?.apns?.ready === true;
-console.log(providerReady ? 'APNs provider: READY' : `APNs provider: NOT READY (${advert.transport_status?.apns?.reason ?? 'unknown'}) — set APNS_KEY_ID, APNS_TEAM_ID, APNS_AUTH_KEY_FILE, APNS_TOPIC and restart Tower`);
+console.log(providerReady ? 'APNs provider: READY' : `APNs provider: NOT READY (${advert.transport_status?.apns?.reason ?? 'unknown'}) — set APNS_KEY_ID, APNS_TEAM_ID, APNS_AUTH_KEY_FILE, APNS_TOPIC and restart NStack`);
 const queue = await call('GET', '/admin/notifications/queue').catch((e) => ({ error: String(e) }));
 console.log('alert queue (workspace.manage only):', JSON.stringify(queue.queue?.alerts ?? queue));
 
@@ -70,7 +70,7 @@ if (args.includes('--send-real')) {
   const environment = flag('environment') || 'sandbox';
   const bundle = flag('bundle-id');
   if (!deviceToken || !bundle) throw new Error('--send-real needs --device-token and --bundle-id');
-  if (!providerReady) throw new Error('provider is not configured on this Tower; nothing to send');
+  if (!providerReady) throw new Error('provider is not configured on this NStack; nothing to send');
   const me = await call('GET', '/me');
   const installation = flag('installation') || randomUUID();
   const reg = await call('PUT', `/notifications/apns-devices/${installation}`, { device_token: deviceToken, environment, bundle_id: bundle, preview: 'generic', lease_seconds: 3600, permission_state: 'granted' });
@@ -104,7 +104,7 @@ if (args.includes('--send-real')) {
       if ((alerts.sent ?? 0) > baseline || alerts.dead > 0) break;
     }
     console.log('alert states after probe:', JSON.stringify(state));
-    check('Tower reports the alert as sent to APNs (physical receipt must be confirmed on the device by a human)', (state?.sent ?? 0) > baseline, state);
+    check('NStack reports the alert as sent to APNs (physical receipt must be confirmed on the device by a human)', (state?.sent ?? 0) > baseline, state);
   } finally {
     await call('POST', `/notification-sources/${sourceId}/revoke`, {}).catch(() => {});
     if (!flag('keep-registration')) await call('DELETE', `/notifications/apns-devices/${installation}`).catch(() => {});

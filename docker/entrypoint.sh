@@ -46,5 +46,5 @@ if [ "${GRAPH_ENABLED:-false}" = "true" ]; then
   done
 fi
 
-echo "Database ready. Starting Tower API..."
+echo "Database ready. Starting NStack API..."
 exec bun run src/index.ts

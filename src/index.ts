@@ -21,9 +21,9 @@ try {
   const sql = getDb();
   await sql`SELECT 1`;
   await ensureRuntimeSchema();
-  console.log(`[coworker-be] DB connected: ${config.db.host}:${config.db.port}/${config.db.database}`);
+  console.log(`[nstack] DB connected: ${config.db.host}:${config.db.port}/${config.db.database}`);
 } catch (err) {
-  console.error('[coworker-be] DB connection failed:', err);
+  console.error('[nstack] DB connection failed:', err);
   process.exit(1);
 }
 
@@ -40,8 +40,8 @@ startAlertWorker();
 const { startAgentActivityLeaseSweeper } = await import('./services/agent-activity-lease-sweeper');
 startAgentActivityLeaseSweeper();
 
-console.log(`[coworker-be] listening on :${config.port}`);
-console.log(`[coworker-be] service npub: ${identity.npub}`);
+console.log(`[nstack] listening on :${config.port}`);
+console.log(`[nstack] service npub: ${identity.npub}`);
 
 // Optional dedicated ingress (native mesh or Docker seam); shares app/DB/SSE hub.
 startFipsIngress(app.fetch);

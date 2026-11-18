@@ -34,7 +34,7 @@ export function parseFcmInput(body: Record<string, any>): FcmInput {
   if (!state.ready) throw new NotificationError(409, 'transport_unavailable', state.reason);
   const invalid = () => new NotificationError(400, 'validation_error', 'Invalid FCM registration');
   if (typeof body.device_token !== 'string' || !/^[A-Za-z0-9_:.-]{20,4096}$/.test(body.device_token) || (body.preview ?? 'generic') !== 'generic') throw invalid();
-  if (body.project_id !== state.config.projectId || body.sender_id !== state.config.senderId || body.package_name !== state.config.packageName) throw new NotificationError(409, 'provider_mismatch', 'FCM project, sender and package must match this Tower');
+  if (body.project_id !== state.config.projectId || body.sender_id !== state.config.senderId || body.package_name !== state.config.packageName) throw new NotificationError(409, 'provider_mismatch', 'FCM project, sender and package must match this NStack');
   const lease = body.lease_seconds ?? 604800;
   if (!Number.isInteger(lease) || lease < 1 || lease > 2592000) throw invalid();
   return { device_token: body.device_token, project_id: body.project_id, sender_id: body.sender_id, package_name: body.package_name, preview: 'generic', lease_seconds: lease };

@@ -94,10 +94,10 @@ export async function verifyRecovery(proof:FileProof,project:string,s:Snapshot,e
   if(binding.daemon!==s.daemon||binding.volume!==volume.Name||binding.created!==volume.CreatedAt)throw Error('Recovery file belongs to another Docker context or durable installation; refusing deletion.');
   bound=true;
  }
- if(towers.length>1)throw Error('Ambiguous Tower identity; refusing recovery deletion.');
+ if(towers.length>1)throw Error('Ambiguous NStack identity; refusing recovery deletion.');
  if(towers.length===1){
   const tower=towers[0]!;
-  if(!tower.Mounts?.some((m:Resource)=>m.Type==='volume'&&m.Name===volume.Name&&m.Destination==='/run/nstack'))throw Error('Tower bootstrap mount mismatch.');
+  if(!tower.Mounts?.some((m:Resource)=>m.Type==='volume'&&m.Name===volume.Name&&m.Destination==='/run/nstack'))throw Error('NStack bootstrap mount mismatch.');
   // Docker archive reads also work for stopped containers. No reader container or write is needed.
   const tar=Buffer.from(await exec(['docker','cp',tower.Id+':/run/nstack/bootstrap.json','-']),'utf8');
   let state:Resource|undefined;

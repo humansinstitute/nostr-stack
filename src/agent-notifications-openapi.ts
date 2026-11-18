@@ -70,7 +70,7 @@ export const agentNotificationSchemas = {
       recipient_npub: { type: 'string' }, created: { type: 'boolean' },
       subscription: {
         type: 'object', properties: {
-          id: uuid, consumer_id: { type: 'string' }, floor_at: { type: 'string', format: 'date-time', description: 'Fixed by Tower at creation: now - 24h' },
+          id: uuid, consumer_id: { type: 'string' }, floor_at: { type: 'string', format: 'date-time', description: 'Fixed by NStack at creation: now - 24h' },
           policy_version: { type: 'integer' }, acked_through_seq: { type: 'integer' }, created_at: { type: 'string', format: 'date-time' },
         },
       },
@@ -101,7 +101,7 @@ const BASE = '/api/v4/flightdeck-pg/workspaces/{workspaceId}/agent-notifications
 export const agentNotificationPaths = {
   [`${BASE}/subscriptions`]: {
     post: op('Create or recover an agent notification subscription', {
-      description: 'Idempotent per (workspace, verified recipient, consumer_id). Tower fixes floor_at = now - 24h at first creation; the caller cannot widen it.',
+      description: 'Idempotent per (workspace, verified recipient, consumer_id). NStack fixes floor_at = now - 24h at first creation; the caller cannot widen it.',
       requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['consumer_id'], properties: { consumer_id: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$' } } } } } },
       responses: { '200': json(ref('AgentNotificationSubscription'), 'Recovered'), '201': json(ref('AgentNotificationSubscription'), 'Created'), ...authErrors },
     }),
@@ -136,7 +136,7 @@ export const agentNotificationPaths = {
   },
   [`${BASE}/{notificationId}/ack`]: {
     post: op('Acknowledge a notification outcome (idempotent)', {
-      description: 'Bound to the caller\'s own subscription. source_gone is accepted only when Tower confirms the source is gone. Auth failures can never be acknowledged past.',
+      description: 'Bound to the caller\'s own subscription. source_gone is accepted only when NStack confirms the source is gone. Auth failures can never be acknowledged past.',
       parameters: [notificationParam],
       requestBody: { required: true, content: { 'application/json': { schema: ref('AgentNotificationAck') } } },
       responses: { '200': json({ type: 'object' }), '400': err('validation_error | invalid_cursor'), '404': err('notification_not_found'), '409': err('source_present'), ...authErrors },

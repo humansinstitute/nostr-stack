@@ -31,7 +31,7 @@ export async function createHostingCheckout(accountId:string,body:unknown,db:Db=
     mode:'payment',allowed_payment_method_types:['card'],client_reference_id:order.id,
     metadata:{hosting_order_id:order.id,hosting_account_id:accountId},
     payment_intent_data:{metadata:{hosting_order_id:order.id,hosting_account_id:accountId}},
-    line_items:[{price_data:{currency:'usd',unit_amount:order.amount_cents,product_data:{name:'Prepaid Tower hosting credit'}},quantity:1}],
+    line_items:[{price_data:{currency:'usd',unit_amount:order.amount_cents,product_data:{name:'Prepaid NStack hosting credit'}},quantity:1}],
     success_url:b.return_url,cancel_url:b.return_url,
   },{idempotencyKey:`hosting-v1:${order.id}`});
   if(session.livemode)throw new HostingError(503,'stripe_mode_mismatch');

@@ -89,7 +89,7 @@ if ! grep -Eq "^  - npub: \"$BOOTSTRAP_NPUB\"$" "$TEMP"; then
     { print }
     END { if (!inserted) exit 42 }
   ' "$TEMP" > "$PEER_TEMP" || {
-    echo "FIPS config is not compatible with automatic Wingman bootstrap setup: missing peers section" >&2
+    echo "FIPS config is not compatible with automatic NStack bootstrap setup: missing peers section" >&2
     exit 1
   }
   mv "$PEER_TEMP" "$TEMP"
@@ -106,7 +106,7 @@ fi
 
 require_line() {
   if ! grep -Eq "$1" "$TEMP"; then
-    echo "FIPS config is not compatible with automatic Wingman setup: missing $2" >&2
+    echo "FIPS config is not compatible with automatic NStack setup: missing $2" >&2
     echo "Original config preserved at $BACKUP" >&2
     exit 1
   fi
@@ -114,7 +114,7 @@ require_line() {
 
 require_section_line() {
   if ! sed -n "/$1/,/$2/p" "$TEMP" | grep -Eq "$3"; then
-    echo "FIPS config is not compatible with automatic Wingman setup: missing $4" >&2
+    echo "FIPS config is not compatible with automatic NStack setup: missing $4" >&2
     echo "Original config preserved at $BACKUP" >&2
     exit 1
   fi
@@ -135,8 +135,8 @@ require_section_line '^dns:$' '^transports:$' '^  enabled: true$' 'dns.enabled'
 require_section_line '^  udp:$' '^  tcp:$' '^    advertise_on_nostr: true$' 'transports.udp.advertise_on_nostr'
 require_section_line '^  udp:$' '^  tcp:$' '^    accept_connections: true$' 'transports.udp.accept_connections'
 require_section_line '^  udp:$' '^  tcp:$' '^    outbound_only: false$' 'transports.udp.outbound_only'
-require_line "^  - npub: \"$BOOTSTRAP_NPUB\"$" 'Wingman FIPS bootstrap peer identity'
-require_line "^        addr: \"$BOOTSTRAP_ADDRESS\"$" 'Wingman FIPS bootstrap peer address'
+require_line "^  - npub: \"$BOOTSTRAP_NPUB\"$" 'NStack FIPS bootstrap peer identity'
+require_line "^        addr: \"$BOOTSTRAP_ADDRESS\"$" 'NStack FIPS bootstrap peer address'
 
 chmod 600 "$TEMP"
 if [ "${FIPS_CONFIG_TEST:-0}" != "1" ]; then
@@ -164,4 +164,4 @@ if [ "${FIPS_SKIP_RESTART:-0}" != "1" ] && [ "${FIPS_CONFIG_TEST:-0}" != "1" ]; 
   systemctl restart fips-dns.service
 fi
 
-echo "Configured bundled FIPS for Wingman mesh access (existing identity preserved)."
+echo "Configured bundled FIPS for NStack mesh access (existing identity preserved)."

@@ -71,7 +71,7 @@ function consumer(handler: (ctx: ConsumerCtx) => Promise<Response>, options: { s
       identity = buildFlightDeckPgIdentity(context.workspace, context.workspace?.app_npub ?? '');
       if (!context.workspace) throw new NotificationError(404, 'workspace_not_found', 'Flight Deck PG workspace not found');
       if (!context.actor || !context.membership) throw new NotificationError(403, 'workspace_membership_required', 'Actor is not a member of this Flight Deck PG workspace');
-      if (!inboxApiEnabled()) throw new NotificationError(404, 'notifications_not_enabled', 'Notification inbox is not enabled on this Tower');
+      if (!inboxApiEnabled()) throw new NotificationError(404, 'notifications_not_enabled', 'Notification inbox is not enabled on this NStack');
       return await handler({ c, sql, identity, workspaceId: context.workspace.id, actorId: context.actor.id, role: context.membership.role, userNpub: auth.userNpub, signerNpub: auth.signerNpub, appNpub: context.workspace.app_npub });
     } catch (error) {
       if (error instanceof NotificationError) return fail(c, identity, error);
@@ -274,7 +274,7 @@ export function registerNotificationRoutes(router: Hono) {
   const transportKind = (c: Context) => {
     const kind = c.req.param('kind');
     if (kind === 'apns' || kind === 'unifiedpush' || kind === 'fcm') return kind;
-    if (kind === 'webpush') throw new NotificationError(400, 'transport_not_implemented', `Transport ${kind} is not implemented on this Tower`);
+    if (kind === 'webpush') throw new NotificationError(400, 'transport_not_implemented', `Transport ${kind} is not implemented on this NStack`);
     throw new NotificationError(400, 'validation_error', 'kind must be apns, unifiedpush, webpush or fcm');
   };
 
@@ -328,7 +328,7 @@ export function registerNotificationRoutes(router: Hono) {
       const workspace = await resolveFlightDeckPgWorkspace(workspaceId, sql);
       if (!workspace) throw new NotificationError(404, 'workspace_not_found', 'Flight Deck PG workspace not found');
       identity = buildFlightDeckPgIdentity(workspace, workspace.app_npub);
-      if (!inboxApiEnabled()) throw new NotificationError(404, 'notifications_not_enabled', 'Notification inbox is not enabled on this Tower');
+      if (!inboxApiEnabled()) throw new NotificationError(404, 'notifications_not_enabled', 'Notification inbox is not enabled on this NStack');
       return await handler({ c, sql, identity, workspaceId: workspace.id, signers: [...new Set([auth.signerNpub, auth.userNpub])] });
     } catch (error) {
       if (error instanceof NotificationError) return fail(c, identity, error);

@@ -1,9 +1,9 @@
-# Tower FIPS ingress
+# NStack FIPS ingress
 
 Contract for task `b5f96311-d672-46ca-ab2d-e0bb0cdde8f8`, workspace
 `2e5caefd-dd65-45d2-b747-ee874e8e5fc9`.
 
-Tower starts an optional dedicated HTTP ingress in the same Bun process as the
+NStack starts an optional dedicated HTTP ingress in the same Bun process as the
 ordinary listener, sharing Hono, database, identity, ACLs and SSE hub. For this
 Docker Desktop deployment, a native macOS TCP forwarder connects the exact host
 mesh interface to a **dedicated loopback-published Docker port**:
@@ -12,11 +12,11 @@ mesh interface to a **dedicated loopback-published Docker port**:
 WMapp/native client signs http://<native-daemon-npub>.fips:43100/exactpath?query
   -> existing native FIPS daemon and its local mesh address:43100
   -> fixed 127.0.0.1:43101 on macOS (Docker publish)
-  -> dedicated Tower 0.0.0.0:43101 inside Docker
+  -> dedicated NStack 0.0.0.0:43101 inside Docker
   -> fixed mesh Host/canonical URL adapter -> existing Hono app
 ```
 
-The public Tower listener stays on its existing port 3100. The gateway has no
+The public NStack listener stays on its existing port 3100. The gateway has no
 HTTP target selection, DNS, discovery, signing, keys, redirects or fallback.
 TCP pipes preserve request/response bytes, backpressure, SSE and disconnects.
 An upstream connection failure closes the mesh connection; it never selects
@@ -27,25 +27,25 @@ idle timeout. SIGTERM closes the listener and all gateway connections.
 
 `.env.fips.example` contains synthetic, internally consistent examples only.
 Copy it to ignored `.env.fips`. Keep this file public-settings-only, unquoted
-`TOWER_FIPS_*=value` lines. Do not copy Tower or FIPS daemon keys into it.
+`TOWER_FIPS_*=value` lines. Do not copy NStack or FIPS daemon keys into it.
 
 - `TOWER_FIPS_ENABLED=true` explicitly enables the ingress and gateway.
 - `TOWER_FIPS_NODE_NPUB` is the existing native daemon's checksummed lowercase
-  npub, not Tower/user identity. Autopilot and the local Tower ingress deliberately
+  npub, not NStack/user identity. Autopilot and the local NStack ingress deliberately
   use this same transport identity in the supported single-daemon topology.
 - `TOWER_FIPS_MESH_ADDRESS` is the exact native fd00::/8 IPv6, without brackets.
 - `TOWER_FIPS_PORT=43100` is the **external mesh port**, used in the signed URL.
-- `TOWER_FIPS_INGRESS_MODE=docker` selects internal `0.0.0.0:43101` in Tower;
+- `TOWER_FIPS_INGRESS_MODE=docker` selects internal `0.0.0.0:43101` in NStack;
   this is exposed only as `127.0.0.1:43101` by `docker-compose.fips.yml`.
   The native gateway always binds the mesh address and external port, regardless
   of ingress mode. Its target is hardcoded `127.0.0.1:43101`, never configurable.
-- Omitted ingress mode defaults to `mesh` for native Tower installations, where
-  Tower itself binds the mesh address/port and no host gateway is needed.
+- Omitted ingress mode defaults to `mesh` for native NStack installations, where
+  NStack itself binds the mesh address/port and no host gateway is needed.
 
 Docker never assumes the macOS mesh address exists in its namespace. The overlay
 explicitly injects every FIPS variable. Its wildcard **internal container** bind
 is necessary for Docker port forwarding and is not a host wildcard publish.
-Other containers on Tower networks can reach this ingress; they still face the
+Other containers on NStack networks can reach this ingress; they still face the
 fixed Host and existing route authentication. Do not publish 43101 on LAN/public
 interfaces or change the gateway destination to 3100. Ordinary and dedicated
 ports cannot be equal in Docker mode. The host gateway queries the existing
@@ -60,13 +60,13 @@ It always includes the FIPS overlay and requires `.env.fips` to declare
 `FIPS_COMPOSE_FILE` if needed. Missing, disabled or invalid settings stop deployment
 before building or replacing containers. Deployment succeeds only after a health
 request through the native FIPS gateway succeeds. The native FIPS daemon and host
-gateway must be installed and running before deployment. Do not recreate Tower
+gateway must be installed and running before deployment. Do not recreate NStack
 using a separate Compose command: omitting the overlay removes the dedicated
 ingress even while the native gateway remains running.
 
 ## Resolve the existing native daemon
 
-Tower and Autopilot share the established native FIPS daemon. Read its public
+NStack and Autopilot share the established native FIPS daemon. Read its public
 identity and address without changing it:
 
 ```bash
@@ -80,14 +80,14 @@ printf 'http://%s.fips:43100\n' "$TOWER_TRANSPORT_NPUB"
 ```
 
 Fill `.env.fips` with those public values. Do not create a second identity,
-daemon, control socket, or root launch service. The Tower service npub remains
+daemon, control socket, or root launch service. The NStack service npub remains
 different: the `.fips` hostname identifies transport, while
-`/health.service_npub` identifies Tower.
+`/health.service_npub` identifies NStack.
 
 ## Manager activation (not performed by the source worker)
 
 Run from `$HOME/code/wm/tower` after reviewing the source commit and
-concurrent WApp state. These commands affect Tower and its host gateway only;
+concurrent WApp state. These commands affect NStack and its host gateway only;
 they do not restart Autopilot, Flight Deck, Postgres, MinIO or other services.
 
 ```bash
@@ -135,9 +135,9 @@ launchctl bootout "gui/$(id -u)/studio.otherstuff.tower-fips-host"
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/studio.otherstuff.tower-fips-host.plist"
 ```
 
-For full rollback, stop the host service, then recreate only Tower using the base
+For full rollback, stop the host service, then recreate only NStack using the base
 Compose file without the FIPS overlay (keep FIPS settings out of `.env.prod`).
-Do not remove volumes. Always retain the overlay on subsequent Tower deployments
+Do not remove volumes. Always retain the overlay on subsequent NStack deployments
 while FIPS is enabled.
 
 ## Authentication and HTTP behavior
@@ -157,7 +157,7 @@ normalize unusual leading `//` paths on real sockets; signatures for changed
 paths fail closed. Use the exact normal API path, not an alternative spelling.
 An HTTPS signature cannot be reused on mesh, even with forwarding headers.
 Route-specific auth, replay protection, workspace identity resolution and ACLs
-remain in Tower. No global auth gate is added: public health and explicitly
+remain in NStack. No global auth gate is added: public health and explicitly
 public storage retain their normal visibility. API types and routes do not change.
 
 Bodies and response streams are not buffered by the adapter. SSE receives the
@@ -170,17 +170,17 @@ The adapter does not rewrite response bodies, redirects or cookies.
 An HTTPS Flight Deck page cannot be assumed to fetch raw HTTP `.fips` URLs:
 mixed-content, secure-context and native DNS/network constraints still apply.
 Use the manager-coordinated native bridge while preserving the existing UI
-origin and local workspace data. This Tower change supplies the wire endpoint
+origin and local workspace data. This NStack change supplies the wire endpoint
 only. Pair and restrict destinations in the client; do not enable a generic
 URL proxy, weaken global WebView security or silently fall back to HTTPS.
 
-Origin is preserved. Existing Tower CORS remains wildcard without credential
+Origin is preserved. Existing NStack CORS remains wildcard without credential
 allowance; the ingress adds no credentials or new allowed headers. Secure
 cookies remain Secure and cannot be assumed usable over HTTP mesh. Browser
 OIDC/admin cookie flows may therefore still require HTTPS. Use existing
 brokered NIP-98 API transport rather than relaxing cookie flags.
 
-Tower-generated storage content/complete URLs based on the incoming origin
+NStack-generated storage content/complete URLs based on the incoming origin
 use the mesh origin. Pre-signed S3 upload/download URLs and redirects remain
 at the configured storage endpoint, which must be independently reachable.
 No S3 URL is relabeled or proxied as mesh. Private storage authorization,
@@ -191,12 +191,12 @@ feature does not claim that all storage bytes travel over FIPS.
 ## Failure reporting and validation
 
 Missing enablement leaves ingress disabled. Invalid settings or bind failure
-produce a `[tower-fips] unavailable` log and leave ordinary Tower startup
+produce a `[tower-fips] unavailable` log and leave ordinary NStack startup
 running. Successful bind logs the exact public endpoint/address. These are
 startup results, not continuous FIPS reachability probes; `/health` remains
-Tower's normal health contract. A lost daemon/interface must surface as a
+NStack's normal health contract. A lost daemon/interface must surface as a
 client connection failure. There is no automatic fallback or retry; after
-repair, coordinate a Tower restart. No availability claim comes from HTTPS.
+repair, coordinate a NStack restart. No availability claim comes from HTTPS.
 
 Source and isolated socket verification (no DB or shared runtime required;
 43101 must be free because the test exercises the fixed production target):
@@ -216,8 +216,8 @@ forwarding headers, Host rejection before dispatch, auth failures, redirect
 passthrough, first SSE event, disconnect propagation and upstream loss.
 
 An additional isolated **native host -> Docker publish** check is reproducible
-with the current local Tower image (43101 must be free). It creates only a
-throwaway fixture container, not Tower or its database. Run cleanup even if the
+with the current local NStack image (43101 must be free). It creates only a
+throwaway fixture container, not NStack or its database. Run cleanup even if the
 smoke command fails:
 
 ```bash
@@ -232,12 +232,12 @@ docker stop tower-fips-isolated-review
 
 Source pickup evidence (2026-09-09): 18 tests / 139 assertions passed on native
 Bun 1.3.0 and on Bun 1.2.23 in a disposable network-isolated container using the
-current Tower image with source mounted read-only. The separate native host to
+current NStack image with source mounted read-only. The separate native host to
 Docker publish fixture passed signed POST 200/body preservation, HTTPS-signed
 401, and wrong Host 421. TypeScript checking of changed runtime/scripts passed;
 Compose rendered exact loopback ports and all FIPS env; `plutil -lint` and
 `git diff --check` passed. No shared container rebuild or gateway activation
-was performed. The fixture is a synthetic authenticated echo, not live Tower
+was performed. The fixture is a synthetic authenticated echo, not live NStack
 DB/ACL/SSE/storage acceptance.
 
 For live brokered reads after activation, in an authorized manager session:

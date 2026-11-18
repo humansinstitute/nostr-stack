@@ -1,15 +1,15 @@
-# CapRover Tower and GRasp deployment
+# CapRover NStack and GRasp deployment
 
-Tower remains the authority API. Postgres, graph Postgres and MinIO keep their
+NStack remains the authority API. Postgres, graph Postgres and MinIO keep their
 existing persistent service apps and volumes. GRasp owns Git and NIP-34 reviews;
 its private and public services use separate volumes and origins. See
 [GRasp operations](grasp.md) for source pins, build, access and activation gates.
 
 Only activate Forgejo removal after verified consumer cutover. Preserve previous
-source images, protected configuration and volumes for rollback. The new Tower
+source images, protected configuration and volumes for rollback. The new NStack
 image does not run a Git proxy, OIDC provider or permission worker.
 
-## Tower API GitHub Deploy
+## NStack API GitHub Deploy
 
 Create `tower-stable-api` as a normal CapRover web app.
 
@@ -147,7 +147,7 @@ Persistent directory:
 /data
 ```
 
-Tower expects bucket `superbased-storage`. Create it once in the MinIO console or with `mc`:
+NStack expects bucket `superbased-storage`. Create it once in the MinIO console or with `mc`:
 
 ```bash
 mc alias set tower-minio https://tower-stable-minio.b.otherstuff.ai REPLACE_WITH_MINIO_ROOT_USER REPLACE_WITH_MINIO_ROOT_PASSWORD
@@ -162,7 +162,7 @@ Set `STORAGE_S3_ENDPOINT_PUBLIC` to the externally reachable MinIO API URL used 
 Publish tested source to GitHub main first. Activation remains a separately
 approved release: update the intended deployment branch only after repository,
 reader, review/deployment and public-access checks pass. Do not deploy the new
-Tower image while a surviving Forgejo consumer still depends on Tower OIDC.
+NStack image while a surviving Forgejo consumer still depends on NStack OIDC.
 After activation, check `/health`, `/.well-known/nstack.json`, private member and
 denial tests, ordinary clone/fetch/push/review and isolated recovery. Keep all
 retired source volumes until rollback retention is explicitly closed.

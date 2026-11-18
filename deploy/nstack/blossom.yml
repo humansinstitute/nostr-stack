@@ -90,7 +90,7 @@ prune:
 
 landing:
   enabled: true
-  title: "Wingman Nstack Blossom"
+  title: "NStack Blossom"
 
 report:
   enabled: true

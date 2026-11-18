@@ -15,14 +15,14 @@ size() { wc -c < "$1" | tr -d ' '; }
 
 usage() {
   cat <<'EOF'
-Encrypted Tower backup sets
+Encrypted NStack backup sets
 
   scripts/tower-backup.sh backup --output DIR --recipient AGE_RECIPIENT --quiesced
   scripts/tower-backup.sh verify --backup DIR --identity AGE_IDENTITY_FILE
   scripts/tower-backup.sh restore --backup DIR --identity AGE_IDENTITY_FILE \
     --target tower-restore-NAME --confirm tower-restore-NAME
 
-backup requires the Tower API container to be stopped and an operator attestation
+backup requires the NStack API container to be stopped and an operator attestation
 that all external writes (including outstanding presigned MinIO uploads) are
 quiesced. It never writes an unencrypted dump.
 
@@ -56,7 +56,7 @@ backup() {
   need age; need docker; need jq; need shasum
   [[ -n ${OUTPUT:-} && -n ${RECIPIENT:-} ]] || die "--output and --recipient are required"
   [[ ${QUIESCED:-0} == 1 ]] || die "--quiesced is required; see docs/backup-and-restore.md"
-  [[ $(state "$APP_CONTAINER") != running ]] || die "$APP_CONTAINER is running; stop Tower and quiesce external writes first"
+  [[ $(state "$APP_CONTAINER") != running ]] || die "$APP_CONTAINER is running; stop NStack and quiesce external writes first"
   [[ $(state "$MAIN_CONTAINER") == running ]] || die "$MAIN_CONTAINER is not running"
   [[ $(state "$GRAPH_CONTAINER") == running ]] || die "$GRAPH_CONTAINER is not running"
   [[ $(state "$MINIO_CONTAINER") == running ]] || die "$MINIO_CONTAINER is not running"
@@ -130,7 +130,7 @@ restore() {
   [[ -d ${BACKUP:-} && -f ${IDENTITY:-} ]] || die "--backup DIR and --identity FILE are required"
   [[ ${TARGET:-} =~ ^tower-restore-[a-z0-9][a-z0-9-]{2,40}$ ]] || die "--target must match tower-restore-[a-z0-9][a-z0-9-]{2,40}"
   [[ ${CONFIRM:-} == "$TARGET" ]] || die "--confirm must exactly match --target"
-  case "$TARGET" in wingman-tower*|*postgres-data|*graph-postgres-data|*minio-data) die "target resembles a live Tower resource";; esac
+  case "$TARGET" in wingman-tower*|*postgres-data|*graph-postgres-data|*minio-data) die "target resembles a live NStack resource";; esac
 
   verify --backup "$BACKUP" --identity "$IDENTITY"
   local main_volume="${TARGET}-main-data" graph_volume="${TARGET}-graph-data" minio_volume="${TARGET}-minio-data"

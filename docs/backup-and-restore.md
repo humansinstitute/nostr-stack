@@ -1,6 +1,6 @@
-# Tower backup and restore
+# NStack backup and restore
 
-Tower needs one backup set containing the main PostgreSQL database, graph
+NStack needs one backup set containing the main PostgreSQL database, graph
 PostgreSQL database, and MinIO data. A repository copy is not a data backup.
 
 `scripts/tower-backup.sh` streams every component directly through `age`.
@@ -11,7 +11,7 @@ and SHA-256 checksums of the encrypted payloads.
 ## Prerequisites
 
 - Docker, `age`, `jq`, `shasum`, and `tar`.
-- An age recipient whose identity is held somewhere other than the Tower host.
+- An age recipient whose identity is held somewhere other than the NStack host.
 - Enough encrypted backup storage for both databases and all MinIO data.
 
 Generate and securely escrow an identity once (do not put it in this repo):
@@ -24,12 +24,12 @@ age-keygen -y /secure/off-host/tower-backup.agekey
 ## Create a coherent backup
 
 The three stores have no shared transaction manager. A coherent set therefore
-requires a write-quiescence window. Stop the Tower API at the ingress and wait
+requires a write-quiescence window. Stop the NStack API at the ingress and wait
 at least the configured presigned-upload TTL so an already issued upload cannot
-change MinIO. Stop the Tower API container, but leave both databases and MinIO
+change MinIO. Stop the NStack API container, but leave both databases and MinIO
 running. Confirm no other writer has database or MinIO credentials.
 
-The script checks that the local Tower API container is not running. The
+The script checks that the local NStack API container is not running. The
 `--quiesced` flag is an operator attestation for the external conditions that a
 local script cannot prove.
 
@@ -41,7 +41,7 @@ scripts/tower-backup.sh backup \
   --quiesced
 ```
 
-Restarting Tower is a separate operator action. The backup command never stops,
+Restarting NStack is a separate operator action. The backup command never stops,
 starts, restarts, or modifies a running service or volume.
 
 ## Verify without restoring

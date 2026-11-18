@@ -16,7 +16,7 @@ services:
       NGIT_SYNC_PLUS_FALLBACK_RELAYS: ""
       NGIT_DATABASE_BACKEND: lmdb
       NGIT_BIND_ADDRESS: 0.0.0.0:7334
-      NGIT_RELAY_NAME: Wingman public GRasp
+      NGIT_RELAY_NAME: NStack public GRasp
       NGIT_GIT_DATA_PATH: /data/git
       NGIT_RELAY_DATA_PATH: /data/relay
     volumes:

@@ -40,7 +40,7 @@ export function readFipsIngressConfig(env: Record<string, string | undefined>): 
   const mode = env.TOWER_FIPS_INGRESS_MODE || 'mesh';
   if (!['mesh', 'docker'].includes(mode)) throw new Error('TOWER_FIPS_INGRESS_MODE must be mesh or docker');
   if (mode === 'docker' && Number(env.PORT || '3100') === FIPS_DOCKER_PORT) {
-    throw new Error('Dedicated ingress must not share the ordinary Tower port');
+    throw new Error('Dedicated ingress must not share the ordinary NStack port');
   }
   return { nodeNpub, meshAddress, port, origin: new URL(`http://${nodeNpub}.fips:${port}`).origin,
     bindAddress: mode === 'docker' ? '0.0.0.0' : meshAddress,
@@ -76,7 +76,7 @@ export function createFipsIngressFetch(config: FipsIngressConfig, appFetch: AppF
 
 type ListenerOptions = { hostname: string; port: number; idleTimeout: 0; fetch: AppFetch };
 
-/** A failed optional bind cannot prevent the ordinary Tower listener starting. */
+/** A failed optional bind cannot prevent the ordinary NStack listener starting. */
 export function startFipsIngress(
   appFetch: AppFetch,
   env: Record<string, string | undefined> = process.env,
@@ -92,11 +92,11 @@ export function startFipsIngress(
       idleTimeout: 0,
       fetch: createFipsIngressFetch(config, appFetch),
     });
-    report(`[tower-fips] listening ${config.origin} on ${config.bindAddress}:${config.bindPort}`);
+    report(`[nstack-fips] listening ${config.origin} on ${config.bindAddress}:${config.bindPort}`);
     return { status: 'listening' as const, config, server };
   } catch {
     // Do not log supplied config or raw runtime errors: an operator may paste a secret.
-    report('[tower-fips] unavailable: validate TOWER_FIPS_* public settings and dedicated ingress bind in this network namespace; HTTPS is unchanged');
+    report('[nstack-fips] unavailable: validate TOWER_FIPS_* public settings and dedicated ingress bind in this network namespace; HTTPS is unchanged');
     return { status: 'unavailable' as const };
   }
 }

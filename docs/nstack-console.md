@@ -46,7 +46,7 @@ disposable browser fixture suite. It verifies real NIP-98 signatures and decrypt
 setup ciphertext, exercises app confirmation and connection handoff, checks stale
 responses and denied access, and covers desktop/mobile and keyboard behavior.
 The fixture suite never contacts a real workspace. Live activation and database
-validation follow the repository's Tower-only lifecycle rules.
+validation follow the repository's NStack-only lifecycle rules.
 
 The namespace inventory adds a read-only, independently authorized view of
 `workspace_apps` and `workspace_app_db_namespaces`. It shows registered names,
@@ -96,7 +96,7 @@ accepts `action: archive|restore`; it performs no writes and returns the exact
 owner/app pair, registration metadata, references, retained impact, short confirmation
 phrase (uppercase action plus the last eight app-identity characters), blocked reason and opaque preview token. Apply uses the sibling
 `/visibility` route with the same action, token and exact confirmation phrase.
-Tokens expire after five minutes or a Tower process restart. Invalid, stale,
+Tokens expire after five minutes or a NStack process restart. Invalid, stale,
 changed or blocked previews require another review; failed collectors never
 imply empty data. No confirmation request changes app data or access.
 

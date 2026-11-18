@@ -1193,6 +1193,6 @@ adminRouter.post('/reset-database', async (c) => {
     reset_tables: [...VIEWER_TABLES],
     before,
     after,
-    note: 'Tower database rows were deleted. Storage blobs were not removed from object storage.',
+    note: 'NStack database rows were deleted. Storage blobs were not removed from object storage.',
   });
 });

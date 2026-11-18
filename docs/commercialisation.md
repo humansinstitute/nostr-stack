@@ -1,18 +1,22 @@
-# Superbased Commercialisation Plan
+# NStack Commercialisation Plan
+
+This historical planning document describes proposed billing and UI work; it is
+not the current onboarding or activation guide. See [README](../README.md) and
+[USD hosting contract](contract/hosting-billing-usd-v1.md) for current entry points.
 
 ## Context
 
-Superbased is the public protocol/product name. Wingman Tower is the implementation that hosts Superbased workspaces. Tower needs a public surface where a user can sign in, create a workspace, generate app connection details, inspect the records/storage that exist in that workspace, and buy usage credits that keep the workspace online.
+NStack (Nostr Stack) is the standalone product and workspace service. NStack needs a public surface where a user can sign in, create a workspace, generate app connection details, inspect the records/storage that exist in that workspace, and buy usage credits that keep the workspace online.
 
 The useful existing pieces are:
 
-- Tower already owns workspace bootstrap in `POST /api/v4/workspaces`, workspace listing in `GET /api/v4/workspaces`, encrypted record sync in `/api/v4/records`, object metadata in `v4_storage_objects`, and admin connection-token generation in `GET /api/v4/admin/workspaces/:workspaceId/connection-token`.
-- Tower has a small admin web at `/table-viewer`, but public workspace onboarding and billing should not be admin-only.
-- Tower currently has `user_profiles.credit_balance`, but the proposed billing unit is the workspace, not the user. Do not build on that column except as legacy/unrelated profile state.
+- NStack already owns workspace bootstrap in `POST /api/v4/workspaces`, workspace listing in `GET /api/v4/workspaces`, encrypted record sync in `/api/v4/records`, object metadata in `v4_storage_objects`, and admin connection-token generation in `GET /api/v4/admin/workspaces/:workspaceId/connection-token`.
+- NStack has a small admin web at `/table-viewer`, but public workspace onboarding and billing should not be admin-only.
+- NStack currently has `user_profiles.credit_balance`, but the proposed billing unit is the workspace, not the user. Do not build on that column except as legacy/unrelated profile state.
 - Ambulando in `~/code/tracker` already implements the payment shape: Mginx product lookup, order creation, local order mirroring, status polling, idempotent crediting, transactions, audit log, and hourly deduction.
-- The Mginx/NWCLI code in `~/code/z_archive/nwcli` exposes the merchant backend Tower can call: `GET /api/products/:id`, `POST /api/orders`, and `GET /api/orders/:id/status`. Products carry `priceSats`; orders carry `invoice`, `amount_sats`, `status`, `expires_at`, and product metadata.
+- The Mginx/NWCLI code in `~/code/z_archive/nwcli` exposes the merchant backend NStack can call: `GET /api/products/:id`, `POST /api/orders`, and `GET /api/orders/:id/status`. Products carry `priceSats`; orders carry `invoice`, `amount_sats`, `status`, `expires_at`, and product metadata.
 
-Mginx should stay payment-only. It sells credits at the configured sats-per-credit price and manages payment intent, invoices, and payment status. Tower owns workspace balances, metering, enforcement, grace periods, and any future retention/deletion policy.
+Mginx should stay payment-only. It sells credits at the configured sats-per-credit price and manages payment intent, invoices, and payment status. NStack owns workspace balances, metering, enforcement, grace periods, and any future retention/deletion policy.
 
 ## Product Model
 
@@ -31,7 +35,7 @@ The first credit definition should be simple and explicit:
 - Storage is sampled hourly and charged as `ceil(billable_mb)` credits for that hour.
 - Initial workspace credit grants should be configurable with an env setting, expressed in credits/MB-hours.
 
-I would avoid hard-coding "256 sats per hour" in Tower. The durable concept should be "credits", and Mginx product price should define sats per credit. Tower can display the current derived price as sats per MB-hour.
+I would avoid hard-coding "256 sats per hour" in NStack. The durable concept should be "credits", and Mginx product price should define sats per credit. NStack can display the current derived price as sats per MB-hour.
 
 Possible future extension: user-owned balances. A user could buy credits into a personal account, own multiple workspaces, and let those workspaces draw down from the user's balance. That is not needed for v1 and should not complicate the first workspace billing implementation.
 
@@ -52,9 +56,9 @@ Future split:
 
 For v1, charge the same credit pool for both classes and record the measured components in each audit row so the split can happen later without losing history.
 
-## Tower Data Model
+## NStack Data Model
 
-Add billing tables to Tower Postgres rather than overloading `user_profiles`.
+Add billing tables to NStack Postgres rather than overloading `user_profiles`.
 
 ```sql
 CREATE TABLE workspace_credit_accounts (
@@ -139,7 +143,7 @@ For credit-exhausted workspaces, start by blocking new writes and uploads while 
 
 ## Billing Modes
 
-Tower should support paid hosted mode and self-hosted/free mode through configuration.
+NStack should support paid hosted mode and self-hosted/free mode through configuration.
 
 Recommended config:
 
@@ -169,7 +173,7 @@ The default grace period should be 21 days. Hosted production can override it to
 
 Deletion does not need to be implemented in v1. The first implementation should only mark workspaces as `delete_eligible` after the grace period. A later retention worker can delete or archive data once the product and legal language are settled.
 
-If the workspace receives enough credits during grace, reactivate writes and clear `delete_eligible_at`. The unresolved product decision is whether the workspace must catch up for the grace-period storage that Tower continued to hold. The implementation should keep enough audit data to support either policy:
+If the workspace receives enough credits during grace, reactivate writes and clear `delete_eligible_at`. The unresolved product decision is whether the workspace must catch up for the grace-period storage that NStack continued to hold. The implementation should keep enough audit data to support either policy:
 
 - lenient restore: purchased credits only need to cover future usage
 - catch-up restore: purchased credits first pay the unpaid retained MB-hours, then writes resume
@@ -178,7 +182,7 @@ My lean for v1 is lenient restore because it is easier to explain and avoids sur
 
 ## Measuring Usage
 
-Add a Tower service that computes current usage for one workspace:
+Add a NStack service that computes current usage for one workspace:
 
 ```sql
 SELECT COALESCE(SUM(octet_length(owner_ciphertext)), 0) AS owner_record_bytes
@@ -198,7 +202,7 @@ WHERE owner_npub = $workspace_owner_npub
 
 This is good enough for v1. Later we can replace it with rollups if usage grows.
 
-Record history is billable immediately. Current Tower keeps all versions in `v4_records`, so stored bytes are billable, including history.
+Record history is billable immediately. Current NStack keeps all versions in `v4_records`, so stored bytes are billable, including history.
 
 ## Mginx Integration
 
@@ -218,9 +222,9 @@ Mirror Ambulando's approach, adapted to workspace scope:
 - `src/routes/billing.ts`
   - public authenticated billing APIs
 
-Mginx product metadata should identify the product as `superbased_workspace_credit_v1` and describe the unit as `MB-hour`. Tower should send order metadata including `workspace_owner_npub`, `requested_by_npub`, and Tower service identity so Mginx-side reports can be reconciled.
+Mginx product metadata should identify the product as `superbased_workspace_credit_v1` and describe the unit as `MB-hour`. NStack should send order metadata including `workspace_owner_npub`, `requested_by_npub`, and NStack service identity so Mginx-side reports can be reconciled.
 
-## Tower API
+## NStack API
 
 Add authenticated, workspace-scoped routes:
 
@@ -228,7 +232,7 @@ Add authenticated, workspace-scoped routes:
   - dashboard summary for every workspace the authenticated user can manage
   - returns balance, billing state, current usage, estimated credits/hour, and estimated runout time per workspace
 - `GET /api/v4/workspaces/:workspaceOwnerNpub/billing/status`
-  - standard lightweight status API for both the Superbased dashboard and downstream apps such as Flight Deck
+  - standard lightweight status API for both the NStack dashboard and downstream apps such as Flight Deck
   - returns the same status shape used inside the dashboard for one workspace
 - `GET /api/v4/workspaces/:workspaceOwnerNpub/billing`
   - detailed billing view for one workspace: account balance, billing state, latest usage, current product price, pending orders
@@ -246,7 +250,7 @@ Add authenticated, workspace-scoped routes:
 
 Authorization should use `canManageWorkspace()` for purchases and billing history. Ordinary members can see a minimal "workspace billing unavailable/low/read-only" status if needed, but invoices and transaction history should be admin-only.
 
-The status response should be stable and shared by the Superbased UI and consuming apps:
+The status response should be stable and shared by the NStack UI and consuming apps:
 
 ```json
 {
@@ -271,7 +275,7 @@ The status response should be stable and shared by the Superbased UI and consumi
 
 For `SUPERBASED_BILLING_MODE=disabled`, the same endpoint should return `billing_mode: "disabled"`, `billing_state: "disabled"`, no runout time, and no write-blocking risk.
 
-Billing errors should be machine-readable so downstream Superbased apps can show useful recovery UI:
+Billing errors should be machine-readable so downstream NStack apps can show useful recovery UI:
 
 ```json
 {
@@ -290,7 +294,7 @@ Use this response for write paths that are blocked by billing. HTTP `402 Payment
 
 ## Enforcement Points
 
-Do not enforce in the UI only. Tower should check billing state before accepting new billable writes.
+Do not enforce in the UI only. NStack should check billing state before accepting new billable writes.
 
 Initial enforcement:
 
@@ -309,18 +313,18 @@ This gives users a clean recovery path: buy credits, then writes resume.
 
 ## Public Onboarding UI
 
-This belongs in the Tower-specific UI, with Flight Deck integration where appropriate. A user should be able to go to a Tower-hosted UI such as `sb4.tower.example.invalid/ui`, sign in, and register a new workspace on that Tower infrastructure without first going through Flight Deck.
+This belongs in the NStack-specific UI, with Flight Deck integration where appropriate. A user should be able to go to a NStack-hosted UI such as `sb4.tower.example.invalid/ui`, sign in, and register a new workspace on that NStack infrastructure without first going through Flight Deck.
 
 Required flow:
 
 1. Sign in with Nostr.
-2. Create a Superbased workspace.
+2. Create a NStack workspace.
 3. Generate a workspace service identity and app namespace.
 4. Show connection details for Flight Deck/Yoke/app clients.
 5. Let the user inspect workspace records and storage metadata.
 6. Show billing status and buy workspace credits.
 
-The Superbased dashboard is required for hosted users. On login it should show all workspaces the user can manage, remaining credits for each workspace, current MB-hour burn rate, and estimated runout time. The per-workspace billing page should reuse the same status API that downstream apps call, so Flight Deck and other clients display the same balance and risk state as the dashboard.
+The NStack dashboard is required for hosted users. On login it should show all workspaces the user can manage, remaining credits for each workspace, current MB-hour burn rate, and estimated runout time. The per-workspace billing page should reuse the same status API that downstream apps call, so Flight Deck and other clients display the same balance and risk state as the dashboard.
 
 The existing admin token route can be the model, but the public version must be scoped to workspaces the signed-in user can manage. It should not require `ADMIN_NPUB`.
 
@@ -329,10 +333,10 @@ The "app namespace" should be explicit in the UI. At minimum, store/show:
 - app name
 - app npub
 - workspace owner/service npub
-- direct Tower URL
+- direct NStack URL
 - connection token/package
 
-App namespaces are persisted server-side in v1. Tower stores the list of apps that have been created for a workspace so the Tower UI can show "apps available inside this workspace" and let users regenerate connection details later. Add a table such as `workspace_apps` instead of treating `app_npub` as an ephemeral query string:
+App namespaces are persisted server-side in v1. NStack stores the list of apps that have been created for a workspace so the NStack UI can show "apps available inside this workspace" and let users regenerate connection details later. Add a table such as `workspace_apps` instead of treating `app_npub` as an ephemeral query string:
 
 ```sql
 CREATE TABLE workspace_apps (
@@ -352,7 +356,7 @@ Because most payloads are encrypted, the inspection UI should be honest:
 
 - show record family hash, record id, latest version, ciphertext sizes, timestamps, signer, and group payload count
 - show storage object filename, content type, size, public flag, completed state, creator, and access groups
-- do not imply Tower can decrypt record bodies
+- do not imply NStack can decrypt record bodies
 - provide filters by record family, object type, public/private, and date
 
 This can start as a polished version of `/table-viewer` scoped to the current workspace.
@@ -366,7 +370,7 @@ This can start as a polished version of `/table-viewer` scoped to the current wo
 5. Add `SUPERBASED_BILLING_MODE` and `SUPERBASED_BILLING_GRACE_DAYS` config.
 6. Add configurable initial workspace credit grants.
 7. Add shared billing status APIs for all managed workspaces and one workspace.
-8. Add hourly billing runner. In production, run it under the same supervisor strategy used for Tower deploys; locally, expose a script command.
+8. Add hourly billing runner. In production, run it under the same supervisor strategy used for NStack deploys; locally, expose a script command.
 9. Add write and connection-token enforcement with `insufficient_credits` responses.
 10. Add grace-period state transitions and mark-only `delete_eligible` handling.
 11. Add public workspace onboarding and billing UI.
@@ -397,15 +401,15 @@ Minimum automated coverage:
 
 ## Settled Decisions
 
-- Public protocol/product name is Superbased.
-- Wingman Tower is the implementation.
-- Onboarding is Tower-specific: `sb4.tower.example.invalid/ui` should let users register a new workspace on Tower infrastructure directly.
+- Public protocol/product name is NStack.
+- NStack is the implementation.
+- Onboarding is NStack-specific: `sb4.tower.example.invalid/ui` should let users register a new workspace on NStack infrastructure directly.
 - V1 charges by rounding billable usage up to the next MB on each hourly audit.
 - Initial workspace credit grant is configurable by env setting, expressed in credits/MB-hours.
 - Record version history is billable immediately.
 - Grace-period restore is lenient for now; purchased credits only need to cover future usage.
 - Read-only grace blocks writes, uploads, and connection-token generation.
-- App namespaces are server-persisted in v1 so Tower can list workspace apps and regenerate connection details.
+- App namespaces are server-persisted in v1 so NStack can list workspace apps and regenerate connection details.
 
 ## Open Decisions
 

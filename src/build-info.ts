@@ -50,7 +50,7 @@ function readGitHead() {
 export function getTowerBuildInfo(): TowerBuildInfo {
   const gitHead = readGitHead();
   return {
-    name: 'wingman-tower',
+    name: 'nostr-stack',
     version: firstEnv('TOWER_VERSION', 'APP_VERSION', 'npm_package_version') || readPackageVersion(),
     git_commit: firstEnv(
       'TOWER_GIT_COMMIT',

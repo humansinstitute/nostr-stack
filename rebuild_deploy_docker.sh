@@ -2,7 +2,7 @@
 #
 # rebuild_deploy_docker.sh
 #
-# Rebuild and (re)deploy the Wingman Tower prod Docker stack:
+# Rebuild and (re)deploy the NStack prod Docker stack:
 #   - wingman-tower-postgres
 #   - wingman-tower-minio
 #   - wingman-tower-minio-init

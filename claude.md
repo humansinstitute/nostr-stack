@@ -1,10 +1,10 @@
-# Wingman Tower Agent Guide
+# NStack Agent Guide
 
-Use this file for work inside `wingman-tower/`. Keep `agents.md` and `claude.md` identical.
+Use this file for work inside this repository (historically `wingman-tower/`). Keep `agents.md` and `claude.md` identical.
 
 ## What this repo owns
 
-`wingman-tower` is the authority backend for Wingman Be Free.
+NStack (Nostr Stack) is your shared business and agent memory. This repository owns its standalone service.
 
 It owns:
 
@@ -55,9 +55,9 @@ It does not own:
 - admin and table viewer: `src/routes/admin.ts`, `src/admin-token.ts`
 - strict agent notification inbox and notification-only delivery classification: `src/routes/agent-notifications.ts`, `src/services/agent-notifications.ts`, `src/services/agent-notification-projector.ts`, `src/schema/agent-notifications-v1.sql`, contract `docs/contract/agent-notifications-v1.md`
 
-## Cross-app boundaries
+## Integration boundaries
 
-Tower is the source of truth for these shared seams:
+NStack is the source of truth for these shared seams:
 
 - `connection_token`
 - workspace owner identity
@@ -75,7 +75,7 @@ When any of those change:
 
 ## Design rules
 
-- Keep Tower schema-light for records. App meaning belongs in client translators.
+- Keep NStack schema-light for records. App meaning belongs in client translators.
 - Use stable group UUIDs for durable ACL and membership logic.
 - Treat `group_npub` as rotating crypto identity (encryption, write proofs), not the durable group key.
 - Keep workspace, group, and storage boundaries explicit. Do not infer across them implicitly.
@@ -100,23 +100,23 @@ When any of those change:
 
 ## Things to avoid
 
-- Do not put Flight Deck-specific local row shapes into Tower responses unless they are part of the shared contract.
+- Do not put Flight Deck-specific local row shapes into NStack responses unless they are part of the shared contract.
 - Do not make Flight Logs mandatory for normal workspace operations.
 - Do not change field names across routes casually; Flight Deck and Yoke depend on stable naming.
 - Do not add client-only convenience semantics to storage or record services without updating both clients.
 
 ## Validation
 
-- Tower tests exercise the Docker-backed runtime and database. After any Tower
-  source or schema change, rebuild and restart the local Tower container before
+- NStack tests exercise the Docker-backed runtime and database. After any NStack
+  source or schema change, rebuild and restart the local NStack container before
   running tests; otherwise tests may run against stale code or schema and fail
   misleadingly:
 
 - For delegated implementation work, a worker may be told not to disrupt the
   shared runtime. That restriction applies only to the worker turn: the
-  supervising manager must rebuild/restart local Tower and run the live smoke
+  supervising manager must rebuild/restart local NStack and run the live smoke
   checks after accepting the change. Do not treat a passing source-only worker
-  suite as completion of local Tower validation.
+  suite as completion of local NStack validation.
 
 ```bash
 ./rebuild_deploy_docker.sh
@@ -129,7 +129,7 @@ For local authenticated integration tests, use the shared identity in `../tmp/ns
 
 ## Deployment (dev)
 
-Tower runs locally via Docker Compose with `.env.prod`:
+NStack runs locally via Docker Compose with `.env.prod`:
 
 ```bash
 ./rebuild_deploy_docker.sh
@@ -137,7 +137,7 @@ Tower runs locally via Docker Compose with `.env.prod`:
 
 Health check: `curl http://127.0.0.1:3100/health`
 
-This rebuild-and-restart step is required after Tower code or schema changes,
+This rebuild-and-restart step is required after NStack code or schema changes,
 including before validation. This is a Bun runtime — no separate compile step.
 Docker builds from source directly.
 
@@ -158,3 +158,9 @@ Check your own queue before starting, at milestones/decisions, validation and ha
 Every worker brief includes manager session ID, Autopilot location/connection, exact supported communication command and task/report destination. Workers ask questions; managers retain worker IDs, check their own queue and worker progress, and answer the exact worker. Use authorized `bun <autopilot-checkout>/clis/sessions.ts send <target-session-id> "<worker session/task; decision; recommendation; blocking status>" --bot-crypto --json`; queue-add only when specifically authorized. Sending may queue while busy; no immediate interrupt guarantee. Continue independent work while awaiting answers and pause dependent decisions.
 
 Own queue management never authorizes consuming another session’s queue. Callback inboxes remain separate: review evidence and follow up, then acknowledge/close only reviewed callbacks. No runtime injection, scope bypass or background polling is implied; recheck before handoff.
+
+## Branding compatibility
+
+Retain machine names documented in `docs/branding-compatibility.md`. Product copy
+uses NStack; branding changes do not authorize API, configuration, identity, data
+or runtime renames. Existing integrations remain supported.

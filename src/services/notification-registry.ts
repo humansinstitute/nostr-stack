@@ -65,7 +65,7 @@ export function parseApnsInput(body: Record<string, any>): ApnsInput {
   return { device_token: token, environment, bundle_id: body.bundle_id, preview, lease_seconds: lease };
 }
 
-/** Honest delivery state for one transport: tells the client whether Tower can actually buzz this device. */
+/** Honest delivery state for one transport: tells the client whether NStack can actually buzz this device. */
 export function deliveryState(installation: Pick<InstallationRow, 'permission_state'>, transport: Pick<TransportRow, 'environment' | 'bundle_id'> & { registered_origin?: string | null } | null) {
   const readiness = loadApnsConfig();
   if (!readiness.ready) return { ready: false as const, reason: readiness.reason };
@@ -176,7 +176,7 @@ export async function putApnsTransport(
   sql: Sql, r: Registrant, input: ApnsInput, opts: { implicit: InstallationInput | null; origin: string | null },
 ) {
   const readiness = loadApnsConfig();
-  if (readiness.ready && !readiness.config.topics.has(input.bundle_id)) throw new NotificationError(400, 'bundle_not_allowed', 'bundle_id is not on this Tower\'s push allow-list');
+  if (readiness.ready && !readiness.config.topics.has(input.bundle_id)) throw new NotificationError(400, 'bundle_not_allowed', 'bundle_id is not on this NStack\'s push allow-list');
   const hash = createHash('sha256').update(input.device_token).digest('hex');
   const origin = opts.origin && opts.origin.startsWith('https://') ? opts.origin : null;
 

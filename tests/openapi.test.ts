@@ -31,7 +31,7 @@ describe('OpenAPI docs', () => {
 
     const body = await res.json();
     expect(body.openapi).toBe('3.1.0');
-    expect(body.info.title).toBe('SuperBased V4 API');
+    expect(body.info.title).toBe('NStack V4 API');
     expect(body.paths['/api/v4/records/sync']).toBeDefined();
     expect(body.paths['/api/v4/records/{record_id}/checkout/acquire']).toBeDefined();
     expect(body.paths['/api/v4/records/{record_id}/checkout/release']).toBeDefined();
@@ -302,7 +302,7 @@ describe('OpenAPI docs', () => {
     expect(html).toContain('/openapi.json');
   });
 
-  test('GET /ui exposes the Tower-hosted dashboard shell', async () => {
+  test('GET /ui exposes the NStack dashboard shell', async () => {
     const res = await app.request('/ui');
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');

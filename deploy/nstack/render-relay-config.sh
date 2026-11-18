@@ -26,7 +26,7 @@ done
 cat > "$config_path" <<EOF
 [info]
 relay_url = "$relay_url"
-name = "Wingman Nstack Relay"
+name = "NStack Relay"
 description = "Persistent NIP-01 relay for this Nstack. Publishing is restricted to configured Nostr authors."
 
 [database]

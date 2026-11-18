@@ -2,7 +2,7 @@ import { connect, createServer, type Socket } from 'node:net';
 import { FIPS_DOCKER_PORT, readFipsIngressConfig } from './fips-ingress';
 
 /** Byte-transparent TCP forwarder: no HTTP parsing, DNS, keys, redirects or target input.
- * The dedicated Tower listener owns the fixed Host and canonical NIP-98 boundary.
+ * The dedicated NStack listener owns the fixed Host and canonical NIP-98 boundary.
  */
 export function createFipsHostGateway(targetPort: 43101 | 43111 | 17777 | 13002 | 17334 = FIPS_DOCKER_PORT) {
   if (![43101,43111,17777,13002,17334].includes(targetPort)) throw new Error('Unsupported fixed installation service target');
@@ -64,11 +64,11 @@ export async function startFipsHostGateway(
 if (import.meta.main) {
   try {
     const gateway = await startFipsHostGateway();
-    console.info(`[tower-fips-host] ${gateway.config.origin} on [${gateway.config.meshAddress}]:${gateway.config.port} -> 127.0.0.1:${FIPS_DOCKER_PORT}`);
-    gateway.server.on('error', () => { console.error('[tower-fips-host] listener failed'); gateway.stop(); process.exitCode = 1; });
+    console.info(`[nstack-fips-host] ${gateway.config.origin} on [${gateway.config.meshAddress}]:${gateway.config.port} -> 127.0.0.1:${FIPS_DOCKER_PORT}`);
+    gateway.server.on('error', () => { console.error('[nstack-fips-host] listener failed'); gateway.stop(); process.exitCode = 1; });
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => gateway.stop());
   } catch {
-    console.error('[tower-fips-host] unavailable: check public FIPS settings and native mesh interface/bind');
+    console.error('[nstack-fips-host] unavailable: check public FIPS settings and native mesh interface/bind');
     process.exitCode = 1;
   }
 }

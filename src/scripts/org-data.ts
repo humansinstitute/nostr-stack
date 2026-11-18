@@ -20,7 +20,7 @@ export async function requestOrgData(
 		base.password ||
 		!["http:", "https:"].includes(base.protocol)
 	)
-		throw new Error("Invalid Tower URL");
+		throw new Error("Invalid NStack URL");
 	if (!/^[0-9a-f-]{36}$/i.test(input.workspace))
 		throw new Error("Workspace UUID required");
 	const method = input.method || "GET";
@@ -96,7 +96,7 @@ export async function requestOrgData(
 	}));
 	if (!response.ok)
 		throw Object.assign(
-			new Error(`Tower rejected org-data operation (${response.status})`),
+			new Error(`NStack rejected org-data operation (${response.status})`),
 			{ status: response.status, payload },
 		);
 	return payload;

@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "coworker-superbased-be",
+      "name": "nostr-stack",
       "dependencies": {
         "@aws-sdk/client-s3": "3.1162.0",
         "hono": "^4.7.0",

@@ -1,19 +1,19 @@
 # Nstack GRasp, relay, Blossom and service discovery
 
-Tower is the discovery boundary for the supported Nstack bundle. The canonical
+NStack is the discovery boundary for the supported Nstack bundle. The canonical
 public descriptor is `GET /.well-known/nstack.json`.
 
 The response schema is `org.wingman.nstack.services`, version `1`. It is public
-service metadata, not an authority grant. It contains the public Tower service
+service metadata, not an authority grant. It contains the public NStack service
 identity when configured, service origins, component/protocol versions,
 enabled NIPs/BUDs/capabilities and a bounded availability observation. It never
 contains workspace or user inventory, credentials, bearer tokens, signed
 events, internal health URLs or Docker names. Workspace discovery remains an
-authenticated Tower operation and Nostr Browser consent remains a separate
+authenticated NStack operation and Nostr Browser consent remains a separate
 browser boundary.
 
 Responses use `Cache-Control: public, max-age=30, stale-if-error=60` by default.
-The TTL is configurable with `NSTACK_DESCRIPTOR_CACHE_TTL_SECONDS`. Tower is
+The TTL is configurable with `NSTACK_DESCRIPTOR_CACHE_TTL_SECONDS`. NStack is
 `available` when it serves the descriptor. A configured sidecar is `available`
 or `unavailable` according to its internal protocol probe; when no valid probe
 URL is configured its status is `unknown`. A disabled service or one with a
@@ -21,7 +21,7 @@ missing/malformed public origin is omitted. A temporarily unhealthy configured
 service remains present with `unavailable`, so consumers can distinguish an
 outage from an unsupported service.
 
-Tower, the relay and Blossom start independently. Tower does not use Compose
+NStack, the relay and Blossom start independently. NStack does not use Compose
 startup dependencies for the sidecars: their loss must degrade the descriptor
 deterministically, not prevent authority and workspace APIs from starting.
 
@@ -29,21 +29,21 @@ deterministically, not prevent authority and workspace APIs from starting.
 
 The stack deliberately has two non-overlapping Blossom roles:
 
-- Tower retains its existing `GET|HEAD /<sha256>` compatibility route for
-  verified Tower objects. Private reads require BUD-11 or Tower NIP-98 plus the
+- NStack retains its existing `GET|HEAD /<sha256>` compatibility route for
+  verified NStack objects. Private reads require BUD-11 or NStack NIP-98 plus the
   existing object/Flight Deck ACL. Anonymous access exists only through an
   explicit Flight Deck publication or existing public object state.
 - The separate Blossom origin is the general-purpose protocol server. It owns
   objects uploaded through `/upload`, `/media` or `/mirror`, their BUD-11 owner
   rows, list/delete behavior, retention and reports. Those objects do not become
-  Tower storage objects or private Flight Deck files.
+  NStack storage objects or private Flight Deck files.
 
-Do not point Tower's legacy `BLOSSOM_PUBLIC_ORIGIN` at the sidecar unless an
+Do not point NStack's legacy `BLOSSOM_PUBLIC_ORIGIN` at the sidecar unless an
 operator has separately arranged byte replication/proxying. In the supported
-bundle it is unset (so Tower publishes its own origin). The full server is
+bundle it is unset (so NStack publishes its own origin). The full server is
 advertised with the separate `NSTACK_BLOSSOM_PUBLIC_ORIGIN`.
 
-The relay is likewise transport, not Tower authority. It persists ordinary
+The relay is likewise transport, not NStack authority. It persists ordinary
 signed NIP-01 events and supports publish/query/subscription. Publishing is
 restricted to the explicit `NOSTR_RELAY_PUBLISH_PUBKEYS` allowlist, NIP-42 is
 enabled, and event/subscription/frame/buffer limits are set in the generated
@@ -94,11 +94,11 @@ BLOSSOM_PUBLIC_DOMAIN=blossom.example.com
 BLOSSOM_PUBLISH_PUBKEY=<hex-pubkey>
 ```
 
-The default host listeners are loopback-only: Tower `3100`, relay `7777`, and
+The default host listeners are loopback-only: NStack `3100`, relay `7777`, and
 Blossom `3002`. Terminate TLS at the existing reverse proxy. Preserve WebSocket
 upgrade headers for the relay. Blossom and relay must remain at their domain
 root because their protocols define root paths. Do not route either over
-Tower's root path.
+NStack's root path.
 
 For a host-running Cloudflare Tunnel, target `ws://127.0.0.1:7777` for the
 relay and `http://127.0.0.1:3002` for Blossom. Ports `8080` and `3000` are
@@ -107,7 +107,7 @@ container-internal and are not the host tunnel targets.
 This service does not automatically push local uploads to a third-party
 Blossom server. Cross-server replication must be initiated by a client with a
 publisher-authorized BUD-11 signature (for example, a dual-publish or remote
-mirror workflow). Never place a user's private Nostr key in Tower merely to
+mirror workflow). Never place a user's private Nostr key in NStack merely to
 replicate blobs.
 
 Validate interpolation without printing resolved secrets:
@@ -222,7 +222,7 @@ does not restore them.
 Public hashes are shared by identical bytes: `public` (and `blossom_url`) can
 stay true after your `DELETE` if someone else published the same bytes, and
 downloaded copies cannot be recalled. Clients that want a limited audience must
-publish ciphertext under a generic filename. Tower does not interpret the
+publish ciphertext under a generic filename. NStack does not interpret the
 payload or any audience setting.
 
 ## GRasp discovery

@@ -2,15 +2,15 @@
 
 ## Purpose
 
-Tower currently owns encrypted record sync, workspace/group authority, storage metadata, service identity, and NIP-98 authenticated API access. We also have graph-memory use cases that are awkward to secure with a standalone Neo4j service because tenancy and principal isolation need to align with Tower's Nostr identities, workspace keys, group keys, and app namespaces.
+NStack currently owns encrypted record sync, workspace/group authority, storage metadata, service identity, and NIP-98 authenticated API access. We also have graph-memory use cases that are awkward to secure with a standalone Neo4j service because tenancy and principal isolation need to align with NStack's Nostr identities, workspace keys, group keys, and app namespaces.
 
-This document proposes an optional Postgres/Apache AGE graph backend inside Tower's deployment boundary. The goal is to support agent and team memory graphs while preserving Tower's existing access model:
+This document proposes an optional Postgres/Apache AGE graph backend inside NStack's deployment boundary. The goal is to support agent and team memory graphs while preserving NStack's existing access model:
 
 - personal memories must not leak to other users or their agents;
 - agent memories must be scoped to the agent npub that writes them;
 - shared memories must be scoped to explicit workspace groups;
 - app namespaces are client/application context, not memory owners;
-- access rules must be enforced by Tower and by Postgres Row Level Security.
+- access rules must be enforced by NStack and by Postgres Row Level Security.
 
 This document is intended to be build-ready for the first implementation pass, with a few explicit product/security questions called out at the end.
 
@@ -35,7 +35,7 @@ Deletes, property replacement/merge, node and edge upserts, schema snapshot, imp
 
 Before indexing, clients should call `GET /api/v4/graph/repository-checkpoints` with the same graph scope and required `source`. Optional `corpus_id` and `repository_id` filters select an exact checkpoint for skip-unchanged and `base_sha` decisions; either can also be used independently for discovery. The route accepts the standard `workspace_owner_npub`, `visibility`, `owner_npub`, `actor_npub`/`agent_npub`, `source_app_npub`, and `group_id` filters plus a bounded `limit`. It uses the normal graph allowlist, NIP-98 request resolution, workspace/app/group checks, and graph RLS identity. Malformed filters return `400`, unauthorized requested actor/workspace/app scopes return `403`, and valid filters that have no visible checkpoint return an empty `checkpoints` array. Responses contain only repository identity, head/schema state, parser/index metadata, and `updated_at`; internal owner and writer columns are intentionally omitted.
 
-Cross-repository edges are not accepted by this contract: both endpoints must have the declared prefix. If legacy graph data contains such an edge, deletion of its endpoint is rejected with `graph_delta_cross_repository_edge`; Tower never silently deletes another repository's relationship or node.
+Cross-repository edges are not accepted by this contract: both endpoints must have the declared prefix. If legacy graph data contains such an edge, deletion of its endpoint is rejected with `graph_delta_cross_repository_edge`; NStack never silently deletes another repository's relationship or node.
 
 For repo-local markdown projections of graph-backed docs, see `docs/tower_managed_docs.md`.
 
@@ -44,24 +44,24 @@ For repo-local markdown projections of graph-backed docs, see `docs/tower_manage
 - Agents write memories as the agent npub/nsec they control.
 - Every agent npub has a personal graph space.
 - App namespaces do not own memories; they are optional source attribution only.
-- Group memory is readable by principals that currently have access to the group key through Tower membership/key resolution.
+- Group memory is readable by principals that currently have access to the group key through NStack membership/key resolution.
 - Group memory uses stable `group_id` for ACL and `group_epoch`/`group_npub` for encryption metadata.
 - Workspace admins can inspect graph usage/counts, but they do not automatically read agent personal memory.
-- Graph memory is not a public billable resource in the first build; it is a self-hosted/private Tower feature.
+- Graph memory is not a public billable resource in the first build; it is a self-hosted/private NStack feature.
 - Graph use is gated by `GRAPH_ALLOWED_NPUBS`.
 - Personal agent memories are owned by the agent npub and may omit workspace context.
-- Group memories include workspace context because Tower groups belong to a workspace.
+- Group memories include workspace context because NStack groups belong to a workspace.
 
 ## High-Level Shape
 
-Use a separate AGE-enabled Postgres database for graph memory, with Tower as the only supported API entry point.
+Use a separate AGE-enabled Postgres database for graph memory, with NStack as the only supported API entry point.
 
 ```text
 Client / agent / app
   signs NIP-98 request
         |
         v
-Tower API
+NStack API
   validates signer
   resolves real user, workspace key, app namespace, group membership
   opens graph transaction
@@ -74,27 +74,27 @@ Graph Postgres + Apache AGE
   AGE graph labels/edges for traversal
 ```
 
-Do not expose raw database credentials or unrestricted Cypher to agents. Tower remains the authority boundary.
+Do not expose raw database credentials or unrestricted Cypher to agents. NStack remains the authority boundary.
 
 ## Docker / Database Layout
 
 Preferred first deployment:
 
 ```text
-wingman-tower-postgres        existing Tower database
+wingman-tower-postgres        existing NStack database
 wingman-tower-graph-postgres  AGE-enabled graph database
-wingman-tower-b3              Tower API
+wingman-tower-b3              NStack API
 ```
 
 Reasons to keep graph storage separate:
 
 - AGE requires a custom Postgres image/extension lifecycle.
-- Graph migrations and experimental query workload should not risk the main Tower DB.
+- Graph migrations and experimental query workload should not risk the main NStack DB.
 - Credentials, backup cadence, retention, and resource limits can differ.
-- The graph backend stays optional for portable Tower installs.
+- The graph backend stays optional for portable NStack installs.
 - It gives us a clean path to disable graph features without touching record sync/storage.
 
-The graph service should use a separate database name, user, and password. Tower should connect with a non-owner role that does not bypass RLS.
+The graph service should use a separate database name, user, and password. NStack should connect with a non-owner role that does not bypass RLS.
 
 Possible environment variables:
 
@@ -115,7 +115,7 @@ GRAPH_ALLOWED_NPUBS=npub1agent...,npub1operator...
 The first implementation should not use one opaque `GRAPH_DATABASE_URL`, because the bootstrap flow needs both an admin connection and an app connection:
 
 - admin connection: creates database, extension, schema, owner/app roles, policies;
-- app connection: used by Tower request handlers and constrained by RLS.
+- app connection: used by NStack request handlers and constrained by RLS.
 
 ### Compose Service
 
@@ -139,7 +139,7 @@ Add this service to `docker-compose.prod.yml`:
       retries: 20
 ```
 
-Then add it as an optional Tower dependency:
+Then add it as an optional NStack dependency:
 
 ```yaml
   tower:
@@ -148,7 +148,7 @@ Then add it as an optional Tower dependency:
         condition: service_healthy
 ```
 
-For the first build, `GRAPH_ENABLED=true` should make this dependency mandatory in prod compose. If `GRAPH_ENABLED=false`, Tower should start without a graph DB and all graph routes should return `404` or `501` with `graph_disabled`.
+For the first build, `GRAPH_ENABLED=true` should make this dependency mandatory in prod compose. If `GRAPH_ENABLED=false`, NStack should start without a graph DB and all graph routes should return `404` or `501` with `graph_disabled`.
 
 Add volume:
 
@@ -157,7 +157,7 @@ volumes:
   tower-graph-postgres-data:
 ```
 
-Tower environment additions:
+NStack environment additions:
 
 ```yaml
       GRAPH_ENABLED: ${GRAPH_ENABLED:-false}
@@ -197,9 +197,9 @@ Decision rule: prefer the official `apache/age:release_PG16_1.6.0` image pinned 
 
 ## Core Security Principle
 
-RLS should protect graph memory rows even if a Tower query is wrong. Tower should also perform explicit authorization before reaching the graph DB.
+RLS should protect graph memory rows even if a NStack query is wrong. NStack should also perform explicit authorization before reaching the graph DB.
 
-For each graph transaction Tower sets session-local identity values:
+For each graph transaction NStack sets session-local identity values:
 
 ```sql
 SET LOCAL app.workspace_owner_npub = 'npub...';
@@ -216,11 +216,11 @@ Definitions:
 - `user_npub`: resolved real user. For workspace session keys, this is the owning user.
 - `actor_npub`: effective acting identity. For agent memory writes this is the agent npub that controls the signing secret.
 - `source_app_npub`: verified app namespace, when useful for client attribution. It is not the memory owner.
-- `group_ids`: stable Tower group UUIDs the effective principal can read/write for this request.
+- `group_ids`: stable NStack group UUIDs the effective principal can read/write for this request.
 
-The graph DB role used by Tower must not own graph tables and must not have `BYPASSRLS`.
+The graph DB role used by NStack must not own graph tables and must not have `BYPASSRLS`.
 
-## Tower Files To Add / Change
+## NStack Files To Add / Change
 
 Concrete first-pass file layout:
 
@@ -294,7 +294,7 @@ Request handlers must never use the admin connection.
 
 ## Identity And Delegation
 
-Tower already has several identity layers:
+NStack already has several identity layers:
 
 - real user Nostr keys;
 - workspace user/session keys;
@@ -309,7 +309,7 @@ Graph memory should not authorize directly on `signer_npub` unless the signer is
 - agent keys resolve to `actor_npub`; every agent npub has its own personal graph space;
 - group access uses stable `group_id`, not rotating `group_npub`.
 
-This mirrors the existing Tower guidance: stable group UUIDs are durable ACL references; `group_npub` is crypto metadata.
+This mirrors the existing NStack guidance: stable group UUIDs are durable ACL references; `group_npub` is crypto metadata.
 
 ## Ownership Model
 
@@ -317,7 +317,7 @@ Graph memory is npub-centric:
 
 - each agent has a personal graph space under its own `actor_npub`;
 - human users also have a personal graph space under `user_npub` when they write directly;
-- group memory is scoped to stable Tower `group_id`;
+- group memory is scoped to stable NStack `group_id`;
 - app namespaces do not own memories;
 - app namespaces may be recorded as `source_app_npub` metadata for audit/debugging.
 
@@ -334,7 +334,7 @@ Do not create an `app` visibility class in the first build. App-scoped graph mem
 
 ## Allowlist And Workspace Mapping
 
-Graph memory is not a public billable resource in the first build. It is a self-hosted/private Tower feature available only to explicitly allowed npubs.
+Graph memory is not a public billable resource in the first build. It is a self-hosted/private NStack feature available only to explicitly allowed npubs.
 
 `GRAPH_ALLOWED_NPUBS` rules:
 
@@ -346,7 +346,7 @@ Graph memory is not a public billable resource in the first build. It is a self-
 Workspace mapping is contextual, not ownership:
 
 - personal agent memories may omit `workspace_owner_npub`;
-- group memories should include `workspace_owner_npub` because Tower groups belong to a workspace;
+- group memories should include `workspace_owner_npub` because NStack groups belong to a workspace;
 - workspace context can be used for export/admin counts;
 - workspace admins can inspect counts/metadata for group/workspace-scoped memories, not agent personal memory;
 - no billing account is attached to graph memory in the first build.
@@ -360,7 +360,7 @@ Group memory access needs two separate concepts:
 1. Authorization to fetch graph rows.
 2. Ability to decrypt graph payloads.
 
-Tower should authorize graph row reads by stable `group_id` and current/relevant group membership, not merely by possession of any old `group_npub` secret. Possession of an old group nsec proves the holder once had access, but it should not be enough to keep fetching from Tower after removal.
+NStack should authorize graph row reads by stable `group_id` and current/relevant group membership, not merely by possession of any old `group_npub` secret. Possession of an old group nsec proves the holder once had access, but it should not be enough to keep fetching from NStack after removal.
 
 Recommended rules:
 
@@ -368,13 +368,13 @@ Recommended rules:
 - encrypted group payload metadata stores `group_epoch` and `group_npub`;
 - writes must target the current group epoch;
 - requests signed by a group key are accepted only when the signer is the current group epoch npub, unless an explicit historical-read mode is later added;
-- removed members stop receiving rows from Tower after removal/rotation, even if they cached an old group nsec;
-- existing members need historical epoch keys to decrypt older memories, matching Tower record payload behavior;
+- removed members stop receiving rows from NStack after removal/rotation, even if they cached an old group nsec;
+- existing members need historical epoch keys to decrypt older memories, matching NStack record payload behavior;
 - re-added members should receive only current/future epoch keys unless an admin intentionally rewraps historical memory.
 
-This means "anyone who can download the current group nsec can see group memory in principle", while still preserving revocation at Tower's serving boundary.
+This means "anyone who can download the current group nsec can see group memory in principle", while still preserving revocation at NStack's serving boundary.
 
-For first build, prefer user/agent NIP-98 auth plus Tower-resolved group membership. Direct group-key-signed graph requests can be a phase 2 addition, because they require careful current-epoch validation.
+For first build, prefer user/agent NIP-98 auth plus NStack-resolved group membership. Direct group-key-signed graph requests can be a phase 2 addition, because they require careful current-epoch validation.
 
 ## Relational Tables As Authority
 
@@ -449,7 +449,7 @@ CREATE INDEX IF NOT EXISTS idx_graph_memory_acl_memory
   ON graph_memory_acl(memory_id);
 ```
 
-For shared/team memory, `graph_memory_acl.group_id` points at Tower's stable group UUID. Tower can periodically mirror current group membership into the graph DB, or each transaction can pass `app.group_ids` from the main Tower DB after auth resolution.
+For shared/team memory, `graph_memory_acl.group_id` points at NStack's stable group UUID. NStack can periodically mirror current group membership into the graph DB, or each transaction can pass `app.group_ids` from the main NStack DB after auth resolution.
 
 ### Graph Entity Tables
 
@@ -740,7 +740,7 @@ Example search:
 }
 ```
 
-Tower should narrow requested scopes to what the authenticated principal can actually access.
+NStack should narrow requested scopes to what the authenticated principal can actually access.
 
 ### Concrete First API
 
@@ -770,7 +770,7 @@ Request:
   "body_ciphertext": "ciphertext",
   "metadata": {},
   "entities": [
-    { "entity_type": "project", "entity_key": "wingman-tower", "display_name": "Wingman Tower", "relation": "mentions" }
+    { "entity_type": "project", "entity_key": "wingman-tower", "display_name": "NStack", "relation": "mentions" }
   ],
   "acl": [
     { "group_id": "uuid", "access": "read" }
@@ -828,7 +828,7 @@ limit optional default 100 max 500
 offset optional default 0
 ```
 
-Tower passes filters to graph DB. RLS is still responsible for final row visibility.
+NStack passes filters to graph DB. RLS is still responsible for final row visibility.
 
 Response:
 
@@ -864,7 +864,7 @@ OpenAPI must document the routes and error codes:
 
 ### Auth Resolution Helper
 
-Add a graph-specific helper that composes existing Tower auth behavior:
+Add a graph-specific helper that composes existing NStack auth behavior:
 
 ```ts
 type GraphIdentityContext = {
@@ -921,7 +921,7 @@ There are two plausible memory payload modes:
 1. Plaintext graph metadata, encrypted body.
 2. Fully encrypted memory payload, with only minimal cleartext indexing.
 
-For shared/team memory, group encryption should mirror Tower records:
+For shared/team memory, group encryption should mirror NStack records:
 
 - clear ACL metadata uses stable `group_id`;
 - encrypted payloads are wrapped to group keys;
@@ -940,23 +940,23 @@ Future phase: add embeddings/vector indexes only after we have a clear encryptio
 
 ### Markdown Docs Projection
 
-Tower graph should remain the canonical store for graph-backed docs, memory, relationships, history, and ACL. Repo-local markdown is a generated working projection for humans and agents.
+NStack graph should remain the canonical store for graph-backed docs, memory, relationships, history, and ACL. Repo-local markdown is a generated working projection for humans and agents.
 
 The companion design in `docs/tower_managed_docs.md` defines the convention:
 
 - a repo opts in with `.wingman-tower.yml`;
-- when opted in, `docs/` is Tower-managed;
+- when opted in, `docs/` is NStack-managed;
 - local edits under `docs/` are disposable and may be overwritten;
-- durable edits go through Tower/Yoke APIs or a Wingman skill;
+- durable edits go through NStack/Yoke APIs or a Wingman skill;
 - `docs/` should be added to `.gitignore`;
-- Tower stores the graph relationships, document versions, permissions, and history.
+- NStack stores the graph relationships, document versions, permissions, and history.
 
 This keeps the useful agent surface of repo-near markdown without making local files a second graph database.
 
 ### Phase 1: Optional Graph DB
 
 - Add graph Postgres/AGE Docker service.
-- Add Tower config/env validation.
+- Add NStack config/env validation.
 - Add `GRAPH_ALLOWED_NPUBS` and route-level allowlist enforcement.
 - Add graph DB migration runner.
 - Add health/status output for graph availability.
@@ -966,13 +966,13 @@ This keeps the useful agent surface of repo-near markdown without making local f
 
 - Create `graph_memories` and ACL tables.
 - Add RLS policies.
-- Add Tower transaction helper that sets `app.*` identity settings.
+- Add NStack transaction helper that sets `app.*` identity settings.
 - Add tests proving user/agent/group isolation.
 
 ### Phase 3: Allowlisted Memory API
 
 - Add create/list/get routes.
-- Validate NIP-98, workspace keys, app keys, and group membership through existing Tower auth paths.
+- Validate NIP-98, workspace keys, app keys, and group membership through existing NStack auth paths.
 - Store encrypted payloads and clear minimal metadata.
 - Add OpenAPI entries.
 
@@ -1040,7 +1040,7 @@ Implementation is build-ready when these are complete:
 
 ## Backup / Restore
 
-Graph DB must be backed up separately from the primary Tower DB. In the first build this is self-hosted, private, operator-owned infrastructure; there is no public billing account attached to graph memory.
+Graph DB must be backed up separately from the primary NStack DB. In the first build this is self-hosted, private, operator-owned infrastructure; there is no public billing account attached to graph memory.
 
 Minimum production note:
 
@@ -1058,7 +1058,7 @@ Restore should recreate the AGE extension and graph schema before loading data i
 
 - AGE/RLS behavior through Cypher may not be sufficient as the only isolation layer.
 - Cleartext graph metadata can leak sensitive facts even if bodies are encrypted.
-- Group removal and epoch rotation semantics must be consistent with Tower record sync.
+- Group removal and epoch rotation semantics must be consistent with NStack record sync.
 - Workspace session keys and agent keys need explicit resolution rules or memories may be attributed to the wrong principal.
 - Allowlist membership grants use of the infra, not group access; group membership and key epoch revocation still need separate enforcement.
 - Agent memory ownership must remain npub-centric or workspace admins may accidentally become privileged over personal agent graphs.
@@ -1069,10 +1069,10 @@ Restore should recreate the AGE extension and graph schema before loading data i
 - How do we model a spouse/family/shared agent that has access to some shared memories but not personal memories?
 - Should group memory be readable by all current group members, or only members with a specific `graph_memory` capability? Current decision: all current group members can read.
 - Do we need per-memory write locks/checkouts similar to document records?
-- How will graph data be exported/imported as part of a portable Tower backend?
+- How will graph data be exported/imported as part of a portable NStack backend?
 - Which exact digest of `apache/age:release_PG16_1.6.0` do we want to pin for production?
-- Do we need a new Tower table for agent delegation before allowing `actor_npub != signer_npub`?
+- Do we need a new NStack table for agent delegation before allowing `actor_npub != signer_npub`?
 
 ## Current Recommendation
 
-Build this as an optional separate AGE-enabled Postgres service managed by a self-hosted Tower. Gate graph routes with `GRAPH_ALLOWED_NPUBS`, use relational RLS tables as the hard security boundary, and treat AGE as a traversal/indexing layer behind allowlisted Tower APIs. Do not expose direct Cypher to agents until we have proven AGE label/edge RLS behavior and have a safe query sandbox.
+Build this as an optional separate AGE-enabled Postgres service managed by a self-hosted NStack. Gate graph routes with `GRAPH_ALLOWED_NPUBS`, use relational RLS tables as the hard security boundary, and treat AGE as a traversal/indexing layer behind allowlisted NStack APIs. Do not expose direct Cypher to agents until we have proven AGE label/edge RLS behavior and have a safe query sandbox.

@@ -1,7 +1,7 @@
 /**
  * Service identity bootstrap.
  *
- * On startup, ensures the SuperBased instance has a stable Nostr keypair.
+ * On startup, ensures the NStack instance has a stable Nostr keypair.
  * If SUPERBASED_SERVICE_NSEC is missing from .env, generates a new one.
  * If the nsec exists but derived pubkey/npub values are stale, recomputes them.
  * Persists all three values back to .env idempotently.

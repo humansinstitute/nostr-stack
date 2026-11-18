@@ -1,8 +1,8 @@
-# Tower Postgres App Backend Design
+# NStack Postgres App Backend Design
 
 ## Purpose
 
-Tower should provide a plaintext, schema-enforced Postgres backend for Wingman apps and WApps over HTTPS.
+NStack should provide a plaintext, schema-enforced Postgres backend for client apps and WApps over HTTPS.
 
 ## Personal Daily Scope
 
@@ -14,7 +14,7 @@ Owners can read and write their own Daily Scope. Agents can read or write a
 human owner's Daily Scope only through explicit rows in
 `flightdeck_pg_daily_scope_agent_access`; normal workspace agent membership and
 channel grants do not confer Daily Scope access. Yoke is not part of this path:
-agents should use the typed Flight Deck PG/Tower routes directly.
+agents should use the typed Flight Deck PG/NStack routes directly.
 
 The Daily Scope API supports:
 
@@ -28,14 +28,14 @@ The Daily Scope API supports:
 - `GET/POST /api/v4/flightdeck-pg/workspaces/:workspaceId/daily-scope/agent-access`
   for the owner's personal My Agents toggle.
 
-This is a special Tower backend mode outside encrypted record sync. It is for apps that currently use a local SQLite database and need:
+This is a special NStack backend mode outside encrypted record sync. It is for apps that currently use a local SQLite database and need:
 
 - concurrent access;
 - simple CRUD APIs;
 - real tables and columns;
 - type safety stronger than encrypted record payloads;
 - easy backup, export, inspection, and migration;
-- Tower-mediated row-level access by workspace, app, user, and group.
+- NStack-mediated row-level access by workspace, app, user, and group.
 
 Example apps:
 
@@ -47,51 +47,51 @@ Example apps:
 The core mental model is:
 
 ```text
-Tower
+NStack
   workspace
     app_npub
       tables
         rows
 ```
 
-Tower owns authentication, schema activation, table creation, SQL generation, and row-level access. Apps do not receive raw Postgres credentials and do not submit arbitrary SQL.
+NStack owns authentication, schema activation, table creation, SQL generation, and row-level access. Apps do not receive raw Postgres credentials and do not submit arbitrary SQL.
 
 ## Backend Modes
 
-Tower should keep these backend modes distinct:
+NStack should keep these backend modes distinct:
 
-| Mode | Payload visibility to Tower | Purpose | Contract |
+| Mode | Payload visibility to NStack | Purpose | Contract |
 | --- | --- | --- | --- |
 | Encrypted record sync | Opaque ciphertext | shared workspace materialization for Flight Deck/Yoke | schema-light records, client translators own meaning |
 | Storage | metadata visible, object content external | files/blobs | explicit object lifecycle and ACLs |
 | Graph memory | selected fields visible | memory and graph traversal | graph/memory ACLs |
 | Postgres app backend | schema and row data visible | app/WApp operational backend | typed tables, CRUD, constraints, queries |
 
-The Postgres app backend is not end-to-end encrypted. Tower can inspect schemas and rows by design. That visibility is what allows Tower to validate, index, query, back up, and migrate app data.
+The Postgres app backend is not end-to-end encrypted. NStack can inspect schemas and rows by design. That visibility is what allows NStack to validate, index, query, back up, and migrate app data.
 
-Apps can still store encrypted values in specific columns, but Tower can only treat those columns as opaque strings or bytes. Any field that must be filtered, sorted, constrained, referenced, or validated should be plaintext to Tower.
+Apps can still store encrypted values in specific columns, but NStack can only treat those columns as opaque strings or bytes. Any field that must be filtered, sorted, constrained, referenced, or validated should be plaintext to NStack.
 
 ## Design Decision
 
-Use **Tower-managed typed Postgres tables per workspace/app/table** as the primary model.
+Use **NStack-managed typed Postgres tables per workspace/app/table** as the primary model.
 
 Do not use one global JSONB table as the primary app backend. Do not make generic document storage the main abstraction.
 
-Use the existing main Tower Postgres database for v1. Do not add a new Docker service or a separate app-backend database in the first implementation.
+Use the existing main NStack Postgres database for v1. Do not add a new Docker service or a separate app-backend database in the first implementation.
 
 Reasons:
 
-- app backend access depends on Tower workspace, app, user, and group tables already in the main database;
+- app backend access depends on NStack workspace, app, user, and group tables already in the main database;
 - same-database transactions can update metadata and generated app tables atomically;
-- backups stay simple because one Tower database contains workspace authority plus app backend state;
+- backups stay simple because one NStack database contains workspace authority plus app backend state;
 - no extra connection pools, credentials, health checks, or compose dependencies are needed;
 - local and self-hosted deployments stay easy.
 
-Generated app tables live in a dedicated Postgres schema inside the main Tower DB:
+Generated app tables live in a dedicated Postgres schema inside the main NStack DB:
 
 ```text
 database: coworker_v4
-schema:   public       -- Tower authority, records, groups, metadata
+schema:   public       -- NStack authority, records, groups, metadata
 schema:   appdb        -- generated app backend tables
 ```
 
@@ -122,19 +122,19 @@ appdb.w_ab12_a_cd34_t_people
 appdb.w_ab12_a_cd34_t_survey_responses
 ```
 
-Tower metadata maps logical names to physical names. Apps only use logical table names through Tower APIs.
+NStack metadata maps logical names to physical names. Apps only use logical table names through NStack APIs.
 
 ## Resolved Decisions
 
-- Physical table names should be hash-based/generated by Tower. Human-readable names live in Tower metadata and API/table-viewer surfaces.
-- App backend schemas are workspace-local. In product terms, the workspace is the business/customer Tower, and that workspace owns its app backends.
-- Table data should be inspectable through explicit Tower/WApp table viewer surfaces rather than raw Postgres credentials.
+- Physical table names should be hash-based/generated by NStack. Human-readable names live in NStack metadata and API/table-viewer surfaces.
+- App backend schemas are workspace-local. In product terms, the workspace is the business/customer NStack, and that workspace owns its app backends.
+- Table data should be inspectable through explicit NStack/WApp table viewer surfaces rather than raw Postgres credentials.
 - App uninstall should disable APIs immediately and retain physical tables until a retention/export window expires.
 - The first implementation should prioritize a simple SQLite replacement: typed tables, CRUD, constrained queries, concurrent writes, backup/export, and easy inspection.
 
 ## Why Typed Tables
 
-Most target apps already think in SQLite tables. A Tower app backend should preserve that model:
+Most target apps already think in SQLite tables. A NStack app backend should preserve that model:
 
 ```sql
 households(id, name, postcode, status)
@@ -177,7 +177,7 @@ JSONB should not be the whole storage model for serious app state.
 
 ### Workspace
 
-The Tower workspace boundary:
+The NStack workspace boundary:
 
 ```text
 workspace_owner_npub
@@ -214,13 +214,13 @@ customers
 tickets
 ```
 
-Tower generates the physical Postgres table and stores the mapping.
+NStack generates the physical Postgres table and stores the mapping.
 
 ### Row
 
-Every row has Tower security and lifecycle columns plus app-defined columns.
+Every row has NStack security and lifecycle columns plus app-defined columns.
 
-Standard Tower columns:
+Standard NStack columns:
 
 ```sql
 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -246,9 +246,9 @@ status TEXT NOT NULL
 
 ## Metadata Tables
 
-Tower core migrations create metadata tables. These are normal Tower schema migrations.
+NStack core migrations create metadata tables. These are normal NStack schema migrations.
 
-These tables should be added to the main Tower database through:
+These tables should be added to the main NStack database through:
 
 - `src/schema/001_init.sql`;
 - `src/schema/ensure-runtime-schema.ts`;
@@ -317,11 +317,11 @@ CREATE TABLE workspace_app_db_migrations (
 );
 ```
 
-The physical app tables live in `appdb`. The metadata stays with Tower's normal tables.
+The physical app tables live in `appdb`. The metadata stays with NStack's normal tables.
 
 ## Schema Shape
 
-Apps define tables and columns in a restricted schema format. Tower validates this schema and generates SQL.
+Apps define tables and columns in a restricted schema format. NStack validates this schema and generates SQL.
 
 Example Census schema:
 
@@ -470,7 +470,7 @@ Start with a small type system:
 | `date` | `DATE` | calendar date |
 | `timestamptz` | `TIMESTAMPTZ` | timestamps |
 | `uuid` | `UUID` | UUID values |
-| `npub` | `TEXT` | validated by Tower as npub-like |
+| `npub` | `TEXT` | validated by NStack as npub-like |
 | `jsonb` | `JSONB` | flexible payload/metadata |
 
 Do not support arbitrary SQL types in v1.
@@ -491,7 +491,7 @@ POST /api/v4/workspaces/{workspaceOwnerNpub}/apps
 POST /api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/db/schemas
 ```
 
-3. Tower validates:
+3. NStack validates:
 
 - app exists in `workspace_apps`;
 - actor can manage the workspace;
@@ -501,27 +501,27 @@ POST /api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/db/schemas
 - no raw SQL exists in the schema;
 - migration from the active version is allowed.
 
-4. Tower computes a canonical `schema_hash`.
+4. NStack computes a canonical `schema_hash`.
 
-5. Tower generates a DDL plan.
+5. NStack generates a DDL plan.
 
-6. Tower activates the schema:
+6. NStack activates the schema:
 
 ```text
 POST /api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/db/schemas/{schemaVersion}/activate
 ```
 
-7. Tower executes the DDL plan and stores table metadata.
+7. NStack executes the DDL plan and stores table metadata.
 
-8. Tower marks the schema active.
+8. NStack marks the schema active.
 
-Activation should be atomic where Postgres allows it. If index creation needs `CONCURRENTLY`, Tower should run that as a controlled async step and keep the schema in a `pending_index` or similar state until complete.
+Activation should be atomic where Postgres allows it. If index creation needs `CONCURRENTLY`, NStack should run that as a controlled async step and keep the schema in a `pending_index` or similar state until complete.
 
 Implementation detail:
 
 - schema publish stores only metadata and a DDL plan;
-- schema activation executes the DDL plan using Tower's main DB connection;
-- DDL identifiers are generated by Tower and quoted with a structured identifier helper;
+- schema activation executes the DDL plan using NStack's main DB connection;
+- DDL identifiers are generated by NStack and quoted with a structured identifier helper;
 - app-supplied names are validated and stored as logical metadata only;
 - activation records every generated statement hash in `workspace_app_db_migrations`;
 - failed activation leaves the previous active schema untouched.
@@ -549,7 +549,7 @@ Given logical table:
 }
 ```
 
-Tower may generate:
+NStack may generate:
 
 ```sql
 CREATE TABLE appdb.w_ab12_a_cd34_t_households (
@@ -583,11 +583,11 @@ CREATE INDEX idx_w_ab12_a_cd34_households_postcode
   ON appdb.w_ab12_a_cd34_t_households(postcode);
 ```
 
-Apps never call this SQL directly. Tower generates and executes it.
+Apps never call this SQL directly. NStack generates and executes it.
 
 ## API Surface
 
-All app backend routes require NIP-98 auth. Tower resolves workspace session keys to real `user_npub` like the rest of Tower.
+All app backend routes require NIP-98 auth. NStack resolves workspace session keys to real `user_npub` like the rest of NStack.
 
 ### Schema APIs
 
@@ -620,7 +620,7 @@ PUT    /api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/tables/{tableName}
 DELETE /api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/tables/{tableName}/rows/{rowId}
 ```
 
-Tower should support:
+NStack should support:
 
 - `If-Match` for optimistic concurrency;
 - `Idempotency-Key` for safe retries;
@@ -661,7 +661,7 @@ Allowed operators:
 Rules:
 
 - columns must exist in the active schema;
-- Tower injects row visibility filters;
+- NStack injects row visibility filters;
 - max `limit` defaults to 100 and caps at 500;
 - unindexed expensive queries can be rejected later if needed;
 - result shape is logical column names, not physical table internals.
@@ -724,11 +724,11 @@ Request:
 }
 ```
 
-Tower validates all operations, then writes in one Postgres transaction.
+NStack validates all operations, then writes in one Postgres transaction.
 
 ## Row-Level Security Model
 
-Tower enforces access before executing queries. Later, Postgres RLS should be added as defense in depth.
+NStack enforces access before executing queries. Later, Postgres RLS should be added as defense in depth.
 
 Row visibility:
 
@@ -740,32 +740,32 @@ Row visibility:
 
 ### Workspace Visibility Options
 
-Option A: reuse Tower workspace groups.
+Option A: reuse NStack workspace groups.
 
 ```text
-workspace-visible row = visible to any current member of at least one Tower group in the workspace
-group-visible row     = visible to current members of the referenced Tower group_id
+workspace-visible row = visible to any current member of at least one NStack group in the workspace
+group-visible row     = visible to current members of the referenced NStack group_id
 ```
 
 Benefits:
 
-- aligns with current Tower access model;
+- aligns with current NStack access model;
 - avoids building a second membership system for v1;
 - app rows can reuse existing workspace onboarding/offboarding;
-- Postgres RLS can reuse Tower group membership tables;
+- Postgres RLS can reuse NStack group membership tables;
 - works well for operational apps like Autopilot where workspace membership is enough.
 
 Downsides:
 
-- Flight Deck/Tower groups may not match app-domain groups;
+- Flight Deck/NStack groups may not match app-domain groups;
 - apps such as Census may need roles/teams that are not Flight Deck groups;
-- app-specific permissions could become awkward if forced through Tower groups.
+- app-specific permissions could become awkward if forced through NStack groups.
 
 Option B: app-native membership and roles.
 
 ```text
 workspace-visible row = visible to app users according to app-managed membership tables
-group-visible row     = visible to app-defined group/role membership, not necessarily Tower group_id
+group-visible row     = visible to app-defined group/role membership, not necessarily NStack group_id
 ```
 
 Benefits:
@@ -776,17 +776,17 @@ Benefits:
 
 Downsides:
 
-- Tower must still have a base rule for who can call the app backend at all;
+- NStack must still have a base rule for who can call the app backend at all;
 - RLS becomes more complex because app-defined membership tables vary by schema;
-- offboarding must bridge Tower membership and app-native membership;
+- offboarding must bridge NStack membership and app-native membership;
 - harder to make generic admin/export tooling explain access.
 
 Recommended v1 compromise:
 
-- Tower membership gates access to the installed app backend.
+- NStack membership gates access to the installed app backend.
 - `private` always means `owner_npub = resolved user_npub`.
-- `workspace` means any Tower workspace member can see the row.
-- `group` uses Tower `group_id` only when the app wants to reuse Tower groups.
+- `workspace` means any NStack workspace member can see the row.
+- `group` uses NStack `group_id` only when the app wants to reuse NStack groups.
 - Apps that need app-native roles/groups should model them as normal app tables and enforce app-domain permissions in app logic first.
 - A later version can add declarative app-native policies once we see repeated patterns.
 
@@ -877,9 +877,9 @@ This is enough for Autopilot daemons and WApp background jobs without granting b
 
 There are two migration types.
 
-### Tower Core Migrations
+### NStack Core Migrations
 
-These are normal Tower migrations for metadata:
+These are normal NStack migrations for metadata:
 
 - `workspace_app_db_schemas`;
 - `workspace_app_db_tables`;
@@ -887,11 +887,11 @@ These are normal Tower migrations for metadata:
 - app backend helper tables;
 - `appdb` schema creation.
 
-They live in Tower source and run like other schema changes.
+They live in NStack source and run like other schema changes.
 
 ### App Schema Migrations
 
-Apps publish schema versions. Tower generates safe DDL plans.
+Apps publish schema versions. NStack generates safe DDL plans.
 
 Automatically allowed:
 
@@ -944,17 +944,17 @@ Example migration request:
 }
 ```
 
-Tower validates the plan, stores it, and applies generated SQL.
+NStack validates the plan, stores it, and applies generated SQL.
 
 ## Backups, Export, And Migration Out
 
-Generated app tables are authoritative data. They must be included in Tower backups.
+Generated app tables are authoritative data. They must be included in NStack backups.
 
-Because v1 uses the existing main Tower Postgres database, the default backup mechanism does not need a new container or a new backup target. Existing Postgres volume snapshots or `pg_dump` flows should include `appdb.*` automatically.
+Because v1 uses the existing main NStack Postgres database, the default backup mechanism does not need a new container or a new backup target. Existing Postgres volume snapshots or `pg_dump` flows should include `appdb.*` automatically.
 
 A normal Postgres backup captures:
 
-- Tower workspace/group/auth tables;
+- NStack workspace/group/auth tables;
 - app backend metadata tables;
 - generated `appdb.*` tables;
 - generated indexes and constraints.
@@ -976,7 +976,7 @@ For Census:
 workspace_owner_npub + census app_npub + households table
 ```
 
-maps to a physical table in `appdb`. To migrate it elsewhere, Tower can export:
+maps to a physical table in `appdb`. To migrate it elsewhere, NStack can export:
 
 - schema JSON;
 - table DDL;
@@ -994,9 +994,9 @@ No new Docker service is required for v1.
 Current default stack remains:
 
 ```text
-wingman-tower-postgres   -- main Tower DB; also contains appdb schema
+wingman-tower-postgres   -- main NStack DB; also contains appdb schema
 wingman-tower-minio      -- storage objects
-wingman-tower-b3         -- Tower API
+wingman-tower-b3         -- NStack API
 ```
 
 Graph memory may still use its existing optional `wingman-tower-graph-postgres` service because it depends on Apache AGE and has a distinct lifecycle. The app backend does not need that separation.
@@ -1017,10 +1017,10 @@ Default local/self-hosted behavior should be enabled only after the feature is i
 
 ### Future Isolation Options
 
-If a deployment outgrows same-database app tables, Tower can add an isolation tier later:
+If a deployment outgrows same-database app tables, NStack can add an isolation tier later:
 
 1. same database, separate schema: default v1;
-2. same Postgres server, separate database per Tower or per large workspace;
+2. same Postgres server, separate database per NStack or per large workspace;
 3. separate Postgres service for app backend workloads;
 4. dedicated database for a high-volume app/customer.
 
@@ -1085,11 +1085,11 @@ Example:
 Install flow:
 
 1. Workspace manager installs/enables the WApp.
-2. Tower registers the `workspace_apps` row.
-3. Tower validates the WApp backend schema.
-4. Tower generates and applies table DDL.
-5. Tower activates the schema.
-6. Tower returns backend connection details.
+2. NStack registers the `workspace_apps` row.
+3. NStack validates the WApp backend schema.
+4. NStack generates and applies table DDL.
+5. NStack activates the schema.
+6. NStack returns backend connection details.
 
 Runtime connection details:
 
@@ -1149,13 +1149,13 @@ To avoid turning this into unsafe dynamic database hosting, enforce quotas:
 Also enforce naming rules:
 
 - logical names must be short ASCII identifiers;
-- physical names are generated by Tower;
+- physical names are generated by NStack;
 - user-supplied names are never interpolated directly into SQL;
 - every generated SQL statement is derived from validated schema AST.
 
 ### Table Proliferation Control
 
-This design intentionally creates real app tables, so Tower must control table growth.
+This design intentionally creates real app tables, so NStack must control table growth.
 
 Product rule:
 
@@ -1204,7 +1204,7 @@ Generated tables should be isolated and discoverable:
 - all generated tables live in `appdb`;
 - physical names are hash-based;
 - logical names live in `workspace_app_db_tables`;
-- workspace managers inspect tables through Tower table viewer/export APIs;
+- workspace managers inspect tables through NStack table viewer/export APIs;
 - direct Postgres operators can map physical names back to metadata.
 
 Every generated table should receive a Postgres comment for operator clarity:
@@ -1214,7 +1214,7 @@ COMMENT ON TABLE appdb.w_ab12_a_cd34_t_ef56 IS
 'workspace=npub1..., app=npub1..., table=households';
 ```
 
-Tower should include an app backend audit that detects:
+NStack should include an app backend audit that detects:
 
 - metadata exists but physical table is missing;
 - physical table exists without metadata;
@@ -1277,11 +1277,11 @@ Autopilot should start with:
 Migration path:
 
 1. Define Autopilot schema from current SQLite tables.
-2. Create Tower app namespace for Autopilot.
+2. Create NStack app namespace for Autopilot.
 3. Activate schema in a test workspace.
-4. Dual-write SQLite and Tower for a short period.
+4. Dual-write SQLite and NStack for a short period.
 5. Backfill SQLite rows through bulk transaction API.
-6. Switch reads to Tower.
+6. Switch reads to NStack.
 7. Keep SQLite as cache if useful, then remove or demote it.
 
 ## What Is Still Missing
@@ -1429,7 +1429,7 @@ Add inspection/export surfaces:
 
 - list app backend tables for a workspace/app;
 - show logical schema and physical mapping to workspace managers;
-- table viewer reads through Tower APIs and logical names;
+- table viewer reads through NStack APIs and logical names;
 - export app backend schema and data;
 - export one table;
 - mark app backend disabled;
@@ -1450,7 +1450,7 @@ Add:
 
 After service-level access is stable, add RLS defense in depth:
 
-- make Tower use a non-owner DB role for app table queries if practical;
+- make NStack use a non-owner DB role for app table queries if practical;
 - set transaction-local identity variables;
 - generate RLS policies on app tables;
 - keep service-level checks as the primary authorization logic.
@@ -1462,17 +1462,17 @@ Migrate Autopilot from SQLite:
 1. inventory current SQLite tables and queries;
 2. define Autopilot app backend schema;
 3. activate schema in a dev workspace;
-4. add a Tower-backed repository/adapter in Autopilot;
-5. dual-write SQLite and Tower;
-6. backfill SQLite data into Tower through bulk tx;
-7. switch reads to Tower;
+4. add a NStack-backed repository/adapter in Autopilot;
+5. dual-write SQLite and NStack;
+6. backfill SQLite data into NStack through bulk tx;
+7. switch reads to NStack;
 8. retain SQLite as cache if useful;
 9. remove or demote SQLite once stable.
 
 ## Remaining Questions
 
-- Should the v1 `workspace` visibility rule mean membership in any Tower workspace group, or should it be limited to the workspace default group?
-- Do we need app-native role/group policy declarations in v1, or is app logic plus Tower base membership enough for the first WApp backend pass?
+- Should the v1 `workspace` visibility rule mean membership in any NStack workspace group, or should it be limited to the workspace default group?
+- Do we need app-native role/group policy declarations in v1, or is app logic plus NStack base membership enough for the first WApp backend pass?
 - What retention window should disabled app backends use by default?
 - Should app table viewer access be workspace-manager only, or can apps grant table-viewer access to non-manager operators?
-- Should service identity registration live under app backend APIs, existing workspace app APIs, or a broader Tower delegation API?
+- Should service identity registration live under app backend APIs, existing workspace app APIs, or a broader NStack delegation API?

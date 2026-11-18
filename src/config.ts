@@ -14,7 +14,7 @@ function csvValues(value: string | undefined): string[] {
 function requiredNpubEnv(name: string): string {
   const value = String(process.env[name] || '').trim();
   if (!value.startsWith('npub1')) {
-    throw new Error(`${name} must be set to the Flight Deck app npub`);
+    throw new Error(`${name} must be set to the administrator npub`);
   }
   return value;
 }

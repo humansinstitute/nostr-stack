@@ -108,20 +108,20 @@ Request body includes:
 
 On prepare:
 
-1. Tower authenticates the caller as `authNpub`
-2. **Tower verifies upload authorization** (see "Who Can Upload" below):
+1. NStack authenticates the caller as `authNpub`
+2. **NStack verifies upload authorization** (see "Who Can Upload" below):
    - If no `owner_group_id` (workspace-owned): `authNpub` must be the workspace owner (`v4_workspaces.creator_npub`)
    - If `owner_group_id` is set (group-owned): `authNpub` must be a member of that group (checked via `v4_group_members` using the stable group UUID)
-3. Tower inserts a row with:
+3. NStack inserts a row with:
    - `owner_npub = request.owner_npub` (workspace npub — always set for billing/path)
    - `owner_group_id = request.owner_group_id` (stable group UUID, or null)
    - `created_by_npub = authNpub`
    - `access_group_ids = request.access_group_ids`
    - `is_public = request.is_public`
-4. Tower builds `storage_path` (keyed on `owner_npub`, i.e. workspace — consistent billing partition)
-5. Tower returns object metadata plus an upload URL
+4. NStack builds `storage_path` (keyed on `owner_npub`, i.e. workspace — consistent billing partition)
+5. NStack returns object metadata plus an upload URL
 
-**CHANGE from current:** Tower now requires `owner_npub` to resolve to a valid workspace. If `owner_group_id` is provided it must be a valid `v4_groups(id)` UUID belonging to that workspace. `authNpub` must be authorized to upload. Unauthorized uploads are rejected.
+**CHANGE from current:** NStack now requires `owner_npub` to resolve to a valid workspace. If `owner_group_id` is provided it must be a valid `v4_groups(id)` UUID belonging to that workspace. `authNpub` must be authorized to upload. Unauthorized uploads are rejected.
 
 Code references:
 
@@ -152,7 +152,7 @@ Complete only succeeds when both are true:
 - the row exists
 - `authNpub === created_by_npub`
 
-Then Tower checks that the physical blob exists at `storage_path` using the internal S3 client. If the blob is missing there, complete returns `null`, which the route currently surfaces as a generic `404`.
+Then NStack checks that the physical blob exists at `storage_path` using the internal S3 client. If the blob is missing there, complete returns `null`, which the route currently surfaces as a generic `404`.
 
 Complete does not check:
 
@@ -220,14 +220,14 @@ No new permission flags needed. The existing data model already has:
 - `v4_workspaces.creator_npub` — identifies workspace owner
 - `v4_group_members(group_id, member_npub)` — identifies group membership
 
-Tower resolves at prepare time:
+NStack resolves at prepare time:
 1. Verify `owner_npub` matches a `v4_workspaces.workspace_owner_npub`
 2. If `owner_group_id` is provided, verify it's a valid `v4_groups(id)` belonging to that workspace (`v4_groups.owner_npub` = workspace owner npub)
 3. If no `owner_group_id`: verify `authNpub === v4_workspaces.creator_npub`
 4. If `owner_group_id` set: verify `authNpub` is in `v4_group_members` for that `group_id`
 5. Else reject
 
-This replaces the current behavior where Tower does not verify workspace/group membership at all during prepare.
+This replaces the current behavior where NStack does not verify workspace/group membership at all during prepare.
 
 ## Who Can Read A Stored Object
 
@@ -243,7 +243,7 @@ A caller can read when any of the following is true:
 ### Group-based read check (updated)
 
 - `access_group_ids` contains stable `v4_groups(id)` UUIDs
-- Tower checks membership directly in `v4_group_members` by `group_id`
+- NStack checks membership directly in `v4_group_members` by `group_id`
 - No epoch resolution needed — the stable group UUID already points to the right group
 
 This is simpler than the current implementation which stores epoch `group_npub` and has to resolve backwards through `v4_group_epochs`. Using `group_id` directly means group key rotation does not affect storage ACL — membership in the logical group is all that matters.
@@ -330,7 +330,7 @@ Whether a stored object is encrypted depends on the client feature:
 - workspace avatars are uploaded as plain image bytes
 - pasted images are uploaded as plain image bytes unless the caller encrypts them first
 
-So storage encryption is currently client-feature-dependent, not enforced by Tower.
+So storage encryption is currently client-feature-dependent, not enforced by NStack.
 
 ## Download Behavior
 
@@ -338,7 +338,7 @@ Readable callers can fetch:
 
 - metadata: `GET /api/v4/storage/:objectId`
 - a presigned download URL: `GET /api/v4/storage/:objectId/download-url`
-- bytes directly through Tower: `GET /api/v4/storage/:objectId/content`
+- bytes directly through NStack: `GET /api/v4/storage/:objectId/content`
 
 `content` also requires:
 
@@ -501,5 +501,5 @@ Authorization failures during prepare return HTTP 403 with descriptive error mes
 - `access_group_npubs` column not dropped from DB yet (kept for backward compat during migration window)
 - No delete API added
 - No ACL update API added
-- Encryption remains client-side, not enforced by Tower
+- Encryption remains client-side, not enforced by NStack
 - `complete` and `PUT upload` still check `created_by_npub` only (no change to completion authorization)

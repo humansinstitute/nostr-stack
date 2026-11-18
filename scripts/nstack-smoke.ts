@@ -45,7 +45,7 @@ async function descriptorSmoke() {
   const descriptor = await response.json() as any;
   if (descriptor.schema !== 'org.wingman.nstack.services' || descriptor.schema_version !== 1) throw new Error('descriptor schema mismatch');
   const byId = new Map(descriptor.services.map((service: any) => [service.id, service]));
-  if (byId.get('tower')?.endpoint !== expectedTowerEndpoint) throw new Error('Tower descriptor endpoint mismatch');
+  if (byId.get('tower')?.endpoint !== expectedTowerEndpoint) throw new Error('NStack descriptor endpoint mismatch');
   if (byId.get('relay')?.endpoint !== expectedRelayEndpoint) throw new Error('relay descriptor endpoint mismatch');
   if (byId.get('blossom')?.endpoint !== expectedBlossomEndpoint) throw new Error('Blossom descriptor endpoint mismatch');
   if (!byId.get('relay')?.features?.nips?.includes(1)) throw new Error('relay does not advertise NIP-01');

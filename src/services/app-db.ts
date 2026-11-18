@@ -207,7 +207,7 @@ function assertNotReservedMigrationTarget(target: string, schemaName: string) {
     throw new AppDbError('migration_schema_forbidden', 400, 'migration may only reference the allocated app schema');
   }
   if (WAPP_DB_RESERVED_TABLES.has(objectName)) {
-    throw new AppDbError('migration_reserved_object', 400, 'migration may not modify Tower-managed migration history');
+    throw new AppDbError('migration_reserved_object', 400, 'migration may not modify NStack-managed migration history');
   }
 }
 
@@ -280,7 +280,7 @@ function assertDescriptorSigner(appNpub: string, signerNpub: string) {
   if (signerNpub === appNpub || (adminNpub && signerNpub === adminNpub) || (serviceNpub && signerNpub === serviceNpub)) {
     return;
   }
-  throw new AppDbError('app_or_admin_signer_required', 403, 'request must be signed by the app, Tower admin, or Tower service identity');
+  throw new AppDbError('app_or_admin_signer_required', 403, 'request must be signed by the app, NStack admin, or NStack service identity');
 }
 
 async function requireRegisteredApp(sql: DbClient, workspaceOwnerNpub: string, appNpub: string) {

@@ -1,12 +1,12 @@
 # Optional modules in progressive NStack setup
 
 The setup controller can create, configure, probe, stop, re-enable and replace
-four optional services independently of the local Tower UI. All are off by
+four optional services independently of the local NStack UI. All are off by
 default. This is an additive fresh-install lifecycle; it does not adopt the
 production Compose services or attach their existing volumes. Updating this
 source does not activate any service.
 
-The host controller owns `createModuleRuntime({project})`; Tower must never
+The host controller owns `createModuleRuntime({project})`; NStack must never
 receive its Docker socket. Public settings pass through
 `validateModuleSettings()` and contain only the full typed configuration below:
 
@@ -49,16 +49,16 @@ only the unique current container with the exact installation project and
 `com.docker.compose.service=tower` labels. This method validates every network's
 module/project ownership; it never accepts a caller-selected container/network.
 It disconnects disabled module networks without touching other networks. Call
-it again after Tower container recreation and after a controller-level rollback.
+it again after NStack container recreation and after a controller-level rollback.
 
 For enabled graph, the controller calls `runtime.graphEnvironment()` and stores
 its returned graph-only credentials in protected local state (0600), excluded
-from settings APIs, public status and operation journals. Tower must load this
+from settings APIs, public status and operation journals. NStack must load this
 before config evaluation and run its existing graph migrations. Only the
-controller obtains these credentials; sidecars receive no Tower bootstrap
+controller obtains these credentials; sidecars receive no NStack bootstrap
 credentials, signing keys or storage keys. The graph database's own readiness
-is distinct from successful Tower graph schema migration. The controller must
-verify Tower graph integration separately before claiming that feature ready.
+is distinct from successful NStack graph schema migration. The controller must
+verify NStack graph integration separately before claiming that feature ready.
 
 | Module | Container port | Host loopback port | Protocol and path |
 | --- | --- | --- | --- |
@@ -86,8 +86,8 @@ The client pins that endpoint's peer through universal `window.fipsTransport`;
 a failed selected FIPS endpoint does not trigger implicit HTTPS fallback.
 Local module probes do not attest remote HTTPS/FIPS reachability or ownership.
 
-Blossom has a full dedicated root origin. It does not replace Tower's ACL blob
-routes, change their authorization or publish private Tower attachments. Upload,
+Blossom has a full dedicated root origin. It does not replace NStack's ACL blob
+routes, change their authorization or publish private NStack attachments. Upload,
 mirror, delete, list and media auth reuse `deploy/nstack/blossom.yml`; uploads are
 restricted to the configured public publisher. Relay reuses the deployed
 SQLite/allowlist/NIP-42 settings, with a setup renderer permitting validated FIPS
@@ -157,10 +157,10 @@ NSTACK_MODULE_DOCKER_TEST=1 bun test tests/installation-modules.test.ts
 The second command requires the fixed images and free loopback ports above. It
 creates a unique disposable project, checks all four real services, auth denial,
 stop/re-enable persistence, protected graph credential persistence, injected
-replacement failure/rollback and exact Tower network attachment. Cleanup is
+replacement failure/rollback and exact NStack network attachment. Cleanup is
 limited to newly created resources carrying that unique project's labels.
-Tests never restart the existing Tower stack. The supervising manager must
-separately rebuild/restart the authorized local Tower installation and run its
+Tests never restart the existing NStack stack. The supervising manager must
+separately rebuild/restart the authorized local NStack installation and run its
 integration smoke checks before declaring shared-runtime validation complete.
 
 The managed full-Blossom adapter leaves upstream `publicDomain` empty: the
@@ -173,9 +173,9 @@ Blossom configuration while retaining data and other modules. The disposable
 `scripts/nstack-blossom-fips-smoke.ts` checks actual signed upload, exact descriptor
 origin, byte readback, signed deletion and anonymous upload denial over mesh.
 
-The controller restores approved, owned network attachments after Tower container
+The controller restores approved, owned network attachments after NStack container
 recreation. This never creates/replaces or starts a module outside signed apply.
-An approved graph enablement also runs the fixed Tower `graph:init` migration
+An approved graph enablement also runs the fixed NStack `graph:init` migration
 before committing readiness; credentials remain inside protected runtime/state
-volumes. Fresh graph enablement and forced Tower recreation are integration
+volumes. Fresh graph enablement and forced NStack recreation are integration
 checks, including a query as the restricted `nstack_graph_app` role.

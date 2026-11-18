@@ -139,7 +139,7 @@ unused first-administrator claim code. The file is written atomically with mode
 service identity; recovery refuses symlinks, hardlinks and unrelated preexisting
 files instead of overwriting them. Keep the folder and file private.
 
-Setup saves this file as soon as the running Tower can read its durable bootstrap
+Setup saves this file as soon as the running NStack can read its durable bootstrap
 state, while Compose may still be waiting for readiness, and refreshes it before
 registering the host helper or printing success. The file records readiness at the
 last check. If Terminal closes or Ctrl-C interrupts startup before this point, no
@@ -275,9 +275,9 @@ writes files. Removal requires Docker inspection and user-service access, even
 for an apparently absent installation. Shared volumes, foreign mounts/networks,
 unknown helper bindings, unsafe symlinks and unowned or non-private recovery files
 cause refusal. Recovery deletion verifies the public service identity from the
-selected Tower (including stopped containers), or the Docker daemon and durable
+selected NStack (including stopped containers), or the Docker daemon and durable
 bootstrap-volume generation binding written by current setup/recovery. A legacy
-recovery file whose Tower container is already gone cannot be verified: run
+recovery file whose NStack container is already gone cannot be verified: run
 setup/recovery with the same name on the intended Docker context first, then
 retry purge. A file from a different context/identity is never deleted.
 Resolve the reported attachment or file issue explicitly, then

@@ -31,8 +31,8 @@ export async function collectWorkspaceStorageUsage(workspaceId: string, db: Db =
   const categories = [
     unavailable('objects', 'S3 / object storage', 'Object metadata collection failed or exceeded its time budget.'),
     unavailable('database', 'Database', 'Database collection failed or exceeded its time budget.'),
-    unavailable('graph', 'Graph', 'Tower graph uses separate RLS-protected storage and owner-npub attribution. A complete workspace-UUID byte counter is not supported; whole-server disk and actor-visible subsets are not workspace usage.'),
-    unavailable('git', 'Git / Forgejo', 'Forgejo owns repositories and permissions. No authoritative repository-to-Tower-workspace mapping or workspace byte provider is configured.'),
+    unavailable('graph', 'Graph', 'NStack graph uses separate RLS-protected storage and owner-npub attribution. A complete workspace-UUID byte counter is not supported; whole-server disk and actor-visible subsets are not workspace usage.'),
+    unavailable('git', 'Git / Forgejo', 'Forgejo owns repositories and permissions. No authoritative repository-to-NStack-workspace mapping or workspace byte provider is configured.'),
     unavailable('grasp', 'GRASP', 'GRASP owns its repository and relay store independently (currently a private PoC). No supported workspace attribution and stored-byte provider exists.'),
     unavailable('other', 'Other stores', 'Legacy encrypted records, WApp namespaces, unlinked objects, backups and external stores do not have complete workspace-UUID attribution in this collector.'),
   ];
@@ -86,7 +86,7 @@ export async function collectWorkspaceStorageUsage(workspaceId: string, db: Db =
         if (Number(row?.conflicts) !== 0) throw new Error('Conflicting object sizes');
         return storedBytes(row?.bytes);
       });
-      categories[0] = { id: 'objects', label: 'S3 / object storage', bytes, status: 'partial', measurement: 'registered_bytes', reason: 'Completed object sizes registered in Tower and referenced by this workspace, including retained versions. Each storage path counted once; shared objects counted once within this workspace. Unlinked uploads, provider versions and backups excluded; not a bucket disk scan.' };
+      categories[0] = { id: 'objects', label: 'S3 / object storage', bytes, status: 'partial', measurement: 'registered_bytes', reason: 'Completed object sizes registered in NStack and referenced by this workspace, including retained versions. Each storage path counted once; shared objects counted once within this workspace. Unlinked uploads, provider versions and backups excluded; not a bucket disk scan.' };
     } catch { /* Keep reason and null. */ }
   }
   return storageUsageSnapshot(workspaceId, new Date().toISOString(), categories);

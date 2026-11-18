@@ -19,7 +19,7 @@ function docsHtml(specUrl: string) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>SuperBased V4 API Docs</title>
+    <title>NStack V4 API Docs</title>
     <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
     <style>
       body { margin: 0; background: #faf7ef; }
@@ -49,7 +49,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Tower Admin</title>
+    <title>NStack Admin</title>
     <style>
       :root {
         --bg: #f7f8f8;
@@ -262,7 +262,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
       <div class="shell">
         <header>
           <div>
-            <h1>Tower Admin</h1>
+            <h1>NStack Admin</h1>
             <div class="muted">Workspace operations, setup, storage, encrypted records, and Postgres inspection.</div>
           </div>
           <div class="top-actions">
@@ -291,7 +291,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
             </button>
             <button class="card action-card" data-jump="newWorkspace" type="button">
               <strong>New Workspace</strong>
-              <span class="muted">Create a Postgres-backed Flight Deck workspace and copy its descriptor.</span>
+              <span class="muted">Create a Postgres-backed workspace and copy its descriptor.</span>
             </button>
             <button class="card action-card" data-jump="tables" type="button">
               <strong>Browse Tables</strong>
@@ -299,7 +299,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
             </button>
             <button class="card action-card" data-jump="setup" type="button">
               <strong>Admin Setup</strong>
-              <span class="muted">Manage the Tower profile and generate encrypted/Yoke connection tokens.</span>
+              <span class="muted">Manage the NStack profile and generate encrypted record-sync connection tokens.</span>
             </button>
           </div>
         </section>
@@ -341,7 +341,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
           <div class="section-head">
             <div>
               <h2>New Workspace</h2>
-              <p class="muted">Creates a Postgres-backed Flight Deck workspace using the admin setup API.</p>
+              <p class="muted">Creates a Postgres-backed workspace using the admin setup API.</p>
             </div>
           </div>
           <div class="grid-2">
@@ -349,7 +349,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
               <div class="form-grid">
                 <div>
                   <label for="fdName">Workspace name</label>
-                  <input id="fdName" type="text" placeholder="Acme Flight Deck">
+                  <input id="fdName" type="text" placeholder="Acme workspace">
                 </div>
                 <div>
                   <label for="fdAppNpub">App npub</label>
@@ -357,7 +357,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
                 </div>
                 <div class="full">
                   <label for="fdDescription">Description</label>
-                  <input id="fdDescription" type="text" placeholder="Postgres-backed Flight Deck workspace">
+                  <input id="fdDescription" type="text" placeholder="Postgres-backed workspace">
                 </div>
                 <div>
                   <label for="fdOwner">Workspace owner npub</label>
@@ -380,7 +380,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
                 <button id="createFdBtn" class="primary" type="button">Create Postgres Workspace</button>
                 <button id="copyDescriptorBtn" type="button">Copy Descriptor</button>
               </div>
-              <div class="warning" style="margin-top:12px;">Encrypted/Yoke workspaces need a prepared cryptographic bootstrap payload. Use Yoke or the documented POST /api/v4/workspaces flow for that path.</div>
+              <div class="warning" style="margin-top:12px;">Encrypted-record workspaces need a prepared cryptographic bootstrap payload. Use a compatible client or the documented POST /api/v4/workspaces flow for that path.</div>
             </div>
             <div class="card">
               <label for="descriptorOutput">Descriptor JSON</label>
@@ -430,22 +430,22 @@ function adminInterfaceHtml(apiBaseUrl: string) {
           <div class="section-head">
             <div>
               <h2>Admin Setup</h2>
-              <p class="muted">Tower profile and encrypted/Yoke connection-token generation.</p>
+              <p class="muted">NStack profile and encrypted record-sync connection-token generation.</p>
             </div>
           </div>
           <div class="grid-2">
             <div class="card">
-              <h3>Tower Profile</h3>
-              <label for="towerName">Tower name</label>
-              <input id="towerName" type="text" placeholder="My Tower">
-              <label for="towerDescription" style="margin-top:10px;">Tower description</label>
+              <h3>NStack Profile</h3>
+              <label for="towerName">NStack name</label>
+              <input id="towerName" type="text" placeholder="My NStack">
+              <label for="towerDescription" style="margin-top:10px;">NStack description</label>
               <textarea id="towerDescription" placeholder="Shared workspace backend"></textarea>
               <div class="row" style="margin-top:12px;">
                 <button id="saveTowerBtn" class="primary" type="button">Save Profile</button>
               </div>
             </div>
             <div class="card">
-              <h3>Encrypted/Yoke Connection Token</h3>
+              <h3>Encrypted-record Connection Token</h3>
               <label for="tokenWorkspace">Workspace</label>
               <select id="tokenWorkspace"><option value="">Select workspace</option></select>
               <label for="tokenAppNpub" style="margin-top:10px;">App npub</label>
@@ -463,7 +463,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
         <section id="view-danger" class="section">
           <div class="card">
             <h2>Danger Zone</h2>
-            <p class="muted" style="margin-top:6px;">Delete selected workspace database rows or reset Tower V4 SQL rows. These actions do not remove object-storage blobs or restart the service.</p>
+            <p class="muted" style="margin-top:6px;">Delete selected workspace database rows or reset NStack V4 SQL rows. These actions do not remove object-storage blobs or restart the service.</p>
             <div class="warning" style="margin-top:12px;">Bulk delete uses explicit checked workspace IDs only. Filtering by name helps find noisy test data, but it does not delete by prefix.</div>
             <div style="margin-top:14px;">
               <h3>Bulk Delete Workspaces</h3>
@@ -516,7 +516,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
               <button id="deleteWorkspaceBtn" class="danger" type="button">Delete Selected Workspace Rows</button>
             </div>
             <textarea id="deleteWorkspaceOutput" readonly style="margin-top:12px;" placeholder="Workspace delete result appears here"></textarea>
-            <div class="warning" style="margin-top:18px;">Full reset clears workspace, group, record, storage metadata, billing, app, and Flight Deck PG rows from Postgres.</div>
+            <div class="warning" style="margin-top:18px;">Full reset clears workspace, group, record, storage metadata, billing, app and typed workspace rows from Postgres.</div>
             <label for="resetConfirmation" style="margin-top:12px;">Type WIPE V4 DATA</label>
             <input id="resetConfirmation" type="text" placeholder="WIPE V4 DATA">
             <div class="row" style="margin-top:12px;">
@@ -848,7 +848,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
         els.recordBytesMetric.textContent = formatBytes(usage.record_bytes);
         els.objectBytesMetric.textContent = formatBytes(usage.object_bytes);
         els.billableMetric.textContent = formatBytes(usage.billable_bytes);
-        els.workspaceSummary.innerHTML = '<strong>' + escapeHtml(workspace.name) + '</strong> <span class="pill">' + escapeHtml(short(workspace.workspace_owner_npub)) + '</span>' + (workspace.backend === 'flightdeck_pg' ? ' <span class="pill">Flight Deck PG</span>' : '') + '<br>Updated ' + escapeHtml(formatDate(workspace.updated_at));
+        els.workspaceSummary.innerHTML = '<strong>' + escapeHtml(workspace.name) + '</strong> <span class="pill">' + escapeHtml(short(workspace.workspace_owner_npub)) + '</span>' + (workspace.backend === 'flightdeck_pg' ? ' <span class="pill">Postgres</span>' : '') + '<br>Updated ' + escapeHtml(formatDate(workspace.updated_at));
         if (payload.pg) {
           renderFlightDeckPgWorkspace(payload);
           return;
@@ -1018,7 +1018,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
           tower_name: String(el('towerName').value || '').trim() || null,
           tower_description: String(el('towerDescription').value || '').trim() || null,
         });
-        setStatus('Tower profile saved.');
+        setStatus('NStack profile saved.');
       }
 
       async function generateToken() {
@@ -1116,7 +1116,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
       async function resetDatabase() {
         const confirmation = String(el('resetConfirmation').value || '').trim();
         if (confirmation !== 'WIPE V4 DATA') throw new Error('Type WIPE V4 DATA exactly');
-        if (!window.confirm('This deletes Tower SQL rows. Continue?')) return;
+        if (!window.confirm('This deletes NStack SQL rows. Continue?')) return;
         const payload = await api('/api/v4/admin/reset-database', 'POST', { confirmation });
         els.resetOutput.value = JSON.stringify(payload, null, 2);
         state.activeWorkspaceId = '';
@@ -1214,7 +1214,7 @@ function tableViewerHtml(apiBaseUrl: string) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>SuperBased V4 Table Viewer</title>
+    <title>NStack V4 Table Viewer</title>
     <style>
       :root {
         --bg: #f6f1e5;
@@ -1322,28 +1322,28 @@ function tableViewerHtml(apiBaseUrl: string) {
     <div class="viewer">
       <aside class="sidebar">
         <h1>Table Viewer</h1>
-        <p class="lede">Admin inspection tools for live SuperBased v4 backend tables.</p>
+        <p class="lede">Admin inspection tools for live NStack v4 backend tables.</p>
         <button id="connect" class="connect" type="button">Connect with Nostr</button>
         <div id="status" class="status">Not connected</div>
         <div class="stack">
           <div class="panel">
-            <h2>Tower Profile</h2>
-            <div class="meta">Set the public name and description clients will see when they connect to this Tower. Leave fields blank to fall back to env defaults.</div>
+            <h2>NStack Profile</h2>
+            <div class="meta">Set the public name and description clients will see when they connect to this NStack. Leave fields blank to fall back to env defaults.</div>
             <div class="field">
-              <label for="towerNameInput" class="meta">Tower name</label>
-              <input id="towerNameInput" type="text" placeholder="My SuperBased Tower" />
+              <label for="towerNameInput" class="meta">NStack name</label>
+              <input id="towerNameInput" type="text" placeholder="My NStack" />
             </div>
             <div class="field">
-              <label for="towerDescriptionInput" class="meta">Tower description</label>
-              <textarea id="towerDescriptionInput" placeholder="Private family tower for shared records, groups, and storage."></textarea>
+              <label for="towerDescriptionInput" class="meta">NStack description</label>
+              <textarea id="towerDescriptionInput" placeholder="Shared business and agent memory for records, groups, and storage."></textarea>
             </div>
             <div class="actions">
-              <button id="saveTowerProfileBtn" class="connect" type="button">Save Tower Profile</button>
+              <button id="saveTowerProfileBtn" class="connect" type="button">Save NStack Profile</button>
             </div>
           </div>
           <div class="panel">
             <h2>Danger Zone</h2>
-            <div class="meta">Reset the Tower V4 database tables on this service. This clears SQL rows only. It does not delete object storage blobs or restart the service.</div>
+            <div class="meta">Reset the NStack V4 database tables on this service. This clears SQL rows only. It does not delete object storage blobs or restart the service.</div>
             <div class="field">
               <label for="resetConfirmationInput" class="meta">Type <code>WIPE V4 DATA</code> to enable reset</label>
               <input id="resetConfirmationInput" type="text" placeholder="WIPE V4 DATA" />
@@ -1351,11 +1351,11 @@ function tableViewerHtml(apiBaseUrl: string) {
             <div class="actions">
               <button id="resetDatabaseBtn" class="connect danger-btn" type="button">Wipe V4 Data</button>
             </div>
-            <div class="warning">Use this only when you intentionally want a clean Tower database and plan to re-bootstrap workspaces from scratch.</div>
+            <div class="warning">Use this only when you intentionally want a clean NStack database and plan to re-bootstrap workspaces from scratch.</div>
           </div>
           <div class="panel">
             <h2>Connection Tokens</h2>
-            <div class="meta">Existing encrypted/Yoke setup path. Tokens carry connection material for SuperBased record sync apps. Flight Deck PG uses the credential-free descriptor panel below instead.</div>
+            <div class="meta">Existing encrypted record-sync setup path. Tokens carry connection material for NStack record sync apps. Postgres uses the credential-free descriptor panel below instead.</div>
             <div class="field">
               <label for="workspaceSelect" class="meta">Workspace</label>
               <select id="workspaceSelect">
@@ -1376,15 +1376,15 @@ function tableViewerHtml(apiBaseUrl: string) {
             </div>
           </div>
           <div class="panel">
-            <h2>Flight Deck PG Workspaces</h2>
-            <div class="meta">Create a Postgres-backed Flight Deck workspace and copy a descriptor. The descriptor does not include tokens, raw database credentials, private keys, or encrypted payloads.</div>
+            <h2>Postgres Workspaces</h2>
+            <div class="meta">Create a Postgres-backed workspace and copy a descriptor. The descriptor does not include tokens, raw database credentials, private keys, or encrypted payloads.</div>
             <div class="field">
               <label for="fdPgWorkspaceNameInput" class="meta">Workspace name</label>
-              <input id="fdPgWorkspaceNameInput" type="text" placeholder="Acme Flight Deck" />
+              <input id="fdPgWorkspaceNameInput" type="text" placeholder="Acme workspace" />
             </div>
             <div class="field">
               <label for="fdPgWorkspaceDescriptionInput" class="meta">Workspace description</label>
-              <input id="fdPgWorkspaceDescriptionInput" type="text" placeholder="Postgres-backed Flight Deck workspace" />
+              <input id="fdPgWorkspaceDescriptionInput" type="text" placeholder="Postgres-backed workspace" />
             </div>
             <div class="field">
               <label for="fdPgAppNpubInput" class="meta">App npub</label>
@@ -1419,7 +1419,7 @@ function tableViewerHtml(apiBaseUrl: string) {
               <input id="fdPgSecondActorNameInput" type="text" placeholder="Required with second actor npub" />
             </div>
             <div class="actions">
-              <button id="createFdPgWorkspaceBtn" class="connect" type="button">Create Flight Deck PG Workspace</button>
+              <button id="createFdPgWorkspaceBtn" class="connect" type="button">Create Postgres Workspace</button>
               <button id="copyFdPgDescriptorBtn" class="pager-btn" type="button">Copy Descriptor</button>
             </div>
             <div class="field">
@@ -1428,10 +1428,10 @@ function tableViewerHtml(apiBaseUrl: string) {
             </div>
             <div class="field">
               <label for="fdPgDescriptorOutput" class="meta">Descriptor JSON</label>
-              <textarea id="fdPgDescriptorOutput" readonly placeholder="Credential-free Flight Deck PG descriptor will appear here"></textarea>
+              <textarea id="fdPgDescriptorOutput" readonly placeholder="Credential-free Postgres descriptor will appear here"></textarea>
             </div>
             <div id="fdPgServiceStatus" class="meta">Service metadata not checked.</div>
-            <div class="next-step">Next step: open Flight Deck PG and connect with the copied descriptor.</div>
+            <div class="next-step">Next step: open a compatible app and connect with the copied descriptor.</div>
           </div>
           <div id="tableList" class="table-list"></div>
         </div>
@@ -1678,7 +1678,7 @@ function tableViewerHtml(apiBaseUrl: string) {
 
       async function createFlightDeckPgWorkspace() {
         const workspaceName = String(fdPgWorkspaceNameInput.value || '').trim();
-        if (!workspaceName) throw new Error('Enter a Flight Deck PG workspace name first');
+        if (!workspaceName) throw new Error('Enter a Postgres workspace name first');
         const request = {
           workspace_name: workspaceName,
           workspace_description: String(fdPgWorkspaceDescriptionInput.value || '').trim() || null,
@@ -1691,7 +1691,7 @@ function tableViewerHtml(apiBaseUrl: string) {
           second_actor_npub: String(fdPgSecondActorNpubInput.value || '').trim() || null,
           second_actor_display_name: String(fdPgSecondActorNameInput.value || '').trim() || null,
         };
-        setStatus('Creating Flight Deck PG workspace…');
+        setStatus('Creating Postgres workspace…');
         const payload = await apiPost('/api/v4/admin/flightdeck-pg/workspaces', request);
         const result = {
           workspace_id: payload.workspace_id,
@@ -1709,17 +1709,17 @@ function tableViewerHtml(apiBaseUrl: string) {
           fdPgServiceStatus.textContent = 'Service metadata check failed: ' + ((error && error.message) || 'unknown error');
         }
         await loadTables();
-        setStatus('Flight Deck PG workspace created: ' + payload.workspace_id);
+        setStatus('Postgres workspace created: ' + payload.workspace_id);
       }
 
       async function saveTowerProfile() {
-        setStatus('Saving Tower profile…');
+        setStatus('Saving NStack profile…');
         const payload = await apiPatch('/api/v4/admin/tower', {
           tower_name: String(towerNameInput.value || '').trim() || null,
           tower_description: String(towerDescriptionInput.value || '').trim() || null,
         });
         renderTowerProfile(payload);
-        setStatus('Tower profile saved');
+        setStatus('NStack profile saved');
       }
 
       async function resetDatabase() {
@@ -1727,7 +1727,7 @@ function tableViewerHtml(apiBaseUrl: string) {
         if (confirmation !== 'WIPE V4 DATA') {
           throw new Error('Type WIPE V4 DATA exactly before resetting');
         }
-        const confirmed = window.confirm('This will delete all Tower V4 rows on this service. Continue?');
+        const confirmed = window.confirm('This will delete all NStack V4 rows on this service. Continue?');
         if (!confirmed) return;
         setStatus('Resetting V4 database tables…');
         const payload = await apiPost('/api/v4/admin/reset-database', {
@@ -1738,7 +1738,7 @@ function tableViewerHtml(apiBaseUrl: string) {
         await loadTables();
         setStatus(
           'Reset completed on ' + (state.npub || payload.viewer) + '. '
-          + 'Tower rows are empty; restart/re-bootstrap services separately.',
+          + 'NStack rows are empty; restart/re-bootstrap services separately.',
         );
       }
 
@@ -1751,7 +1751,7 @@ function tableViewerHtml(apiBaseUrl: string) {
       }
 
       connectBtn.addEventListener('click', () => loadTables().catch((error) => setStatus(error.message || 'Failed to connect', true)));
-      saveTowerProfileBtn.addEventListener('click', () => saveTowerProfile().catch((error) => setStatus(error.message || 'Failed to save Tower profile', true)));
+      saveTowerProfileBtn.addEventListener('click', () => saveTowerProfile().catch((error) => setStatus(error.message || 'Failed to save NStack profile', true)));
       generateTokenBtn.addEventListener('click', () => generateToken().catch((error) => setStatus(error.message || 'Failed to generate token', true)));
       copyTokenBtn.addEventListener('click', async () => {
         if (!tokenOutput.value) return;
@@ -1762,12 +1762,12 @@ function tableViewerHtml(apiBaseUrl: string) {
           setStatus((error && error.message) || 'Failed to copy token', true);
         }
       });
-      createFdPgWorkspaceBtn.addEventListener('click', () => createFlightDeckPgWorkspace().catch((error) => setStatus(error.message || 'Failed to create Flight Deck PG workspace', true)));
+      createFdPgWorkspaceBtn.addEventListener('click', () => createFlightDeckPgWorkspace().catch((error) => setStatus(error.message || 'Failed to create Postgres workspace', true)));
       copyFdPgDescriptorBtn.addEventListener('click', async () => {
         if (!fdPgDescriptorOutput.value) return;
         try {
           await navigator.clipboard.writeText(fdPgDescriptorOutput.value);
-          setStatus('Flight Deck PG descriptor copied');
+          setStatus('Postgres descriptor copied');
         } catch (error) {
           setStatus((error && error.message) || 'Failed to copy descriptor', true);
         }
@@ -1797,7 +1797,7 @@ function superbasedDashboardHtml(apiBaseUrl: string) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Superbased Tower</title>
+    <title>NStack</title>
     <style>
       :root {
         --bg: #f7f8f8;
@@ -1889,8 +1889,8 @@ function superbasedDashboardHtml(apiBaseUrl: string) {
   <body>
     <div class="app">
       <aside class="sidebar">
-        <h1>Superbased Tower</h1>
-        <div class="muted">Workspace operations for this Tower.</div>
+        <h1>NStack</h1>
+        <div class="muted">Workspace operations for this NStack.</div>
         <button id="connectBtn" class="primary" type="button" style="margin-top:0.8rem;">Connect with Nostr</button>
         <div id="status" class="status">Not connected</div>
         <div class="panel">
@@ -1930,7 +1930,7 @@ function superbasedDashboardHtml(apiBaseUrl: string) {
             <div class="panel">
               <h2>App Namespaces</h2>
               <label for="appNameInput">App name</label>
-              <input id="appNameInput" type="text" placeholder="Flight Deck" />
+              <input id="appNameInput" type="text" placeholder="Shared Notes" />
               <label for="appNpubInput">App npub</label>
               <input id="appNpubInput" type="text" placeholder="npub1..." />
               <div class="row" style="margin-top:0.7rem;">
@@ -2436,10 +2436,10 @@ export function buildOpenApiDocument(origin: string) {
   return {
     openapi: '3.1.0',
     info: {
-      title: 'SuperBased V4 API',
+      title: 'NStack V4 API',
       version: '0.1.0',
       description:
-        'Workspace-scoped groups and append-only record sync for Coworker SuperBased v4.',
+        'NStack (Nostr Stack), your shared business and agent memory. Workspace-scoped access, typed APIs, record sync and file storage.',
     },
     servers: [
       {
@@ -2462,10 +2462,10 @@ export function buildOpenApiDocument(origin: string) {
       { name: 'Space Learning', description: 'Reviewed curriculum and learner-scoped plans, lessons, assessment, evidence, mastery and recall.' },
       { name: 'Records', description: 'Append-only record sync and fetch' },
       { name: 'Storage', description: 'Opaque encrypted object upload and download' },
-      { name: 'Billing', description: 'Workspace-scoped Superbased usage credits and app connection namespaces' },
+      { name: 'Billing', description: 'Workspace-scoped NStack usage credits and app connection namespaces' },
       { name: 'Admin', description: 'Backend inspection and service administration' },
       { name: 'User', description: 'User profile and workspace session key management' },
-      { name: 'Flight Deck PG', description: 'Contract-first typed Flight Deck PG APIs backed by Tower Postgres rows and PH1 service-layer authorization.' },
+      { name: 'Flight Deck PG', description: 'Contract-first typed Flight Deck PG APIs backed by NStack Postgres rows and PH1 service-layer authorization.' },
       { name: 'WApp Activity', description: 'Signed WApp publishing grants and ACL-filtered Flight Deck activity projections.' },
       { name: 'Forgejo Authentication', description: 'Nostr allowlisted OIDC sign-in only. Forgejo owns accounts, OAuth credentials, permissions, Git and API operations.' },
     ],
@@ -2626,7 +2626,7 @@ export function buildOpenApiDocument(origin: string) {
           additionalProperties: false,
           required: ['type', 'npub'],
           properties: {
-            type: { type: 'string', enum: ['agent', 'person'], description: 'Input hint retained for client compatibility; Tower resolves and canonicalizes the actor by npub.' },
+            type: { type: 'string', enum: ['agent', 'person'], description: 'Input hint retained for client compatibility; NStack resolves and canonicalizes the actor by npub.' },
             npub: { type: 'string', description: 'Full npub of a workspace actor with channel access.' },
             label: { type: 'string', minLength: 1, maxLength: 120 },
           },
@@ -2666,7 +2666,7 @@ export function buildOpenApiDocument(origin: string) {
           additionalProperties: true,
           required: ['storage_object_id'],
           properties: {
-            storage_object_id: { type: 'string', format: 'uuid', description: 'Private Tower storage object validated and linked server-side to the created message.' },
+            storage_object_id: { type: 'string', format: 'uuid', description: 'Private NStack storage object validated and linked server-side to the created message.' },
             kind: { type: 'string' },
             filename: { type: 'string' },
             content_type: { type: 'string' },
@@ -2725,7 +2725,7 @@ export function buildOpenApiDocument(origin: string) {
             row_version: { type: 'integer', minimum: 1, description: 'Current message row_version. The signed revision is this value plus one.' },
             mentions: { type: 'array', items: { $ref: '#/components/schemas/FlightDeckPgAgentMentionInput' }, description: 'Complete replacement structured mention set. Omit to preserve the current set.' },
             metadata: { type: 'object', additionalProperties: true, description: 'Fields merge over existing metadata; canonical mentions and the validated signature are authority-written.', properties: {
-              attachments: { type: 'array', items: { $ref: '#/components/schemas/FlightDeckPgMessageAttachment' }, description: 'Complete effective attachment set. Tower validates and reconciles message storage links atomically.' },
+              attachments: { type: 'array', items: { $ref: '#/components/schemas/FlightDeckPgMessageAttachment' }, description: 'Complete effective attachment set. NStack validates and reconciles message storage links atomically.' },
             } },
             message_signature: { type: 'object', description: 'Body-bound instruction signature additionally tagged with message_id and revision.' },
           },
@@ -2770,7 +2770,7 @@ export function buildOpenApiDocument(origin: string) {
         TowerBuildInfo: {
           type: 'object',
           properties: {
-            name: { type: 'string', example: 'wingman-tower' },
+            name: { type: 'string', example: 'nostr-stack' },
             version: { type: ['string', 'null'], example: '0.1.0' },
             git_commit: { type: ['string', 'null'], example: '3f4a2b1c9d8e7f6a5b4c3d2e1f0a987654321abc' },
             git_branch: { type: ['string', 'null'], example: 'main' },
@@ -2825,7 +2825,7 @@ export function buildOpenApiDocument(origin: string) {
             stack: {
               type: 'object', additionalProperties: false, required: ['tower_npub', 'name'],
               properties: {
-                tower_npub: { type: ['string', 'null'], description: 'Public Tower service identity only.' },
+                tower_npub: { type: ['string', 'null'], description: 'Public NStack service identity only.' },
                 name: { type: ['string', 'null'] },
               },
             },
@@ -2945,7 +2945,7 @@ export function buildOpenApiDocument(origin: string) {
         NativeGraphEdgeInput: {
           type: 'object',
           properties: {
-            external_id: { type: 'string', description: 'Optional. If omitted, Tower derives one from from_external_id, relationship_type, and to_external_id.' },
+            external_id: { type: 'string', description: 'Optional. If omitted, NStack derives one from from_external_id, relationship_type, and to_external_id.' },
             from_external_id: { type: 'string' },
             to_external_id: { type: 'string' },
             relationship_type: { type: 'string' },
@@ -3763,7 +3763,7 @@ export function buildOpenApiDocument(origin: string) {
             upload_url: { type: 'string', format: 'uri' },
             complete_url: { type: 'string', format: 'uri' },
             blossom_url: { type: ['string', 'null'], format: 'uri', description: 'Verified SHA-256 link; null for incomplete, missing or deleted bytes.' },
-            blossom_auth: { type: 'string', enum: ['public', 'nostr'], description: 'Private links require BUD-11 get authorization or Tower NIP-98; existing ACLs apply.' },
+            blossom_auth: { type: 'string', enum: ['public', 'nostr'], description: 'Private links require BUD-11 get authorization or NStack NIP-98; existing ACLs apply.' },
             content_url: { type: 'string', format: 'uri' },
             download_url: { type: 'string', format: 'uri' },
             completed_at: { type: ['string', 'null'], format: 'date-time' },
@@ -3787,7 +3787,7 @@ export function buildOpenApiDocument(origin: string) {
             content_type: { type: 'string' },
             size_bytes: { type: 'integer' },
             blossom_url: { type: ['string', 'null'], format: 'uri', description: 'Verified SHA-256 link; null for incomplete, missing or deleted bytes.' },
-            blossom_auth: { type: 'string', enum: ['public', 'nostr'], description: 'Private links require BUD-11 get authorization or Tower NIP-98; existing ACLs apply.' },
+            blossom_auth: { type: 'string', enum: ['public', 'nostr'], description: 'Private links require BUD-11 get authorization or NStack NIP-98; existing ACLs apply.' },
             content_url: { type: 'string', format: 'uri' },
             completed_at: { type: 'string', format: 'date-time' },
           },
@@ -3805,7 +3805,7 @@ export function buildOpenApiDocument(origin: string) {
             size_bytes: { type: 'integer' },
             sha256_hex: { type: ['string', 'null'] },
             blossom_url: { type: ['string', 'null'], format: 'uri', description: 'Verified SHA-256 link; null for incomplete, missing or deleted bytes.' },
-            blossom_auth: { type: 'string', enum: ['public', 'nostr'], description: 'Private links require BUD-11 get authorization or Tower NIP-98; existing ACLs apply.' },
+            blossom_auth: { type: 'string', enum: ['public', 'nostr'], description: 'Private links require BUD-11 get authorization or NStack NIP-98; existing ACLs apply.' },
             content_url: { type: 'string', format: 'uri' },
             download_url: { type: ['string', 'null'], format: 'uri' },
             created_at: { type: 'string', format: 'date-time' },
@@ -3818,7 +3818,7 @@ export function buildOpenApiDocument(origin: string) {
           properties: {
             object_id: { type: 'string', format: 'uuid' },
             blossom_url: { type: ['string', 'null'], format: 'uri', description: 'Verified SHA-256 link; null for incomplete, missing or deleted bytes.' },
-            blossom_auth: { type: 'string', enum: ['public', 'nostr'], description: 'Private links require BUD-11 get authorization or Tower NIP-98; existing ACLs apply.' },
+            blossom_auth: { type: 'string', enum: ['public', 'nostr'], description: 'Private links require BUD-11 get authorization or NStack NIP-98; existing ACLs apply.' },
             content_url: { type: 'string', format: 'uri' },
             download_url: { type: 'string', format: 'uri' },
           },
@@ -3922,14 +3922,14 @@ export function buildOpenApiDocument(origin: string) {
             owner_npub: { type: 'string', description: 'Compatibility alias for workspace_service_npub' },
             workspace_service_npub: { type: 'string', description: 'Canonical workspace service identity' },
             ws_key_npub: { type: 'string', description: 'Compatibility alias for workspace_user_key_npub when supplied by canonical clients' },
-            workspace_user_key_npub: { type: 'string', description: 'Canonical delegated per-user workspace key. If present, Tower verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.' },
+            workspace_user_key_npub: { type: 'string', description: 'Canonical delegated per-user workspace key. If present, NStack verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.' },
             record_family_hash: { type: 'string' },
             version: { type: 'integer' },
             previous_version: { type: 'integer' },
             signature_npub: { type: 'string' },
             write_group_id: { type: 'string', format: 'uuid', description: 'Canonical stable logical group id used for shared-write authorization' },
             write_group_npub: { type: 'string', deprecated: true, description: 'Legacy compatibility alias for shared-write authorization. New clients should send write_group_id. Rejected when strict_group_id_writes is enabled.' },
-            force_write: { type: 'boolean', description: 'Explicit repair overwrite flag. When true, Tower bypasses checkout-required lock validation and may accept a current-member write-group proof to repair missing prior-version group write access, but normal version-chain and group membership checks still apply.' },
+            force_write: { type: 'boolean', description: 'Explicit repair overwrite flag. When true, NStack bypasses checkout-required lock validation and may accept a current-member write-group proof to repair missing prior-version group write access, but normal version-chain and group membership checks still apply.' },
             owner_payload: { $ref: '#/components/schemas/OwnerPayload' },
             checkout: {
               $ref: '#/components/schemas/CheckoutReference',
@@ -3960,10 +3960,10 @@ export function buildOpenApiDocument(origin: string) {
             workspace_service_npub: { type: 'string', description: 'Canonical workspace service identity' },
             user_npub: { type: 'string', description: 'Canonical real user identity. If supplied with workspace_user_key_npub, it must match the resolved authenticated user.' },
             actor_npub: { type: 'string', description: 'Canonical actor identity; for normal app requests this equals user_npub.' },
-            viewer_npub: { type: 'string', description: 'Canonical viewer identity; Tower evaluates reads as viewerNpub = userNpub.' },
+            viewer_npub: { type: 'string', description: 'Canonical viewer identity; NStack evaluates reads as viewerNpub = userNpub.' },
             signer_npub: { type: 'string', description: 'Canonical NIP-98 signer identity. For normal app writes this equals workspace_user_key_npub.' },
             ws_key_npub: { type: 'string', description: 'Compatibility alias for workspace_user_key_npub' },
-            workspace_user_key_npub: { type: 'string', description: 'Canonical delegated per-user workspace key. If present, Tower verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.' },
+            workspace_user_key_npub: { type: 'string', description: 'Canonical delegated per-user workspace key. If present, NStack verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.' },
             strict_group_id_writes: { type: 'boolean', description: 'Opt-in strict mode. When true, write_group_npub is rejected as a durable write reference; use write_group_id and keep group_payloads[].group_npub only as crypto metadata.' },
             group_write_tokens: {
               type: 'object',
@@ -4230,11 +4230,11 @@ export function buildOpenApiDocument(origin: string) {
             workspace_name: { type: 'string' },
             workspace_description: { type: ['string', 'null'] },
             app_npub: { type: ['string', 'null'], default: config.flightDeck.appNpub },
-            workspace_service_npub: { type: ['string', 'null'], description: 'Generated by Tower when omitted.' },
+            workspace_service_npub: { type: ['string', 'null'], description: 'Generated by NStack when omitted.' },
             workspace_owner_npub: { type: ['string', 'null'], description: 'Defaults to the signed admin npub.' },
             creator_npub: { type: 'string', description: 'Explicit identity of the workspace creator.' },
-            smoke_scope_name: { type: ['string', 'null'], default: null, description: 'Optional. When omitted, Tower does not create a starter smoke scope.' },
-            smoke_channel_name: { type: ['string', 'null'], default: null, description: 'Optional. When omitted, Tower does not create a starter smoke channel.' },
+            smoke_scope_name: { type: ['string', 'null'], default: null, description: 'Optional. When omitted, NStack does not create a starter smoke scope.' },
+            smoke_channel_name: { type: ['string', 'null'], default: null, description: 'Optional. When omitted, NStack does not create a starter smoke channel.' },
             second_actor_npub: { type: ['string', 'null'] },
             second_actor_display_name: { type: ['string', 'null'], description: 'Required when second_actor_npub is provided.' },
           },
@@ -4539,7 +4539,7 @@ export function buildOpenApiDocument(origin: string) {
           tags: ['Health'],
           security: [],
           summary: 'Discover configured public Nstack services',
-          description: 'Versioned, cacheable public metadata for Tower, relay and full Blossom endpoints. Services with disabled or invalid public origins are omitted. Availability is a bounded health observation, not authority. The response never includes workspaces, users, credentials, signatures, tokens, internal Docker names or operator endpoints.',
+          description: 'Versioned, cacheable public metadata for NStack, relay and full Blossom endpoints. Services with disabled or invalid public origins are omitted. Availability is a bounded health observation, not authority. The response never includes workspaces, users, credentials, signatures, tokens, internal Docker names or operator endpoints.',
           responses: {
             '200': {
               description: 'Safe Nstack service descriptor. Cache-Control defines freshness and stale-if-error behavior.',
@@ -4552,10 +4552,10 @@ export function buildOpenApiDocument(origin: string) {
         get: {
           tags: ['Health'],
           security: [],
-          summary: 'Get Tower build and runtime version metadata',
+          summary: 'Get NStack build and runtime version metadata',
           responses: {
             '200': {
-              description: 'Tower build metadata',
+              description: 'NStack build metadata',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/TowerBuildInfo' },
@@ -4593,10 +4593,10 @@ export function buildOpenApiDocument(origin: string) {
         get: {
           tags: ['Admin'],
           security: [],
-          summary: 'Open the Tower admin interface',
+          summary: 'Open the NStack admin interface',
           responses: {
             '200': {
-              description: 'Tower admin HTML',
+              description: 'NStack admin HTML',
             },
           },
         },
@@ -4605,7 +4605,7 @@ export function buildOpenApiDocument(origin: string) {
         get: {
           tags: ['Admin'],
           security: [],
-          summary: 'Backend table viewer and Tower settings UI',
+          summary: 'Backend table viewer and NStack settings UI',
           responses: {
             '200': {
               description: 'HTML table viewer',
@@ -4687,7 +4687,7 @@ export function buildOpenApiDocument(origin: string) {
           tags: ['Flight Deck PG'],
           security: [{ nip98: [] }],
           summary: 'Get a credential-free Flight Deck PG workspace descriptor',
-          description: 'Implemented PH1-6 runtime descriptor. Returns a routing/config locator with app npub, Tower base URL, Tower service npub, workspace service npub, workspace id, label/description, capabilities, and route links. It never returns auth tokens, bearer tokens, database credentials, or Nostr private keys.',
+          description: 'Implemented PH1-6 runtime descriptor. Returns a routing/config locator with app npub, NStack base URL, NStack service npub, workspace service npub, workspace id, label/description, capabilities, and route links. It never returns auth tokens, bearer tokens, database credentials, or Nostr private keys.',
           'x-flightdeck-pg-contract-fixture': flightDeckPgContractFixturePaths['flightdeck_pg.workspace_descriptor'],
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
@@ -4704,7 +4704,7 @@ export function buildOpenApiDocument(origin: string) {
           tags: ['Flight Deck PG'],
           security: [{ nip98: [] }],
           summary: 'Update Flight Deck PG workspace profile metadata',
-          description: 'Updates the typed PG workspace label and description. The client may send slug/avatar_url for local compatibility, but Tower currently persists name and description.',
+          description: 'Updates the typed PG workspace label and description. The client may send slug/avatar_url for local compatibility, but NStack currently persists name and description.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
           ],
@@ -4783,7 +4783,7 @@ export function buildOpenApiDocument(origin: string) {
           tags: ['Flight Deck PG'],
           security: [{ nip98: [] }],
           summary: 'Create a Flight Deck PG workspace invite',
-          description: 'Implemented PH1-6 runtime invite creation. Authorizes workspace.invite, records the invited actor membership plus audit metadata in Tower, and does not publish anything to Nostr.',
+          description: 'Implemented PH1-6 runtime invite creation. Authorizes workspace.invite, records the invited actor membership plus audit metadata in NStack, and does not publish anything to Nostr.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
           ],
@@ -4883,7 +4883,7 @@ export function buildOpenApiDocument(origin: string) {
           tags: ['Flight Deck PG'],
           security: [{ nip98: [] }],
           summary: 'Read the current actor personal Autopilot agent list',
-          description: 'Returns the Tower Postgres-backed ordered agent list and its compare-and-swap row version.',
+          description: 'Returns the NStack Postgres-backed ordered agent list and its compare-and-swap row version.',
           parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
           responses: {
             '200': { description: 'Personal agent settings', content: { 'application/json': { schema: { type: 'object' } } } },
@@ -5401,7 +5401,7 @@ export function buildOpenApiDocument(origin: string) {
         patch: {
           tags: ['Flight Deck PG'],
           summary: 'Revise an existing message as its author',
-          description: 'Author-only optimistic message revision. Tower canonicalizes the complete structured mention set, calculates newly added mentions against the saved prior revision, validates a body/message/revision-bound signature, and atomically emits flightdeck_pg.message.revised. The stable revision_idempotency_key is message:<messageId>:revision:<new row_version>; retrying the same saved base row_version returns stale_row_version and cannot emit another event.',
+          description: 'Author-only optimistic message revision. NStack canonicalizes the complete structured mention set, calculates newly added mentions against the saved prior revision, validates a body/message/revision-bound signature, and atomically emits flightdeck_pg.message.revised. The stable revision_idempotency_key is message:<messageId>:revision:<new row_version>; retrying the same saved base row_version returns stale_row_version and cannot emit another event.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
             { name: 'messageId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
@@ -5867,7 +5867,7 @@ export function buildOpenApiDocument(origin: string) {
           tags: ['Flight Deck PG'],
           security: [{ nip98: [] }],
           summary: 'Resolve trusted personal WApp signer policy by origin',
-          description: 'Returns signer policy and Tower-owned personal WApp assignment identity only when exactly one active WApp visible to the authenticated actor explicitly trusts the exact HTTP(S) origin. Unregistered, disabled, archived, invisible, invalid, and ambiguous assignments fail closed.',
+          description: 'Returns signer policy and NStack-owned personal WApp assignment identity only when exactly one active WApp visible to the authenticated actor explicitly trusts the exact HTTP(S) origin. Unregistered, disabled, archived, invisible, invalid, and ambiguous assignments fail closed.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
             { name: 'origin', in: 'query', required: true, description: 'Embedded page origin. URL paths are discarded and wildcard hostnames are not supported.', schema: { type: 'string', format: 'uri' } },
@@ -5936,7 +5936,7 @@ export function buildOpenApiDocument(origin: string) {
         },
       },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-delegations': {
-        get: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'List owner grants or the delegate’s own wapp_management grants', description: 'The stable UI role wapp_management maps to the canonical Tower permission wapp.manage.', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Visible delegations' }, '403': { description: 'Workspace membership required' } } },
+        get: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'List owner grants or the delegate’s own wapp_management grants', description: 'The stable UI role wapp_management maps to the canonical NStack permission wapp.manage.', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Visible delegations' }, '403': { description: 'Workspace membership required' } } },
         post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Owner grants filtered wapp_management authority', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['delegate_actor_id','expires_at','filters'], properties: { delegate_actor_id: { type: 'string', format: 'uuid' }, expires_at: { type: 'string', format: 'date-time' }, owner_signature: { type: 'string' }, filters: { type: 'object', description: 'Exact optional app/installation/scope/channel/capability/open-origin and Autopilot-origin filters.' } } } } } }, responses: { '201': { description: 'Delegation created' }, '403': { description: 'Workspace owner required' } } },
       },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-delegations/{delegationId}': { get: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Read one visible WApp delegation', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'delegationId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Delegation' }, '404': { description: 'Not visible or missing' } } } },
@@ -5946,14 +5946,14 @@ export function buildOpenApiDocument(origin: string) {
         post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Create an idempotent existing-app WApp installation intent', description: 'Delegated template creation returns step_up_required in v1.', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['client_request_id','app_id','app_version','title','launch_url','autopilot_origin','autopilot_npub'], properties: { client_request_id: { type: 'string' }, delegation_id: { type: 'string', format: 'uuid' }, app_id: { type: 'string' }, app_version: { type: 'string' }, wapp_installation_id: { type: 'string' }, title: { type: 'string' }, launch_url: { type: 'string', format: 'uri' }, autopilot_origin: { type: 'string', format: 'uri' }, autopilot_npub: { type: 'string' }, registered_open_origins: { type: 'array', items: { type: 'string', format: 'uri' } }, capabilities: { type: 'array', items: { type: 'string', enum: ['activity.publish'] } }, destinations: { type: 'array', items: { type: 'object' } } } } } } }, responses: { '201': { description: 'Intent and one-time claim challenge created' }, '200': { description: 'Idempotent replay' }, '403': { description: 'Delegation/filter/step-up denial' }, '409': { description: 'Idempotency conflict' } } },
       },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-install-intents/{intentId}': { get: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Read one authorized WApp installation saga', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'intentId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Intent' }, '404': { description: 'Not visible or missing' } } } },
-      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-install-intents/{intentId}/claim': { post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Claim an intent with its single-use Tower challenge', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'intentId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Claimed' }, '409': { description: 'Not claimable or stale' } } } },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-install-intents/{intentId}/claim': { post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Claim an intent with its single-use NStack challenge', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'intentId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Claimed' }, '409': { description: 'Not claimable or stale' } } } },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-install-intents/{intentId}/complete': { post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Attest and atomically finalize installation, launcher, and Feed grant', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'intentId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Active installation' }, '403': { description: 'Attestation or live delegation denied' }, '409': { description: 'Identity, destination, or version conflict' } } } },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-install-intents/{intentId}/fail': { post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Record a repairable installation failure', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'intentId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Failed intent recorded' }, '409': { description: 'Wrong claimant or state' } } } },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-installations': { get: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'List joined managed installation, launcher, and publishing lifecycle', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Authorized managed installations' }, '403': { description: 'wapp.manage required' } } } },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-installations/{installationId}': { get: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Read one joined managed installation lifecycle', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'installationId', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Managed installation' }, '403': { description: 'Filtered wapp.manage required' } } } },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-installations/{installationId}/reconcile': { post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Request asynchronous reconciliation without caller-supplied state', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'installationId', in: 'path', required: true, schema: { type: 'string' } }], responses: { '202': { description: 'Reconciliation queued' }, '403': { description: 'Filtered wapp.manage required' } } } },
-      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-installations/{installationId}/revoke': { post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Immediately revoke Tower authority, Feed grant, and launcher', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'installationId', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Revoked and teardown queued' }, '403': { description: 'Filtered wapp.manage required' } } } },
-      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-installations/{installationId}/uninstall': { post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Request protected runtime teardown', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'installationId', in: 'path', required: true, schema: { type: 'string' } }], responses: { '403': { description: 'step_up_required in Tower v1' } } } },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-installations/{installationId}/revoke': { post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Immediately revoke NStack authority, Feed grant, and launcher', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'installationId', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Revoked and teardown queued' }, '403': { description: 'Filtered wapp.manage required' } } } },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-installations/{installationId}/uninstall': { post: { tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Request protected runtime teardown', parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },{ name: 'installationId', in: 'path', required: true, schema: { type: 'string' } }], responses: { '403': { description: 'step_up_required in NStack v1' } } } },
       '/api/v4/wapp-activity/workspaces/{workspaceId}/items': {
         post: {
           tags: ['WApp Activity'], security: [{ nip98: [] }], summary: 'Publish or version-upsert one WApp activity projection',
@@ -6106,7 +6106,7 @@ export function buildOpenApiDocument(origin: string) {
           tags: ['Flight Deck PG'],
           security: [{ nip98: [] }],
           summary: 'Poll visible Flight Deck PG outbox events',
-          description: 'Returns access-filtered outbox rows newer than the opaque cursor, ordered by globally monotonic outbox row_version. Every event has a stable event_id/cursor plus entity_row_version. With bounded audience_npub values, Tower scans one workspace cursor page, returns the union visible under each explicitly manager-authorized workspace identity, adds deterministic per-identity visibility evidence, and advances next_cursor/through_cursor to the scanned workspace high-water even when no event is visible. Actor kind and membership role do not affect audience eligibility. Without audience_npub it retains the legacy authenticated-actor behavior.',
+          description: 'Returns access-filtered outbox rows newer than the opaque cursor, ordered by globally monotonic outbox row_version. Every event has a stable event_id/cursor plus entity_row_version. With bounded audience_npub values, NStack scans one workspace cursor page, returns the union visible under each explicitly manager-authorized workspace identity, adds deterministic per-identity visibility evidence, and advances next_cursor/through_cursor to the scanned workspace high-water even when no event is visible. Actor kind and membership role do not affect audience eligibility. Without audience_npub it retains the legacy authenticated-actor behavior.',
           'x-flightdeck-pg-contract-fixture': flightDeckPgContractFixturePaths['flightdeck_pg.events.list'],
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
@@ -6362,7 +6362,7 @@ export function buildOpenApiDocument(origin: string) {
         post: {
           tags: ['Flight Deck PG'],
           summary: 'Prepare a private PG workspace storage upload',
-          description: 'Authenticates a PG workspace member and authority-writes the workspace owner. Browser-supplied owner_group_id and access_group_ids are ignored; stable group UUID authorization is evaluated later from Tower-owned channel grants when the object is atomically associated with a message, file, doc, or audio note. Objects remain owner/uploader-only until association. Public prepares remain restricted to explicit workspace-profile avatar uploads.',
+          description: 'Authenticates a PG workspace member and authority-writes the workspace owner. Browser-supplied owner_group_id and access_group_ids are ignored; stable group UUID authorization is evaluated later from NStack-owned channel grants when the object is atomically associated with a message, file, doc, or audio note. Objects remain owner/uploader-only until association. Public prepares remain restricted to explicit workspace-profile avatar uploads.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
           ],
@@ -6375,7 +6375,7 @@ export function buildOpenApiDocument(origin: string) {
                 content_type: { type: 'string' },
                 size_bytes: { type: 'integer', minimum: 0 },
                 file_name: { type: ['string', 'null'] },
-                owner_group_id: { type: ['string', 'null'], format: 'uuid', deprecated: true, description: 'Ignored. Tower derives scoped access from authoritative PG record links and grants.' },
+                owner_group_id: { type: ['string', 'null'], format: 'uuid', deprecated: true, description: 'Ignored. NStack derives scoped access from authoritative PG record links and grants.' },
                 access_group_ids: { type: ['array', 'null'], items: { type: 'string', format: 'uuid' }, deprecated: true, description: 'Ignored. Arbitrary browser-supplied stable group UUIDs are never trusted.' },
                 is_public: { type: 'boolean', default: false },
                 metadata: { type: ['object', 'null'], additionalProperties: true },
@@ -7294,7 +7294,7 @@ export function buildOpenApiDocument(origin: string) {
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/invocations': {
         post: {
           tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Create an invocation, including a default-agent full-document review request',
-          description: 'Extends the existing Flight Deck document-header invocation action. trigger=full_document_review_requested requires one readable document target, one readable agent recipient (the UI-selected default agent), and client_request_id. Exact retries deterministically return the existing invocation; conflicting reuse returns 409. Tower emits flightdeck_pg.full_document_review_requested and does not store Autopilot session state.',
+          description: 'Extends the existing Flight Deck document-header invocation action. trigger=full_document_review_requested requires one readable document target, one readable agent recipient (the UI-selected default agent), and client_request_id. Exact retries deterministically return the existing invocation; conflicting reuse returns 409. NStack emits flightdeck_pg.full_document_review_requested and does not store Autopilot session state.',
           parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
           requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['scope_id', 'channel_id', 'prompt', 'recipients', 'targets'], properties: { trigger: { type: 'string', enum: ['full_document_review_requested'] }, client_request_id: { type: 'string' }, scope_id: { type: 'string', format: 'uuid' }, channel_id: { type: 'string', format: 'uuid' }, prompt: { type: 'string' }, recipients: { type: 'array', minItems: 1, maxItems: 1 }, targets: { type: 'array', minItems: 1, maxItems: 1 }, metadata: { type: 'object', additionalProperties: true } } } } } },
           responses: { '201': { description: 'Invocation and trigger created' }, '200': { description: 'Exact deterministic replay' }, '400': { description: 'Invalid review request' }, '403': { description: 'Target access denied' }, '409': { description: 'client_request_id conflict' } },
@@ -7670,7 +7670,7 @@ export function buildOpenApiDocument(origin: string) {
         get: {
           tags: ['Billing'],
           summary: 'Discover a workspace app namespace descriptor',
-          description: 'Returns a credential-free Flight Deck PG workspace locator for an app namespace. Tower verifies workspace membership, reports installed/enabled state, and exposes app/schema identity plus capability flags without encrypted schema payloads or raw database credentials.',
+          description: 'Returns a credential-free Flight Deck PG workspace locator for an app namespace. NStack verifies workspace membership, reports installed/enabled state, and exposes app/schema identity plus capability flags without encrypted schema payloads or raw database credentials.',
           parameters: [
             { name: 'workspaceOwnerNpub', in: 'path', required: true, schema: { type: 'string' } },
             { name: 'appNpub', in: 'path', required: true, schema: { type: 'string' } },
@@ -7685,7 +7685,7 @@ export function buildOpenApiDocument(origin: string) {
         get: {
           tags: ['Billing'],
           summary: 'Fetch encrypted app schema manifests visible to the current workspace member',
-          description: 'Returns the latest visible encrypted schema manifest per app namespace by default. Tower indexes app npubs and schema family/version metadata, but schema contents stay opaque in owner_payload/group_payloads ciphertext.',
+          description: 'Returns the latest visible encrypted schema manifest per app namespace by default. NStack indexes app npubs and schema family/version metadata, but schema contents stay opaque in owner_payload/group_payloads ciphertext.',
           parameters: [
             { name: 'workspaceOwnerNpub', in: 'path', required: true, schema: { type: 'string' } },
             { name: 'app_npub', in: 'query', required: false, schema: { type: 'string' } },
@@ -7784,7 +7784,7 @@ export function buildOpenApiDocument(origin: string) {
         get: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Read administrator installation settings, environment locks and durable operation status', responses: { '200': { description: 'Typed settings; no secrets' }, '403': { description: 'Administrator required' }, '409': { description: 'Installation controller unavailable' } } },
       },
       '/api/v4/installation/settings/apply': {
-        post: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Validate and queue a fixed Tower settings apply/restart with rollback', responses: { '202': { description: 'Durable operation queued; only labelled installation Tower restarts' }, '400': { description: 'Invalid or unknown settings' }, '403': { description: 'Administrator required' }, '409': { description: 'Busy, locked or recovery required' } } },
+        post: { tags: ['Installation'], security: [{ nip98: [] }], summary: 'Validate and queue a fixed NStack settings apply/restart with rollback', responses: { '202': { description: 'Durable operation queued; only labelled installation NStack restarts' }, '400': { description: 'Invalid or unknown settings' }, '403': { description: 'Administrator required' }, '409': { description: 'Busy, locked or recovery required' } } },
       },
       '/api/v4/installation/identity-proof': {
         get: { tags: ['Installation'], summary: 'Public nonce-bound service identity proof for operator reachability verification', parameters: [{ name: 'nonce', in: 'query', required: true, schema: { type: 'string', pattern: '^[a-f0-9]{64}$' } }], responses: { '200': { description: 'Service-signed kind-30384 proof; no credentials or access grant' }, '400': { description: 'Invalid nonce' } } },
@@ -7833,8 +7833,8 @@ export function buildOpenApiDocument(origin: string) {
       '/api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/db/descriptor': {
         get: {
           tags: ['Workspace App DB'],
-          summary: 'Get the Tower-managed WApp DB namespace descriptor',
-          description: 'Returns the allocated schema name and supported WApp DB v1 capabilities. Requires app, Tower admin, or Tower service NIP-98 auth.',
+          summary: 'Get the NStack-managed WApp DB namespace descriptor',
+          description: 'Returns the allocated schema name and supported WApp DB v1 capabilities. Requires app, NStack admin, or NStack service NIP-98 auth.',
           parameters: [
             { name: 'workspaceOwnerNpub', in: 'path', required: true, schema: { type: 'string' } },
             { name: 'appNpub', in: 'path', required: true, schema: { type: 'string' } },
@@ -7849,7 +7849,7 @@ export function buildOpenApiDocument(origin: string) {
       '/api/v4/workspaces/{workspaceOwnerNpub}/apps/{appNpub}/db/provision': {
         post: {
           tags: ['Workspace App DB'],
-          summary: 'Provision the Tower-managed WApp DB namespace',
+          summary: 'Provision the NStack-managed WApp DB namespace',
           description: 'Creates the persisted namespace mapping and app schema. Does not run WApp migrations.',
           parameters: [
             { name: 'workspaceOwnerNpub', in: 'path', required: true, schema: { type: 'string' } },
@@ -8019,7 +8019,7 @@ export function buildOpenApiDocument(origin: string) {
         get: {
           tags: ['Workspace App DB'],
           summary: 'List visible JSON rows for an app collection',
-          description: 'HTTPS-mediated generic app database rows. Tower enforces registered app namespace, workspace membership, and row visibility before returning rows.',
+          description: 'HTTPS-mediated generic app database rows. NStack enforces registered app namespace, workspace membership, and row visibility before returning rows.',
           parameters: [
             { name: 'workspaceOwnerNpub', in: 'path', required: true, schema: { type: 'string' } },
             { name: 'appNpub', in: 'path', required: true, schema: { type: 'string' } },
@@ -8128,10 +8128,10 @@ export function buildOpenApiDocument(origin: string) {
       '/api/v4/admin/tower': {
         get: {
           tags: ['Admin'],
-          summary: 'Get the effective public Tower profile',
+          summary: 'Get the effective public NStack profile',
           responses: {
             '200': {
-              description: 'Tower profile',
+              description: 'NStack profile',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/TowerProfileResponse' },
@@ -8150,7 +8150,7 @@ export function buildOpenApiDocument(origin: string) {
         },
         patch: {
           tags: ['Admin'],
-          summary: 'Update the public Tower profile',
+          summary: 'Update the public NStack profile',
           requestBody: {
             required: true,
             content: {
@@ -8161,7 +8161,7 @@ export function buildOpenApiDocument(origin: string) {
           },
           responses: {
             '200': {
-              description: 'Tower profile updated',
+              description: 'NStack profile updated',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/TowerProfileResponse' },
@@ -8191,7 +8191,7 @@ export function buildOpenApiDocument(origin: string) {
         get: {
           tags: ['Admin'],
           security: [{ nip98: [] }],
-          summary: 'Inspect one workspace as Tower admin',
+          summary: 'Inspect one workspace as NStack admin',
           description: 'Admin-only operational summary for a workspace, including usage, encrypted record metadata, storage metadata, app namespaces, and visible app schema summaries. It does not decrypt record or storage payloads.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
@@ -8226,7 +8226,7 @@ export function buildOpenApiDocument(origin: string) {
         delete: {
           tags: ['Admin'],
           security: [{ nip98: [] }],
-          summary: 'Delete one workspace and its database rows as Tower admin',
+          summary: 'Delete one workspace and its database rows as NStack admin',
           description: 'Admin-only destructive cleanup. Requires confirmation matching the workspace owner npub. Deletes workspace-scoped Postgres rows, encrypted record metadata, group rows, billing/app rows, optional Flight Deck PG rows, and optional storage metadata rows. It does not delete object-storage blobs.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
@@ -8321,7 +8321,7 @@ export function buildOpenApiDocument(origin: string) {
         post: {
           tags: ['Admin'],
           security: [{ nip98: [] }],
-          summary: 'Delete multiple workspaces and their database rows as Tower admin',
+          summary: 'Delete multiple workspaces and their database rows as NStack admin',
           description: 'Admin-only destructive cleanup. Accepts explicit workspace IDs only and deletes the selected workspaces in one transaction. Requires confirmation of the phrase DELETE N WORKSPACES. It does not delete object-storage blobs.',
           requestBody: {
             required: true,
@@ -8974,8 +8974,8 @@ export function buildOpenApiDocument(origin: string) {
                     owner_npub: { type: 'string', description: 'Compatibility alias for workspace_service_npub' },
                     workspace_service_npub: { type: 'string', description: 'Canonical workspace service identity' },
                     ws_key_npub: { type: 'string', description: 'Compatibility alias for workspace_user_key_npub' },
-                    workspace_user_key_npub: { type: 'string', description: 'Canonical delegated workspace user key. If present, Tower verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.' },
-                    viewer_npub: { type: 'string', description: 'Compatibility field. Tower evaluates viewerNpub as the resolved user_npub.' },
+                    workspace_user_key_npub: { type: 'string', description: 'Canonical delegated workspace user key. If present, NStack verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.' },
+                    viewer_npub: { type: 'string', description: 'Compatibility field. NStack evaluates viewerNpub as the resolved user_npub.' },
                     family_cursors: {
                       type: 'object',
                       additionalProperties: { type: 'string', format: 'date-time', nullable: true },
@@ -9048,7 +9048,7 @@ export function buildOpenApiDocument(origin: string) {
               in: 'query',
               required: false,
               schema: { type: 'string' },
-              description: 'Compatibility field. Tower evaluates viewerNpub as the resolved user_npub.',
+              description: 'Compatibility field. NStack evaluates viewerNpub as the resolved user_npub.',
             },
             {
               name: 'ws_key_npub',
@@ -9062,7 +9062,7 @@ export function buildOpenApiDocument(origin: string) {
               in: 'query',
               required: false,
               schema: { type: 'string' },
-              description: 'Canonical delegated workspace user key. If present, Tower verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.',
+              description: 'Canonical delegated workspace user key. If present, NStack verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.',
             },
           ],
           responses: {
@@ -9117,7 +9117,7 @@ export function buildOpenApiDocument(origin: string) {
               in: 'query',
               required: false,
               schema: { type: 'string' },
-              description: 'Compatibility field. Tower evaluates viewerNpub as the resolved user_npub.',
+              description: 'Compatibility field. NStack evaluates viewerNpub as the resolved user_npub.',
             },
             {
               name: 'ws_key_npub',
@@ -9131,7 +9131,7 @@ export function buildOpenApiDocument(origin: string) {
               in: 'query',
               required: false,
               schema: { type: 'string' },
-              description: 'Canonical delegated workspace user key. If present, Tower verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.',
+              description: 'Canonical delegated workspace user key. If present, NStack verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.',
             },
             {
               name: 'record_family_hash',
@@ -9726,7 +9726,7 @@ export function buildOpenApiDocument(origin: string) {
               in: 'query',
               required: false,
               schema: { type: 'string' },
-              description: 'Compatibility field. Tower evaluates viewerNpub as the resolved user_npub.',
+              description: 'Compatibility field. NStack evaluates viewerNpub as the resolved user_npub.',
             },
             {
               name: 'ws_key_npub',
@@ -9740,7 +9740,7 @@ export function buildOpenApiDocument(origin: string) {
               in: 'query',
               required: false,
               schema: { type: 'string' },
-              description: 'Canonical delegated workspace user key. If present, Tower verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.',
+              description: 'Canonical delegated workspace user key. If present, NStack verifies signer_npub equals this key and the key is active for user_npub and workspace_service_npub.',
             },
             {
               name: 'record_family_hash',
@@ -9828,7 +9828,7 @@ export function buildOpenApiDocument(origin: string) {
         get: {
           tags: ['Storage'],
           summary: 'Get storage object metadata and stable content URL',
-          description: 'Private reads use the generic owner/uploader/group ACL first, then a narrow message-attachment fallback that requires an active Tower-authored message link and current channel.read permission. Unassociated private objects remain owner-only; public access remains explicit.',
+          description: 'Private reads use the generic owner/uploader/group ACL first, then a narrow message-attachment fallback that requires an active NStack-authored message link and current channel.read permission. Unassociated private objects remain owner-only; public access remains explicit.',
           security: [{ nip98: [] }],
           parameters: [
             { name: 'objectId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
@@ -9902,7 +9902,7 @@ export function buildOpenApiDocument(origin: string) {
       '/api/v4/storage/{objectId}/download-url': {
         get: {
           tags: ['Storage'],
-          summary: 'Get an authorized download URL (private objects require signed Tower content requests) for a storage object',
+          summary: 'Get an authorized download URL (private objects require signed NStack content requests) for a storage object',
           description: 'Uses the same owner/group/public or active message-link authorization as metadata and content reads.',
           security: [{ nip98: [] }],
           parameters: [

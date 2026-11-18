@@ -1,7 +1,7 @@
 # GRasp operations and migration
 
 GRasp owns Git storage, signed repository state and NIP-34 review events.
-Tower owns shared workspace authority and safe service discovery. Autopilot
+NStack owns shared workspace authority and safe service discovery. Autopilot
 supplies stable broker signing capabilities; it must not receive exported keys.
 Transport remains separate from authentication, including pinned FIPS access.
 

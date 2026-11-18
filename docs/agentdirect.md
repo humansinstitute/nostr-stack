@@ -1,22 +1,22 @@
-# Agent Direct Chat: Tower MVP Design
+# Agent Direct Chat: NStack MVP Design
 
 ## Purpose
 
-Agent Direct Chat lets a human converse with a Wingman agent in a normal Flight Deck channel thread. A canonical agent mention activates a direct Autopilot session; Autopilot answers by creating an ordinary Tower PG chat message signed by the agent. Later human messages in the activated thread continue the same Autopilot conversation without a pipeline.
+Agent Direct Chat lets a human converse with an Autopilot agent in a normal Flight Deck channel thread. A canonical agent mention activates a direct Autopilot session; Autopilot answers by creating an ordinary NStack PG chat message signed by the agent. Later human messages in the activated thread continue the same Autopilot conversation without a pipeline.
 
-Tower is the shared authority and transport boundary. It stores channel configuration and messages, validates actors and access, emits visible events, provides authoritative ordered thread reads, and makes agent reply creation idempotent. Tower does not run or resume Autopilot sessions.
+NStack is the shared authority and transport boundary. It stores channel configuration and messages, validates actors and access, emits visible events, provides authoritative ordered thread reads, and makes agent reply creation idempotent. NStack does not run or resume Autopilot sessions.
 
 ## System Ownership
 
 - Flight Deck owns mention selection, channel settings, and message rendering.
-- Tower owns canonical workspace/channel/thread/message data, authorization, actor identity, visible events, and idempotent writes.
+- NStack owns canonical workspace/channel/thread/message data, authorization, actor identity, visible events, and idempotent writes.
 - Autopilot owns local agent configuration, routing, session lifecycle, prompts, response parsing, and publication calls.
 
 There is no direct Flight Deck browser-to-Autopilot connection and no pipeline or invocation record for this MVP.
 
-## MVP Tower Responsibilities
+## MVP NStack Responsibilities
 
-Tower must provide:
+NStack must provide:
 
 1. durable, validated Agent Direct Chat channel configuration;
 2. canonical structured agent mentions on messages;
@@ -26,7 +26,7 @@ Tower must provide:
 6. idempotent message creation for safe Autopilot retries;
 7. normal authorization and visibility enforcement for all of the above.
 
-Tower must not own:
+NStack must not own:
 
 - local directories or project checkout paths;
 - Autopilot session IDs as operational state;
@@ -35,7 +35,7 @@ Tower must not own:
 - output parsing;
 - agent model selection.
 
-Autopilot may include a session ID in message provenance, but Tower treats it as descriptive metadata.
+Autopilot may include a session ID in message provenance, but NStack treats it as descriptive metadata.
 
 ## Channel Configuration Contract
 
@@ -82,7 +82,7 @@ The message create request accepts structured mentions in metadata or a typed re
 }
 ```
 
-Tower must:
+NStack must:
 
 1. validate `type`, `npub`, and optional display label;
 2. resolve the npub to a workspace actor;
@@ -154,7 +154,7 @@ Required semantics:
 
 Implementation options include a nullable `client_request_id` on `flightdeck_pg_messages` with a partial unique index, or a general request-deduplication table. Prefer the smallest design consistent with existing schema patterns.
 
-This contract protects the crash window where Tower accepts the reply but Autopilot restarts before persisting Tower's response.
+This contract protects the crash window where NStack accepts the reply but Autopilot restarts before persisting NStack's response.
 
 ## Message Event Contract
 
@@ -186,7 +186,7 @@ The event cursor/order must remain monotonic under the existing workspace event 
 
 The event is still advisory. Autopilot must be able to recover the authoritative message and thread through typed reads using the IDs. Do not put full thread history in the event.
 
-Self-authored agent replies produce the same ordinary event. Autopilot suppresses them by authenticated actor identity; Tower should not hide those events because Flight Deck and other authorized consumers need them.
+Self-authored agent replies produce the same ordinary event. Autopilot suppresses them by authenticated actor identity; NStack should not hide those events because Flight Deck and other authorized consumers need them.
 
 ## Authoritative Thread Read Contract
 
@@ -225,7 +225,7 @@ If the existing `GET .../channels/:channelId/messages?thread_id=...` contract al
 
 ## Optional Response Activity
 
-Tower already has response-activity concepts. The MVP may reuse them to expose `waiting`, `running`, `failed`, or `idle` UI state, but this is optional.
+NStack already has response-activity concepts. The MVP may reuse them to expose `waiting`, `running`, `failed`, or `idle` UI state, but this is optional.
 
 If implemented:
 
@@ -237,11 +237,11 @@ If implemented:
 
 ## Single Implementation Work Package
 
-Implement this MVP as one Tower work package named **Agent Direct Chat: typed chat contract and reliable delivery**. Assign the complete package to one worker/session in this repository. Do not split channel configuration, canonical mentions, events, thread reads, idempotent writes, migrations, OpenAPI, and tests into separate independently handed-off tasks: together they are one versioned backend contract consumed by Flight Deck and Autopilot.
+Implement this MVP as one NStack work package named **Agent Direct Chat: typed chat contract and reliable delivery**. Assign the complete package to one worker/session in this repository. Do not split channel configuration, canonical mentions, events, thread reads, idempotent writes, migrations, OpenAPI, and tests into separate independently handed-off tasks: together they are one versioned backend contract consumed by Flight Deck and Autopilot.
 
 ### Package objective
 
-Make Tower the complete authoritative transport for Agent Direct Chat while remaining unaware of Autopilot session lifecycle.
+Make NStack the complete authoritative transport for Agent Direct Chat while remaining unaware of Autopilot session lifecycle.
 
 ### Prerequisites
 
@@ -263,7 +263,7 @@ Make Tower the complete authoritative transport for Agent Direct Chat while rema
 ### Explicit exclusions
 
 - no Autopilot session or project configuration;
-- no session create/resume endpoints in Tower;
+- no session create/resume endpoints in NStack;
 - no pipeline or invocation record for chat;
 - no response parsing;
 - no requirement to implement optional response activity for MVP completion.
@@ -279,7 +279,7 @@ Make Tower the complete authoritative transport for Agent Direct Chat while rema
 
 ### Validation and definition of done
 
-Run focused Flight Deck PG route/service tests, schema migration checks, contract fixture tests, and the repository's full relevant test suite. The package is done only when every Tower acceptance test below passes, existing message clients remain compatible, duplicate publication is proven safe, authorship cannot be spoofed, and compatible Flight Deck and Autopilot builds complete the integrated vertical slice.
+Run focused Flight Deck PG route/service tests, schema migration checks, contract fixture tests, and the repository's full relevant test suite. The package is done only when every NStack acceptance test below passes, existing message clients remain compatible, duplicate publication is proven safe, authorship cannot be spoofed, and compatible Flight Deck and Autopilot builds complete the integrated vertical slice.
 
 ## Schema and Migration Directions
 
@@ -334,15 +334,15 @@ Document that Autopilot replies are normal agent-authored messages and that meta
 
 ## Cross-Project Delivery Contract
 
-The Tower portion is complete only when the integrated vertical slice succeeds:
+The NStack portion is complete only when the integrated vertical slice succeeds:
 
 ```text
 Flight Deck writes a canonical Agent mention
-→ Tower stores it and emits one visible event
+→ NStack stores it and emits one visible event
 → Autopilot fetches authoritative channel/thread state
 → Autopilot creates or resumes Agent's normal session
 → Autopilot writes the parsed reply with an idempotency key
-→ Tower attributes it to Agent and emits one visible event
+→ NStack attributes it to Agent and emits one visible event
 → Flight Deck renders exactly one ordinary Agent-authored message
 ```
 

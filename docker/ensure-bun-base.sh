@@ -22,7 +22,7 @@ validate_base() {
   actual_version="$(docker run --rm --entrypoint bun "$image" --version 2>/dev/null || true)"
   [[ "$actual_version" == "$BUN_VERSION" ]] || return 1
 
-  # A cached runtime base must not contain a previous Tower application tree.
+  # A cached runtime base must not contain a previous NStack application tree.
   docker run --rm --entrypoint sh "$image" -c \
     'test ! -e /app/package.json && test ! -e /app/src && test ! -e /app/node_modules' \
     >/dev/null 2>&1
@@ -55,12 +55,12 @@ if [[ "$REFRESH" -eq 0 ]] && validate_base "$CACHE_IMAGE"; then
 fi
 
 if [[ "$REFRESH" -eq 0 ]] && docker image inspect "$CACHE_IMAGE" >/dev/null 2>&1; then
-  echo "WARN: ignoring invalid Bun cache $CACHE_IMAGE (wrong Bun version or contains Tower files)" >&2
+  echo "WARN: ignoring invalid Bun cache $CACHE_IMAGE (wrong Bun version or contains NStack files)" >&2
 fi
 
 echo "==> Refreshing Bun base from $UPSTREAM_IMAGE" >&2
 if ! pull_with_timeout "$UPSTREAM_IMAGE"; then
-  echo "ERROR: Bun base refresh failed; the running Tower container was not changed." >&2
+  echo "ERROR: Bun base refresh failed; the running NStack container was not changed." >&2
   echo "       Retry later or set TOWER_BUN_UPSTREAM_IMAGE to a reachable mirror." >&2
   exit 1
 fi

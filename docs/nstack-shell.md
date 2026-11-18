@@ -6,7 +6,7 @@ an approved random loopback origin and capability path. This is static software,
 not a proxy for remote HTML or scripts. Navigation to arbitrary `.fips` pages does
 not grant the universal provider or expand native origin policy.
 
-Build the reviewed static bundle from a committed Tower revision:
+Build the reviewed static bundle from a committed NStack revision:
 
 ```sh
 bun scripts/build-nstack-shell.ts
@@ -16,7 +16,7 @@ bun scripts/build-nstack-shell.ts
 `sourceRevision`, `entrypoint: index.html`, and a `files` map. Each relative path
 maps to its SHA-256 and content type. NBrowser's catalogue pins the manifest hash
 and checks all bundled file hashes before serving. Update requires a reviewed
-Tower source revision, regenerated hashes, NBrowser import/catalogue update and
+NStack source revision, regenerated hashes, NBrowser import/catalogue update and
 its normal release process. Do not pin an intermediate dirty worktree as a release.
 
 The approved CSP permits explicit HTTPS API connections while blocking ambient HTTP; FIPS requests use the scoped native handle. Redirects, cookies and request-origin escape are rejected.
@@ -33,7 +33,7 @@ The shell never substitutes the first accessible workspace or registers an app
 merely from connection. Backend and workspace pins persist locally and reject
 silent identity replacement. Disconnect/navigation releases the scoped handle.
 
-The ordinary `/ui` console remains hosted by Tower. Fresh setup mode defaults
+The ordinary `/ui` console remains hosted by NStack. Fresh setup mode defaults
 workspace creation to the shared UUID model suitable for Alexandria/Ambulando;
 existing env deployments retain the encrypted-record creation default. The model
 is an explicit choice, and shared creation still requires instance administration.

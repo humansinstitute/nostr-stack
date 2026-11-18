@@ -1,10 +1,10 @@
-# Wingman Tower Prod Deploy
+# Wingman NStack Prod Deploy
 
-This Docker bundle is for the backend-only Tower service. Flight Deck is not part of this stack.
+This Docker bundle is for the backend-only NStack service. Flight Deck is not part of this stack.
 
 ## Required env
 
-Tower runtime needs these values:
+NStack runtime needs these values:
 
 - `SUPERBASED_DIRECT_HTTPS_URL`
 - `ADMIN_NPUB`
@@ -38,7 +38,7 @@ If you use the provided Docker Compose stack, set these wrapper vars too:
 
 If you run raw `docker run`, pass the app port as `PORT`.
 
-Optional because Tower has code defaults:
+Optional because NStack has code defaults:
 
 - `STORAGE_S3_REGION` default `us-east-1`
 - `STORAGE_S3_FORCE_PATH_STYLE` default `true`
@@ -68,7 +68,7 @@ Important container note:
 - `STORAGE_S3_ENDPOINT_PUBLIC` should be the host or public URL clients will use for presigned downloads.
 - The bundled MinIO API and console bind to host loopback by default. Containers
   still reach MinIO over the private Compose network at `http://minio:9000`.
-- Only point Tower at an external S3/MinIO service if you are intentionally replacing the bundled storage container.
+- Only point NStack at an external S3/MinIO service if you are intentionally replacing the bundled storage container.
 
 ## First-time setup
 
@@ -81,7 +81,7 @@ cp .env.prod.example .env.prod
 
 2. Edit `.env.prod`:
 
-- set `SUPERBASED_DIRECT_HTTPS_URL` to the production Tower URL
+- set `SUPERBASED_DIRECT_HTTPS_URL` to the production NStack URL
 - set `SUPERBASED_SERVICE_NSEC` to the stable service key
 - set `DB_PASSWORD` to a real password
 - set the main and graph database usernames/passwords explicitly; no credential defaults are accepted
@@ -130,7 +130,7 @@ when required, uses `docker-compose.grasp-public.yml` with independent storage.
 Neither Compose file starts or restarts Autopilot. Keep current runtime targets
 unchanged until the supervising owner approves the prepared activation.
 
-Postgres is created automatically, MinIO is bootstrapped with the configured bucket, and Tower waits for its dependencies, runs migrations, then starts the API.
+Postgres is created automatically, MinIO is bootstrapped with the configured bucket, and NStack waits for its dependencies, runs migrations, then starts the API.
 
 Changing an existing database or MinIO credential in `.env.prod` does not rotate
 the credential already stored in a Docker volume. Coordinate credential rotation
@@ -152,13 +152,13 @@ smoke commands are in [Nstack services](nstack-services.md).
 
 Agent Git operations use the stable capability broker through
 `scripts/grasp/git.ts`. No native Forgejo OAuth credential, login allowlist or
-Tower OIDC client/signing secret is part of the new GRasp runtime.
+NStack OIDC client/signing secret is part of the new GRasp runtime.
 
-## Canonical Tower release checks
+## Canonical NStack release checks
 
 ### Context Tree activation
 
-Tower is a backend Docker Compose service, not an Autopilot-managed WApp.
+NStack is a backend Docker Compose service, not an Autopilot-managed WApp.
 For an existing local stack, confirm its ownership before activation:
 
 ```bash
@@ -186,18 +186,18 @@ Use an authorized signer for the exact GET URL
 and the configured `x-flightdeck-pg-app-npub`. A visible empty scope must return
 `200`, `components: []` and the actor's `capabilities`. `manage: false` is a real
 editing restriction; neither workspace visibility nor an Autopilot app-operation
-delegation grants Tower's `scope.manage`. An unregistered route returning plain
+delegation grants NStack's `scope.manage`. An unregistered route returning plain
 `404 Not Found` indicates stale deployment, whereas typed `context_not_found`
 conceals missing or inaccessible context. Check these separately.
 
-For browser acceptance, use the served build and real Tower responses. A newly
+For browser acceptance, use the served build and real NStack responses. A newly
 opened browser may need to finish a paginated record snapshot before Context Tree
 becomes complete. Verify root creation, child creation, rename/reparent and reload
 with an existing authorized scope manager. An agent's read-only browser/API check
 cannot prove the human manager's editing flow. Preserve true permission gates;
 do not grant an agent management permission merely to obtain a passing check.
 
-There is currently no dedicated Tower deployment smoke-check script in this
+There is currently no dedicated NStack deployment smoke-check script in this
 repo. Until one exists, use these as the canonical manual release checks after
 build/restart.
 
@@ -316,13 +316,13 @@ charges each workspace at most once for a given hour via the unique
 `(workspace_owner_npub, hour_start)` row in `workspace_usage_hourly_audits`, so
 retries are safe.
 
-Run this command on an hourly scheduler from the Tower app directory/container:
+Run this command on an hourly scheduler from the NStack app directory/container:
 
 ```bash
 set -a; . ./.env.prod; set +a; bun run billing:audit
 ```
 
-To audit a specific hour, pass an ISO timestamp. Tower normalizes it down to the
+To audit a specific hour, pass an ISO timestamp. NStack normalizes it down to the
 UTC hour:
 
 ```bash
@@ -363,7 +363,7 @@ The `/admin` page supports:
 
 The older `/table-viewer` route remains available for direct table inspection.
 
-The `/ui` page is the public Tower-hosted Superbased dashboard. It uses the
+The `/ui` page is the NStack workspace console. Advanced developer and billing tools remain at `/ui/advanced`. It uses the
 same browser NIP-98 signing pattern, scoped to workspaces the authenticated user
 can manage. It supports billing status, app namespace persistence, connection
 detail regeneration, and encrypted record/storage metadata inspection.
@@ -387,7 +387,7 @@ node src/cli.js init --token "<connection_token>"
 ## Update deploy
 
 For a reviewed API-only checkpoint on an existing healthy stack, limit container
-replacement to Tower. First verify the ownership labels described above, validate
+replacement to NStack. First verify the ownership labels described above, validate
 the existing Compose/FIPS configuration, and validate the cached Bun base:
 
 ```bash
@@ -412,9 +412,9 @@ cd /path/to/wingman-tower
 ```
 
 The deploy script validates and reuses a clean local Bun runtime image before
-building Tower. Normal rebuilds therefore do not depend on Docker Hub metadata
+building NStack. Normal rebuilds therefore do not depend on Docker Hub metadata
 being available. If the cache is missing, the script pulls `oven/bun:1.2.23`
-with a bounded timeout and stops before replacing the running Tower container
+with a bounded timeout and stops before replacing the running NStack container
 if that pull fails.
 
 Refresh the cached runtime intentionally after changing the pinned Bun version:
@@ -425,7 +425,7 @@ Refresh the cached runtime intentionally after changing the pinned Bun version:
 
 `TOWER_BUN_UPSTREAM_IMAGE` can point at a registry mirror. The validated local
 cache name defaults to `wingman-tower-bun-base:1.2.23` and can be changed with
-`TOWER_BUN_CACHE_IMAGE`. Do not use a previously built Tower application image
+`TOWER_BUN_CACHE_IMAGE`. Do not use a previously built NStack application image
 as `TOWER_BUN_IMAGE`; the validator rejects images containing `/app` source or
 dependencies to prevent recursive image layering.
 
@@ -459,7 +459,7 @@ bot capability broker to inspect authorized v1/v2 discovery/checkpoints. Ordinar
 channel/grant changes should preserve epoch/checkpoint state; targeted historic
 pages should contain only newly readable partitions. See
 [the client contract](contract/additive-record-access-v1.md). Browser retention
-and UI validation follow Tower-first activation; they are separate from schema
+and UI validation follow NStack-first activation; they are separate from schema
 health. Keep live smoke checks read-only or confined to a dedicated fixture.
 
 ## Release identity
