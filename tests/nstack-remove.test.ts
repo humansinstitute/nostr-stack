@@ -18,7 +18,8 @@ function fake(initial:Snapshot,fail=''){
   if(a[1]==='inspect')return JSON.stringify(state.containers.filter(c=>a.slice(2).includes(c.Id)));
   if(a[2]==='ls')return (a[1]==='volume'?state.volumes.map(v=>v.Name):state.networks.map(n=>n.Id)).join('\n');
   if(a[2]==='inspect')return JSON.stringify((a[1]==='volume'?state.volumes:state.networks).filter(r=>a.slice(3).includes(r.Id||r.Name)));
-  if(a[1]==='rm'){state.containers=state.containers.filter(c=>c.Id!==a[3]);for(const n of state.networks)delete n.Containers?.[a[3]!];return '';}
+  if(a[1]==='stop')return '';
+  if(a[1]==='rm'){state.containers=state.containers.filter(c=>c.Id!==a[2]);for(const n of state.networks)delete n.Containers?.[a[2]!];return '';}
   if(a[2]==='rm'){if(a[1]==='volume')state.volumes=state.volumes.filter(v=>v.Name!==a[3]);else state.networks=state.networks.filter(n=>n.Id!==a[3]);return '';}
   throw Error('unexpected '+cmd);
  };return {exec,state,calls};
@@ -108,4 +109,17 @@ test('daemon switch and volume generation change after preflight stop further de
   const f=fake(fixture());let info=0;const exec:Run=async a=>{if(a[1]==='info'&&++info===2){if(change==='daemon')return 'other-daemon';f.state.volumes[0]!.CreatedAt='recreated';}return f.exec(a);};
   await expect(removeInstallation({project:'test',purge:true,dryRun:false},root,exec)).rejects.toThrow(change==='daemon'?'context/daemon changed':'was recreated');expect(f.state.containers).toHaveLength(1);expect(f.state.volumes).toHaveLength(1);
  }
+});
+test('controller stops first; every container stops gracefully before plain rm; stop failure halts removal',async()=>{
+ const s=fixture();s.containers.push({Id:'controller',Config:{Labels:{...s.containers[0]!.Config.Labels,'com.docker.compose.service':'controller'}},Mounts:[],NetworkSettings:{Networks:{}}});
+ const f=fake(s);await removeInstallation({project:'test',purge:false,dryRun:false},root,f.exec);
+ const mutations=f.calls.filter(a=>a[0]==='docker'&&(a[1]==='stop'||a[1]==='rm'));expect(mutations[0]).toEqual(['docker','stop','--timeout=20','controller']);
+ for(const id of ['controller','test-id']){const stop=mutations.findIndex(a=>a[1]==='stop'&&a.at(-1)===id),rm=mutations.findIndex(a=>a[1]==='rm'&&a.at(-1)===id);expect(stop).toBeLessThan(rm);expect(mutations[rm]).toEqual(['docker','rm',id]);}
+ const failure=fake(s,'docker stop');await expect(removeInstallation({project:'test',purge:true,dryRun:false},root,failure.exec)).rejects.toThrow('Partial completion');expect(failure.state.containers).toHaveLength(2);expect(failure.calls.some(a=>a[1]==='rm')).toBe(false);
+});
+test('preview/commands use application grace but never auto-force persistent datastores, including module graph',async()=>{
+ const s=fixture();for(const service of ['postgres','minio','graph']){const l=service==='graph'?{...label(),[M]:'graph',[V]:'v1','com.docker.compose.service':'bootstrap'}:{...s.containers[0]!.Config.Labels,'com.docker.compose.service':service};s.containers.push({Id:service,Config:{Labels:l},Mounts:[],NetworkSettings:{Networks:{}}});}
+ const f=fake(s);const preview=await removeInstallation({project:'test',purge:false,dryRun:false},root,f.exec);
+ for(const service of ['postgres','minio','graph']){expect(f.calls).toContainEqual(['docker','stop','--timeout=-1',service]);expect(preview.containers.find(c=>c.id===service)?.stop_timeout_seconds).toBe(-1);}
+ expect(f.calls).toContainEqual(['docker','stop','--timeout=20','test-id']);expect(preview.stop_policy).toContain('crash recovery');
 });

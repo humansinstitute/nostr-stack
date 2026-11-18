@@ -243,7 +243,15 @@ across all source versions and folders**. If an old archive and your clone both
 used `my-test`, removing it removes that installation, including the currently
 running version. It does not select an old source version.
 
-Default removal stops and uninstalls that project's OS user helper, removes its
+Default removal stops services (controller first) before removing containers.
+Application containers get a 20-second Docker stop period; Docker may terminate
+unresponsive application processes after that period, including old Bun PID1
+runtimes. Optional relay, Blossom and Git modules may require crash recovery on
+restart. Postgres, object storage and the graph database never receive automatic
+forced termination: if they cannot stop gracefully within the bounded client
+wait, removal fails with partial status and preserves remaining resources.
+Running containers are never force-removed. The command uninstalls
+that project's OS user helper, removes its
 verified containers (including Compose orphans and controller-managed optional
 modules) and networks, and preserves volumes, credentials, identity, private
 files and recovery files. Run `bun run nstack:setup my-test` to recreate services

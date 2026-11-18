@@ -32,6 +32,7 @@ function owned(l:Resource,project:string,kind:string){
  }else if(!l['com.docker.compose.'+(kind==='container'?'service':kind==='volume'?'volume':'network')])throw Error(`Ambiguous ${kind} with project label; refusing removal.`);
  return true;
 }
+function stopTimeout(service:string){return ['postgres','minio','graph'].includes(service)?-1:20;}
 export function planRemoval(project:string,s:Snapshot){
  validateProject(project);
  const containers=s.containers.filter(c=>owned(labels(c,true),project,'container'));
@@ -54,7 +55,7 @@ export function planRemoval(project:string,s:Snapshot){
   }
  }
  for(const n of networks)for(const id of Object.keys(n.Containers||{}))if(!ids.has(id))throw Error(`Network ${n.Id} has foreign endpoint ${id}; refusing removal.`);
- return {containers:containers.map(c=>({id:c.Id,name:c.Name,service:labels(c,true)['com.docker.compose.service']||labels(c,true)[MODULE]})),networks:networks.map(n=>({id:n.Id,name:n.Name})),volumes:volumes.map(v=>v.Name).sort()};
+ return {containers:containers.map(c=>({id:c.Id,name:c.Name,service:labels(c,true)[MODULE]||labels(c,true)['com.docker.compose.service'],stop_timeout_seconds:stopTimeout(labels(c,true)[MODULE]||labels(c,true)['com.docker.compose.service'])})),networks:networks.map(n=>({id:n.Id,name:n.Name})),volumes:volumes.map(v=>v.Name).sort()};
 }
 
 // Verify every parent too: neither an archive binding nor HOME may redirect deletion through a symlink.
@@ -177,13 +178,15 @@ export async function removeInstallation(options:{project:string;purge:boolean;d
   const helper=await helperProof(project,exec);
   const recovery:FileProof[]=[];
   if(purge)for(const folder of new Set([root,...(helper.boundRoot?[helper.boundRoot]:[])])){const p=await recoveryProof(folder,project);if(p){await verifyRecovery(p,project,snapshot,exec);recovery.push(p);}}
-  const preview={project,dry_run:dryRun,purge,helper:{label:helper.label,config:helper.proof?.path||null,active:helper.state.active},containers:plan.containers,networks:plan.networks,delete_volumes:purge?plan.volumes:[],preserve_volumes:purge?[]:plan.volumes,delete_recovery_files:recovery.map(p=>p.path),warning:purge?'PERMANENT LOSS: installation data, credentials and identity will be deleted.':'Data, credentials, identity and recovery files are retained. Same project name is ONE installation across source versions.'};
+  const preview={project,dry_run:dryRun,purge,helper:{label:helper.label,config:helper.proof?.path||null,active:helper.state.active},containers:plan.containers,networks:plan.networks,delete_volumes:purge?plan.volumes:[],preserve_volumes:purge?[]:plan.volumes,delete_recovery_files:recovery.map(p=>p.path),stop_policy:'Applications: Docker may terminate an unresponsive process after 20 seconds; module relay/blossom/git may need crash recovery on restart. Datastores (postgres/minio/graph): no automatic forced termination; bounded client wait fails partial.',warning:purge?'PERMANENT LOSS: installation data, credentials and identity will be deleted.':'Data, credentials, identity and recovery files are retained. Same project name is ONE installation across source versions.'};
   console.log(JSON.stringify(preview,null,2));if(dryRun)return preview;
   phase='stop/uninstall helper';completed.push('helper uninstall attempted (verify status if this step fails)');await stopHelper(helper,exec);completed.push('helper stopped/uninstalled');
   // Stop the controller first so it cannot recreate optional modules during teardown.
-  phase='stop controller';for(const c of plan.containers.filter(c=>c.service==='controller'))await exec(['docker','stop',c.id]);
+  // Datastores never auto-escalate to SIGKILL; application grace supports legacy PID1 runtimes.
+  // The bounded client deadline fails partial, and plain rm never deletes a running container.
+  phase='stop controller';for(const c of plan.containers.filter(c=>c.service==='controller'))await exec(['docker','stop','--timeout='+c.stop_timeout_seconds,c.id]);
   assertSame(plan,await recheck());
-  for(const c of plan.containers){phase=`remove container ${c.id}`;const current=await recheck();if(!current.containers.some(x=>x.id===c.id))throw Error('Container inventory changed; retry.');await exec(['docker','rm','-f',c.id]);completed.push(phase);}
+  for(const c of plan.containers){phase=`remove container ${c.id}`;const current=await recheck();if(!current.containers.some(x=>x.id===c.id))throw Error('Container inventory changed; retry.');phase=`stop container ${c.id}`;await exec(['docker','stop','--timeout='+c.stop_timeout_seconds,c.id]);completed.push(phase);phase=`remove container ${c.id}`;await exec(['docker','rm',c.id]);completed.push(phase);}
   for(const n of plan.networks){phase=`remove network ${n.id}`;await recheck();await exec(['docker','network','rm',n.id]);completed.push(phase);}
   if(purge){
    // Unlink verified recovery first: a later volume failure must remain safely retryable.
