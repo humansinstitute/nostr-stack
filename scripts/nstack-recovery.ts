@@ -31,7 +31,7 @@ export function localPort(container:any):string|null{
  const binding=ports?.find((p:any)=>p.HostIp==='127.0.0.1');
  return binding&&/^\d+$/.test(binding.HostPort)&&Number(binding.HostPort)>0&&Number(binding.HostPort)<=65535?binding.HostPort:null;
 }
-export async function saveRecovery(root:string,project:string,installation:string,url:string,claimed:boolean,code:string|undefined,ready:boolean){
+export async function saveRecovery(root:string,project:string,installation:string,url:string,claimed:boolean,code:string|undefined,ready:boolean,binding?:{daemon:string;volume:string;created:string}){
  validateProject(project);
  root=resolve(root);
  if(await realpath(root)!==root)throw Error('Recovery install folder must not use symlinks.');
@@ -51,7 +51,7 @@ export async function saveRecovery(root:string,project:string,installation:strin
  }
  const before=await existing();
  const temporary=join(root,`.nstack-recovery-${randomBytes(16).toString('hex')}.tmp`);
- const contents=[marker,`Setup URL: ${url}`,`Readiness: ${ready?'ready at last check':'not ready; startup may still be in progress'}`,claimed?'Administrator: already claimed or managed by environment settings. Sign in with the existing administrator Nostr identity.':`Unused first-administrator claim code: ${code}`,'','This code can claim administration once only. A copied code cannot be reused after claim.','This file is refreshed by setup/recovery, not automatically when a claim occurs.','Keep this private. Recovery never resets administration or installation identity.',''].join('\n');
+ const contents=[marker,...(binding?['Docker binding v1 '+JSON.stringify(binding)]:[]),`Setup URL: ${url}`,`Readiness: ${ready?'ready at last check':'not ready; startup may still be in progress'}`,claimed?'Administrator: already claimed or managed by environment settings. Sign in with the existing administrator Nostr identity.':`Unused first-administrator claim code: ${code}`,'','This code can claim administration once only. A copied code cannot be reused after claim.','This file is refreshed by setup/recovery, not automatically when a claim occurs.','Keep this private. Recovery never resets administration or installation identity.',''].join('\n');
  const file=await open(temporary,'wx',0o600);
  try{
   await file.writeFile(contents);await file.sync();await file.close();
@@ -75,7 +75,10 @@ export async function recoverInstallation(root:string,project:string,quiet=false
  const url=`http://127.0.0.1:${port}/ui`;
  const ready=container.State.Health?.Status==='healthy';
  const identity=state.service_npub;
- const path=await saveRecovery(root,project,identity,url,state.claimed,state.code,ready);
+ const daemon=await docker(['info','--format','{{.ID}}']);
+ const [volume]=JSON.parse(await docker(['volume','inspect',mount.Name]));
+ if(!daemon||volume?.Name!==mount.Name||volume.Labels?.['com.docker.compose.project']!==project||volume.Labels?.['com.docker.compose.volume']!=='bootstrap'||typeof volume.CreatedAt!=='string')throw Error('Cannot bind recovery to durable installation volume.');
+ const path=await saveRecovery(root,project,identity,url,state.claimed,state.code,ready,{daemon,volume:mount.Name,created:volume.CreatedAt});
  if(!quiet){console.log(`Recovery file: ${path}\nSetup URL: ${url}\n${ready?'Installation ready.':'Installation not ready yet; rerun recovery after startup or setup with the same name.'}\n${state.claimed?'Administrator already claimed or managed; use the existing administrator identity.':'The unused one-time administrator claim code is in the private recovery file.'}`);}
  return {path,url,ready,claimed:state.claimed};
 }

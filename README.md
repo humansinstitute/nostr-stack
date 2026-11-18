@@ -57,6 +57,9 @@ The additive [NStack setup bundle](docs/nstack-setup.md) starts local administra
 without an authored env file, generates durable credentials/identity and safely
 claims the instance with Nostr. It preserves existing production deployments.
 For repeated source testing, use the [clone/pull workflow](docs/nstack-launcher.md#test-from-one-git-clone) with host Bun and the same installation name.
+Remove disposable installations with `bun run nstack:rm <project> --dry-run`
+then `bun run nstack:rm <project>` (data retained); explicit `--purge` permanently
+deletes their data and identity. See the [removal guide](docs/nstack-launcher.md#remove-an-old-test-installation).
 
 [Optional module lifecycle](docs/nstack-modules.md) covers graph, relay, Blossom
 and private Git configuration, probes and rollback. Source availability is separate

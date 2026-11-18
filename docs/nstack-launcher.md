@@ -228,3 +228,56 @@ to review the public identity **in the page** before signing. Cancel before send
 leaves the installation unclaimed; dismiss any pending external signer prompt
 before retrying. After a send with an uncertain response, check status before
 retrying. The server remains the authority for the one-time claim.
+
+## Remove an old test installation
+
+From your Git clone, use the **exact project name** supplied to setup:
+
+```sh
+bun run nstack:rm my-test --dry-run
+bun run nstack:rm my-test
+```
+
+There is no default project. A project name identifies **one durable installation
+across all source versions and folders**. If an old archive and your clone both
+used `my-test`, removing it removes that installation, including the currently
+running version. It does not select an old source version.
+
+Default removal stops and uninstalls that project's OS user helper, removes its
+verified containers (including Compose orphans and controller-managed optional
+modules) and networks, and preserves volumes, credentials, identity, private
+files and recovery files. Run `bun run nstack:setup my-test` to recreate services
+using the retained data and administrator identity.
+
+For permanent deletion, preview first:
+
+```sh
+bun run nstack:rm my-test --purge --dry-run
+bun run nstack:rm my-test --purge
+```
+
+**`--purge` permanently destroys verified exclusive installation volumes,
+credentials, identity and data, plus matching private recovery files in the clone
+and the verified helper's old archive folder (when still bound there).** The flag
+is explicit deletion intent; no additional confirmation is requested. A subsequent
+setup with that name creates a new identity and empty installation.
+
+Dry run only inspects and prints exact resources; it never stops helpers or
+writes files. Removal requires Docker inspection and user-service access, even
+for an apparently absent installation. Shared volumes, foreign mounts/networks,
+unknown helper bindings, unsafe symlinks and unowned or non-private recovery files
+cause refusal. Recovery deletion verifies the public service identity from the
+selected Tower (including stopped containers), or the Docker daemon and durable
+bootstrap-volume generation binding written by current setup/recovery. A legacy
+recovery file whose Tower container is already gone cannot be verified: run
+setup/recovery with the same name on the intended Docker context first, then
+retry purge. A file from a different context/identity is never deleted.
+Resolve the reported attachment or file issue explicitly, then
+rerun the same command. If a step fails after others completed, output identifies
+the failed step and completed actions; a repeated removal safely handles what
+remains. Stop other setup/controller operations before removal to avoid races.
+
+Source/extracted folders, helper snapshots/logs, images, build cache, the shared
+FIPS daemon and Autopilot are retained. Old recovery files in folders no longer
+bound to the helper are retained; inspect and manage those private copies yourself.
+The command never prunes Docker or traverses arbitrary folders to find old files.

@@ -40,6 +40,8 @@ case "$1" in
  ps) echo fixture;;
  inspect) cat "$FIXTURE_CONTAINER";;
  exec) cat "$FIXTURE_STATE";;
+ info) echo daemon;;
+ volume) echo '[{"Name":"one_bootstrap","CreatedAt":"2026-11-18T00:00:00Z","Labels":{"com.docker.compose.project":"one","com.docker.compose.volume":"bootstrap"}}]';;
  *) exit 99;;
 esac
 `);await chmod(mock,0o755);
@@ -64,6 +66,8 @@ case "$1" in
  ps) echo fixture;;
  inspect) cat "$FIXTURE_CONTAINER";;
  exec) cat "$FIXTURE_STATE";;
+ info) echo daemon;;
+ volume) echo '[{"Name":"one_bootstrap","CreatedAt":"2026-11-18T00:00:00Z","Labels":{"com.docker.compose.project":"one","com.docker.compose.volume":"bootstrap"}}]';;
  compose)
   case "$*" in
    *'up -d'*)

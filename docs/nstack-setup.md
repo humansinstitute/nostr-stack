@@ -97,3 +97,13 @@ Stop/uninstall does not stop the shared FIPS daemon or remove installation data.
 Re-run the launcher or `install` after an approved source update to select a new
 hash-named runner snapshot. macOS user-agent persistence is checked separately
 from fresh Linux/systemd or reboot acceptance.
+
+### Remove test installations
+
+Use `bun run nstack:rm <project> --dry-run` to inspect the exact project, then
+`bun run nstack:rm <project>` to uninstall its helper and containers/networks while
+retaining data and identity. `bun run nstack:setup <project>` recreates services
+with that data. Explicit `--purge` permanently deletes verified exclusive volumes,
+data, credentials, identity and matching private recovery files. No default name
+is accepted. The same name across archives and clones is **one installation**,
+not separate versions. See [removal details and examples](nstack-launcher.md#remove-an-old-test-installation).
