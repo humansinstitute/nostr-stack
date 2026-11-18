@@ -38,7 +38,7 @@ export async function packageLauncher(options:{root:string;out:string;runtime:st
   // The temporary dependency link is removed before manifest/archive creation.
   await symlink(join(root,'node_modules'),join(destination,'node_modules'));
   const bundledDependencies=new Set<string>();
-  for(const entry of ['nstack-start','nstack-host','nstack-host-service','nstack-bundle-entry']){
+  for(const entry of ['nstack-recovery','nstack-start','nstack-host','nstack-host-service','nstack-bundle-entry']){
    const result=await Bun.build({entrypoints:[join(destination,'scripts',entry+'.ts')],target:'bun',outdir:join(destination,'scripts'),naming:entry+'.js',packages:'bundle'});
    if(!result.success)throw Error('Host bundle build failed: '+result.logs.join('\n'));
    for(const output of result.outputs)for(const match of (await output.text()).matchAll(/^\/\/ .*?node_modules\/((?:@[^/]+\/)?[^/]+)\//gm))bundledDependencies.add(match[1]!);

@@ -19,7 +19,7 @@ test('archive relocates without host Bun/Git/modules and rejects altered source/
   await writeFile(join(root,'docker-compose.setup.yml'),'services: {}\n');
   await writeFile(join(work,'LICENSE.md'),'Fixture runtime notice');
   await writeFile(join(root,'scripts/nstack-bundle-entry.ts'),await readFile(resolve(import.meta.dir,'../scripts/nstack-bundle-entry.ts')));
-  for(const name of ['nstack-start','nstack-host','nstack-host-service'])await writeFile(join(root,'scripts',name+'.ts'),`console.log(JSON.stringify({script:${JSON.stringify(name)},args:process.argv.slice(2),directory:import.meta.dir}));`);
+  for(const name of ['nstack-recovery','nstack-start','nstack-host','nstack-host-service'])await writeFile(join(root,'scripts',name+'.ts'),`console.log(JSON.stringify({script:${JSON.stringify(name)},args:process.argv.slice(2),directory:import.meta.dir}));`);
   expect((await run(['git','init','-q'])).code).toBe(0);
   await run(['git','add','.']);expect((await run(['git','-c','user.name=Package Test','-c','user.email=test@example.invalid','commit','-qm','test: package fixture'])).code).toBe(0);
   await writeFile(join(root,'.env'),'private fixture excluded');
@@ -33,6 +33,7 @@ test('archive relocates without host Bun/Git/modules and rejects altered source/
   const verified=await run([join(bundle,'nstack'),'verify'],work,env);expect(verified.code).toBe(0);expect(JSON.parse(verified.out).state).toBe('verified');
   const manifest=JSON.parse(await readFile(join(bundle,'bundle.json'),'utf8'));expect(manifest.files['.env']).toBeUndefined();expect(manifest.files['.git/config']).toBeUndefined();expect(manifest.files['node_modules']).toBeUndefined();
   const launched=await run([join(bundle,'nstack'),'setup','fixture'],work,env);expect(launched.code).toBe(0);expect(JSON.parse(launched.out).args).toEqual(['fixture']);expect(JSON.parse(launched.out).directory).toBe(await realpath(join(bundle,'scripts')));
+  const recovered=await run([join(bundle,'nstack'),'recovery','fixture'],work,env);expect(recovered.code).toBe(0);expect(JSON.parse(recovered.out).script).toBe('nstack-recovery');
   const verifier=await readFile(join(bundle,'scripts/nstack-bundle-entry.js'));
   await writeFile(join(bundle,'scripts/nstack-bundle-entry.js'),'console.log("must not execute")');
   const badVerifier=await run([join(bundle,'nstack'),'verify'],work,env);expect(badVerifier.code).not.toBe(0);expect(badVerifier.out).not.toContain('must not execute');

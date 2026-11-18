@@ -24,7 +24,7 @@ cd nstack-launcher-<version>-darwin-arm64
 ```
 
 Linux can use `sha256sum`. Keep the same installation project name on later
-starts. No env editing is required. The launcher prints the local claim code,
+starts. No env editing is required. The launcher saves the local URL and unused claim code in a private text file,
 starts Compose and registers its persistent OS user helper. The helper uses the
 bundled runtime's absolute path and a hash-named script/assets snapshot.
 **Keep the extracted folder at its selected location** while registered; moving
@@ -123,3 +123,46 @@ archives, the Go module proxy/checksum service, and the locked Bun package regis
 The first storage compile can take several minutes and more memory than subsequent
 starts. Go and build tools run inside Docker; no extra host tools or manual pulls
 are required. Network or registry failures are reported as failures, never success.
+
+## Recover after closing Terminal (rc.6 and later)
+
+From the extracted install folder, run:
+
+```sh
+./nstack recovery my-installation
+```
+
+This prints the actual local setup URL and the location of
+`nstack-my-installation-setup.txt` in that folder. Open the text file to get the
+unused first-administrator claim code. The file is written atomically with mode
+`0600` (your OS user only). Each project has its own file, bound to its durable
+service identity; recovery refuses symlinks, hardlinks and unrelated preexisting
+files instead of overwriting them. Keep the folder and file private.
+
+Setup saves this file as soon as the running Tower can read its durable bootstrap
+state, while Compose may still be waiting for readiness, and refreshes it before
+registering the host helper or printing success. The file records readiness at the
+last check. If Terminal closes or Ctrl-C interrupts startup before this point, no
+success or saved file is promised. Run recovery to check; if the installation is
+stopped or absent, rerun `./nstack setup my-installation` with the **same name**.
+This reuses credentials, identity, claims and volumes. Recovery itself only reads
+Docker installation state and writes the local text file: it does not start,
+build, pull images, reset credentials or change administrators. Docker must be
+available. An unhealthy/starting container is reported as not ready, with its
+known URL rather than a guessed default port.
+
+For an already successful rc.5 installation whose terminal output was lost,
+extract rc.6 into its own folder and run `./nstack recovery <existing-project>`
+against the same Docker context. No setup rerun, network access or rebuild is
+needed while that installation is running. The recovery file is written into the
+rc.6 folder. Keep the rc.5 folder in place if its host helper is still registered;
+recovery does not migrate that helper. Updating an existing archive in place is
+not required. Setup reruns preserve a known existing local port unless you
+explicitly set `NSTACK_LOCAL_PORT`; recovery always reports the actual binding.
+
+The server enforces the claim's single use. After a successful claim, any copy of
+the old code is rejected, and administration requires the existing administrator's
+Nostr identity. The text file is **not monitored or automatically erased when the
+claim occurs**. The next setup/recovery rewrites it with the URL and “already
+claimed” status, omitting the code. Copies and backups may retain the now-useless
+old code. Recovery never issues a replacement code or reopens administrator setup.

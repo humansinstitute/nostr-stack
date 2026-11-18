@@ -74,3 +74,7 @@ coverage/
 
 # Operator-only expiring ACL diagnostic delegation (never source/history)
 /config/permission-diagnostics.json
+
+# Owner-private launcher recovery files (contain unused first-admin claim codes).
+/nstack-*-setup.txt
+/.nstack-recovery-*.tmp

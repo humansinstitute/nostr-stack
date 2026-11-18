@@ -56,3 +56,11 @@ if(!resume){
  console.log(JSON.stringify({private_upload_download:true,internal_storage_private:true}));
  console.log(JSON.stringify({recreation_identity_preserved:true,workspace_preserved:true,ownership_preserved:true,nonce_bound_proof:true,unauthorized_denied:true}));
 }
+
+// Even a different valid Nostr signer holding an old copied code cannot reopen
+// administration. Verify against the durable claim, including on resumed runs.
+const claimedBefore=await readFile('/run/nstack/claim.json','utf8');
+const bootstrap=JSON.parse(await readFile('/run/nstack/bootstrap.json','utf8'));
+check((await request('/api/v4/installation/claim','POST',{code:bootstrap.claim_code},generateSecretKey())).status===409,'old copied code granted administration to a new signer');
+check(await readFile('/run/nstack/claim.json','utf8')===claimedBefore,'old code changed durable administrator');
+console.log(JSON.stringify({old_code_new_signer_denied:true,durable_claim_unchanged:true}));

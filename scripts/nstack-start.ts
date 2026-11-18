@@ -1,3 +1,4 @@
+import {recoverInstallation,installationContainer,localPort} from './nstack-recovery';
 import {manageHostService} from './nstack-host-service';
 import {resolve,join} from 'node:path';
 const root=resolve(import.meta.dir,'..');const project=process.argv[2]||'nstack';
@@ -12,6 +13,9 @@ async function checkDocker(){
  if(await compose.exited!==0)throw Error('Docker Compose plugin is unavailable. Install/enable Compose, then retry the same installation name.');
 }
 await checkDocker();
+const previous=await installationContainer(project);
+const previousPort=localPort(previous);
+if(previousPort&&!process.env.NSTACK_LOCAL_PORT)process.env.NSTACK_LOCAL_PORT=previousPort;
 const base=Bun.spawn(['bash',join(root,'docker/ensure-bun-base.sh')],{cwd:root,stdout:'pipe',stderr:'inherit'});
 const [baseCode,baseName]=await Promise.all([base.exited,new Response(base.stdout).text()]);if(baseCode!==0)throw Error('Clean Bun runtime unavailable; retry the same installation name. Existing data is preserved.');
 let sha:string;
@@ -31,8 +35,20 @@ async function step(args:string[],failure:string){
 // can use it (controller and storage-init deliberately share the built images).
 await step(['pull','postgres'],'Postgres download failed. Check network/registry availability.');
 await step(['build','bootstrap','minio'],'Local image build failed. Check the build output for the exact unavailable dependency.');
-await step(['up','-d','--no-build','--pull','never','--wait','--wait-timeout','240'],'Installation did not become ready.');
-await step(['exec','-T','tower','bun','-e',"const f=Bun.file('/run/nstack/claim.json');if(!await f.exists()){const s=await Bun.file('/run/nstack/bootstrap.json').json();console.log('Local one-time installation claim code: '+s.claim_code)}"],'Installation claim read failed.');
-console.log('Open http://127.0.0.1:'+(process.env.NSTACK_LOCAL_PORT||'3101')+'/ui. Host FIPS readiness is checked independently; local administration stays available.');
+// Save while Compose waits, as soon as the durable state is readable. The
+// final refresh happens before helper registration or success output.
+const starting=Bun.spawn([...compose,'up','-d','--no-build','--pull','never','--wait','--wait-timeout','240'],{cwd:root,stdout:'inherit',stderr:'inherit',env});
+let finished=false;const completion=starting.exited.then(code=>{finished=true;return code;});
+let saved=false;
+while(!finished){
+ if(!saved)try{await recoverInstallation(root,project,true);saved=true;}catch{/* Startup may not yet have created/readied Tower. Final read below is mandatory. */}
+ if(!finished)await Promise.race([completion,Bun.sleep(500)]);
+}
+const startCode=await completion;
+if(startCode!==0){
+ try{await recoverInstallation(root,project);}catch{console.error('Recovery not yet available. Startup was interrupted or did not become ready.');}
+ throw Error('Installation did not become ready. Rerun setup or recovery with the same installation name; existing volumes, credentials and identity are preserved.');
+}
+await recoverInstallation(root,project);
 console.log(JSON.stringify(await manageHostService('install',project)));
 console.log('The per-installation host helper is managed by the OS user service and stays running after this terminal closes.');
