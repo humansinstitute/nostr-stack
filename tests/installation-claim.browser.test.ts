@@ -6,7 +6,7 @@ import {installationHtml} from '../src/installation/claim-page';
 
 // Real rendered Chromium page with a representative asynchronous NIP-07 bridge.
 // HTTP authority here is a fixture; live Tower checks are a separate gate.
-for(const scenario of ['success','cancel-connect','cancel-sign','rejected','timeout','identity-change','uncertain','status-failure'])test('claim page: '+scenario,async()=>{
+for(const scenario of ['success','cancel-connect','cancel-review','cancel-sign','rejected','timeout','identity-change','uncertain','status-failure'])test('claim page: '+scenario,async()=>{
  const key=generateSecretKey(),pubkey=getPublicKey(key);let posts=0,claimed=false,statusReads=0;
  const server=Bun.serve({port:0,hostname:'127.0.0.1',async fetch(req){
   const path=new URL(req.url).pathname;
@@ -32,8 +32,10 @@ for(const scenario of ['success','cancel-connect','cancel-sign','rejected','time
   await page.locator('#code').fill('fixture-code');await page.locator('#claim').click();
   if(scenario==='cancel-connect'){expect(await page.locator('#status').textContent()).toContain('Connecting');await page.locator('#cancel').click();await page.evaluate(()=>(window as any).release());await page.waitForTimeout(80);expect(await page.locator('#review').isHidden()).toBe(true);expect(posts).toBe(0);return;}
   await page.locator('#review').waitFor({state:'visible'});expect(await page.locator('#identity').textContent()).toBe(pubkey);expect(posts).toBe(0);
+  if(scenario==='cancel-review'){await page.locator('#cancel').click();expect(posts).toBe(0);expect(await page.locator('#review').isHidden()).toBe(true);return;}
   if(scenario==='timeout')await page.clock.install();
   await page.locator('#approve').click();
+  if(scenario==='success')await page.evaluate(()=>(document.getElementById('approve') as HTMLButtonElement).onclick?.(new MouseEvent('click')));
   if(scenario==='cancel-sign'){await page.locator('#cancel').click();await page.evaluate(()=>(window as any).release());await page.waitForTimeout(80);expect(posts).toBe(0);expect(await page.locator('#status').textContent()).toContain('No claim was sent');return;}
   if(scenario==='timeout'){await page.clock.fastForward(46000);expect(await page.locator('#status').textContent()).toContain('timed out');expect(posts).toBe(0);expect(await page.locator('#claim').isEnabled()).toBe(true);return;}
   if(['rejected','identity-change'].includes(scenario)){await page.waitForFunction(()=>!(document.getElementById('claim') as HTMLButtonElement).disabled);expect(posts).toBe(0);expect(await page.locator('#status').textContent()).toContain(scenario==='rejected'?'Signer declined':'identity changed');return;}
