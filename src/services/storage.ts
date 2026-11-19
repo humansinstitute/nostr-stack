@@ -181,7 +181,7 @@ export async function prepareStorageObjectForAuthorizedOwner(input: PrepareStora
 
 export async function getStorageUploadUrl(objectId: string): Promise<string | null> {
   const row = await getStorageObject(objectId);
-  if (!row || row.completed_at) return null;
+  if (!row || row.completed_at || row.registered_app_npub) return null;
 
   const publicEndpoint = config.storage.s3PublicEndpoint;
   if (!publicEndpoint) return null;
@@ -223,6 +223,18 @@ export async function canAccessStorageObject(objectId: string, authNpub: string 
   const sql = getDb();
   const row = await getStorageObject(objectId);
   if (!row) return null;
+
+  // App-principal objects never inherit uploader/group/public authority. Only
+  // the canonical human workspace owner retains generic read recovery.
+  if (row.registered_app_npub) {
+    if (!authNpub || authNpub === row.registered_app_npub) return null;
+    const [owner] = await sql`SELECT 1 FROM v4_workspaces w
+      WHERE w.workspace_owner_npub=${row.owner_npub} AND (w.creator_npub=${authNpub} OR w.workspace_owner_npub=${authNpub})
+      UNION ALL SELECT 1 FROM flightdeck_pg_workspaces w JOIN flightdeck_pg_actors a ON a.id=w.created_by_actor_id
+      WHERE w.id=${row.pg_workspace_id ?? null} AND w.workspace_owner_npub=${row.owner_npub}
+        AND (a.npub=${authNpub} OR w.workspace_owner_npub=${authNpub})`;
+    return owner ? row : null;
+  }
 
   // Public objects are accessible by anyone
   if (row.is_public) return row;
@@ -266,7 +278,7 @@ export async function canAccessStorageObject(objectId: string, authNpub: string 
 export async function completeStorageObject(objectId: string, input: CompleteStorageInput, authNpub: string): Promise<V4StorageObject | null> {
   const sql = getDb();
   const existing = await getStorageObject(objectId);
-  if (!existing) return null;
+  if (!existing || existing.registered_app_npub) return null;
   if (!await hasBoundWorkspaceMembership(existing, authNpub)) return null;
 
   // Resolve created_by_npub in case the object was created with a ws_key
@@ -298,13 +310,18 @@ export async function completeStorageObject(objectId: string, input: CompleteSto
 
 export async function writeStorageObject(objectId: string, bytes: Uint8Array, authNpub: string): Promise<V4StorageObject | null> {
   const row = await getStorageObject(objectId);
-  if (!row || row.completed_at) return null;
+  if (!row || row.completed_at || row.registered_app_npub) return null;
   if (!await hasBoundWorkspaceMembership(row, authNpub)) return null;
 
   // Resolve created_by_npub in case the object was created with a ws_key
   const creatorRealNpub = await resolveWsKeyNpub(row.created_by_npub) ?? row.created_by_npub;
   if (creatorRealNpub !== authNpub) return null;
 
+  return writeAuthorizedStorageBytes(row, bytes);
+}
+
+/** Internal transport only: caller must hold lifecycle authorization and object lock. */
+export async function writeAuthorizedStorageBytes(row: V4StorageObject, bytes: Uint8Array) {
   if (inMemoryStorageForTest) {
     inMemoryStorageBytes.set(row.storage_path, new Uint8Array(bytes));
     return row;

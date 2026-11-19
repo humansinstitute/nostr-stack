@@ -1,3 +1,4 @@
+import { registeredAppStoragePaths } from './registered-app-storage-openapi';
 import { managedStorageCollectionPaths } from './managed-storage/openapi';
 import { workspaceMembershipAdminPaths } from './workspace-membership-admin-openapi';
 import { documentEditPaths } from './document-edit-openapi';
@@ -4422,6 +4423,7 @@ export function buildOpenApiDocument(origin: string) {
     security: [{ nip98: [] }],
     paths: {
       ...managedStorageCollectionPaths,
+      ...registeredAppStoragePaths,
       ...workspaceMembershipAdminPaths,
       ...documentEditPaths,
       ...hostingPaths,

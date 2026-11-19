@@ -4449,6 +4449,8 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
 
   await sql.unsafe(readFileSync(new URL('./workspace-general-v1.sql', import.meta.url), 'utf8'));
 
+  await sql.unsafe(readFileSync(new URL('./registered-app-storage-v1.sql', import.meta.url), 'utf8'));
+
   await reconcileFlightDeckPgDmDefaults(sql);
 
 }

@@ -249,6 +249,7 @@ storageRouter.get('/:objectId/content', async (c) => {
       'Content-Type': row.content_type || 'application/octet-stream',
       'Content-Length': String(row.size_bytes || size || 0),
       'Content-Disposition': inlineContentDisposition(row.file_name || `${row.id}.bin`),
+      ...(row.registered_app_npub ? { 'Content-Security-Policy': "sandbox; default-src 'none'", 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' } : {}),
       'Cache-Control': 'private, no-store',
     },
   });

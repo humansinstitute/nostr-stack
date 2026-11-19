@@ -2328,6 +2328,7 @@ export interface NstackServiceDiscoveryV1 {
 }
 
 export interface V4StorageObject {
+  registered_app_npub?: string | null;
   pg_workspace_id?: string | null;
   id: string;
   owner_npub: string;
@@ -3783,3 +3784,35 @@ export interface NstackInstallationStatus {
 }
 
 export type { WorkspaceConnectionV3 } from './services/workspace-connection';
+
+/** Exact raw-app-signed, private-only owner/app storage protocol. */
+export interface RegisteredAppStoragePrepare {
+  idempotency_key: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: number;
+  sha256_hex: string;
+}
+export interface RegisteredAppStorageMetadata {
+  protocol: 'registered-app-storage-v1';
+  workspace_owner_npub: string;
+  app_npub: string;
+  object_id: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: number;
+  sha256_hex: string;
+  is_public: false;
+  completed_at: string | null;
+}
+
+export interface RegisteredAppStorageDescriptor {
+  protocol: 'registered-app-storage-v1';
+  workspace_owner_npub: string;
+  app_npub: string;
+  max_object_bytes: 8388608;
+  private_only: true;
+  operations: Array<'prepare' | 'upload' | 'complete' | 'metadata' | 'content' | 'head'>;
+}
+export interface RegisteredAppStorageUpload { base64_data: string }
+export interface RegisteredAppStorageComplete { size_bytes: number; sha256_hex: string }

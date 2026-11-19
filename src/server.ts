@@ -1,3 +1,4 @@
+import { registeredAppStorageRouter } from './routes/registered-app-storage';
 import { installationRouter, installationHtml } from './routes/installation';
 import { managedStorageRouter } from './managed-storage/routes';
 import { consoleAsset } from './nstack-console';
@@ -138,6 +139,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.route('/api/v4/workspaces', workspacesRouter);
   app.route('/api/v4/workspaces', workspaceBillingRouter);
   app.route('/api/v4/workspaces', appDbRouter);
+  app.route('/api/v4/workspaces', registeredAppStorageRouter);
   app.route('/api/v4/records', recordsRouter);
   app.route('/api/v4/storage', storageRouter);
   app.route('/api/v4/managed-app-storage', managedStorageRouter);
