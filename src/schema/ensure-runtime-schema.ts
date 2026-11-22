@@ -4428,6 +4428,7 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
   await sql.unsafe(readFileSync(new URL('./thread-pins-v1.sql', import.meta.url), 'utf8'));
   await sql.unsafe(readFileSync(new URL('./personal-pins-v1.sql', import.meta.url), 'utf8'));
   await sql.unsafe(readFileSync(new URL('./channel-pins-v1.sql', import.meta.url), 'utf8'));
+  await sql.unsafe(readFileSync(new URL('./file-pins-v1.sql', import.meta.url), 'utf8'));
   await sql.unsafe(readFileSync(new URL('./personal-pin-order-v1.sql', import.meta.url), 'utf8'));
   await sql.unsafe(readFileSync(new URL('./private-preferences-v1.sql', import.meta.url), 'utf8'));
   await sql.unsafe(readFileSync(new URL('./namespace-console-archive.sql', import.meta.url), 'utf8'));

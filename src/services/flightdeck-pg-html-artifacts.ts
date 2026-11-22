@@ -209,7 +209,7 @@ export async function resolveFlightDeckPgHtmlArtifact(
   if (!targetVersionId) return null;
   const target = await resolveFlightDeckPgFileVersionObject({ workspaceId: input.workspaceId, fileId: file.id, versionId: targetVersionId }, sql);
   if (!target) return null;
-  if (!HTML_CONTENT_TYPES.includes(String(target.object.content_type || '').toLowerCase())) return null;
+  if (!HTML_CONTENT_TYPES.includes(String(target.object.content_type || '').split(';')[0]!.trim().toLowerCase())) return null;
   if (Number(target.object.size_bytes) > HTML_ARTIFACT_MAX_HTML_BYTES) return null;
   const stored = await getStorageObjectContent(target.object.id);
   if (!stored || stored.size > HTML_ARTIFACT_MAX_HTML_BYTES) return null;

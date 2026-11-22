@@ -13,7 +13,7 @@ export async function mutateThreadPin(workspaceId: string, actorId: string, thre
 }
 export async function mutatePersonalPin(workspaceId: string, actorId: string, resourceType: string, resourceId: string, value: unknown, db: Db = getDb()): Promise<FlightDeckPgPersonalPin> {
  const b = value as { pinned: boolean; expected_row_version: number; mutation_id: string; import_only?: boolean; pinned_at?: string };
- if (!uuid.test(resourceId) || !['thread','task','document','channel'].includes(resourceType) || !b || typeof b !== 'object' || Array.isArray(b)
+ if (!uuid.test(resourceId) || !['thread','task','document','channel','file'].includes(resourceType) || !b || typeof b !== 'object' || Array.isArray(b)
   || Object.keys(b).some(k=>!['pinned','expected_row_version','mutation_id','import_only','pinned_at'].includes(k))
   || typeof b.pinned !== 'boolean' || typeof b.mutation_id !== 'string' || !uuid.test(b.mutation_id)
   || !Number.isSafeInteger(b.expected_row_version) || b.expected_row_version<0 || b.expected_row_version>=2147483647
@@ -42,9 +42,11 @@ export async function mutatePersonalPin(workspaceId: string, actorId: string, re
   if(b.pinned){
    const target=resourceType==='channel'
     ? (await sql`SELECT id AS channel_id,scope_id FROM flightdeck_pg_channels WHERE workspace_id=${workspaceId} AND id=${resourceId} AND archived_at IS NULL FOR SHARE`)[0]
+    : resourceType==='file'
+    ? (await sql`SELECT channel_id,scope_id FROM flightdeck_pg_files WHERE workspace_id=${workspaceId} AND id=${resourceId} AND deleted_at IS NULL AND archived_at IS NULL FOR SHARE`)[0]
     : await resolveFlightDeckPgResourceActivity(workspaceId,resourceType as 'thread'|'task'|'document',resourceId,sql);
    if(target){
-    const permission=(resourceType==='thread'||resourceType==='channel')?'channel.read':resourceType==='task'?'task.read':'doc.read';
+    const permission=(resourceType==='thread'||resourceType==='channel')?'channel.read':resourceType==='task'?'task.read':resourceType==='file'?'file.read':'doc.read';
     const access=await authorizeFlightDeckPgOperation({actorNpub:member.npub,appNpub:member.app_npub,workspaceId,permission,resource:{type:'channel',channelId:target.channel_id}},sql);
     const participant=resourceType!=='thread'||member.kind==='human'||await isFlightDeckPgThreadParticipant({workspaceId,threadId:resourceId,actorId,actorNpub:member.npub},sql);
     if(!access.allowed||!participant){if(!b.import_only)throw new ThreadPinError(403,'thread_pin_target_forbidden');}

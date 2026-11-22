@@ -4445,15 +4445,15 @@ export function buildOpenApiDocument(origin: string) {
           description: 'Actor-private ordering only. CAS checks both pinned target and anchor. Nullable order_position is additive on personal_pin rows; null/missing sorts first by pinned_at DESC then type/UUID ASC; integers sort ascending. Changed positions advance row_version through existing private sync. Exact immutable retries replay original pins. Never changes selections, tombstones, resource activity or reads.',
           parameters: [{name:'workspaceId',in:'path',required:true,schema:{type:'string',format:'uuid'}}],
           requestBody: {required:true,content:{'application/json':{schema:{type:'object',additionalProperties:false,required:['resource_type','resource_id','expected_row_version','before','mutation_id'],properties:{
-            resource_type:{type:'string',enum:['thread','task','document','channel']},resource_id:{type:'string',format:'uuid'},expected_row_version:{type:'integer',minimum:1,maximum:2147483646},mutation_id:{type:'string',format:'uuid'},
-            before:{nullable:true,type:'object',additionalProperties:false,required:['resource_type','resource_id','expected_row_version'],properties:{resource_type:{type:'string',enum:['thread','task','document','channel']},resource_id:{type:'string',format:'uuid'},expected_row_version:{type:'integer',minimum:1,maximum:2147483646}}}
+            resource_type:{type:'string',enum:['thread','task','document','channel','file']},resource_id:{type:'string',format:'uuid'},expected_row_version:{type:'integer',minimum:1,maximum:2147483646},mutation_id:{type:'string',format:'uuid'},
+            before:{nullable:true,type:'object',additionalProperties:false,required:['resource_type','resource_id','expected_row_version'],properties:{resource_type:{type:'string',enum:['thread','task','document','channel','file']},resource_id:{type:'string',format:'uuid'},expected_row_version:{type:'integer',minimum:1,maximum:2147483646}}}
           }}}}},
           responses: {'200':{description:'identity plus pins array of active canonical personal pins in final order, including order_position and row_version. Exact retry replays historical acknowledgement.'},'400':{description:'invalid_pin_order; strict body, self-anchor rejected'},'403':{description:'Workspace membership required; workspace app identity is authoritative'},'409':{description:'pin_order_conflict (stale version or no longer pinned) or mutation_id_reused; recover canonical state, do not silently rebase'}} },
       },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/me/pins/{resourceType}/{resourceId}': {
         put: { tags: ['Flight Deck PG'], summary: 'Mutate one personal thread, task, document or channel pin with CAS, idempotency and import-if-absent',
-          description: 'Authenticated actor only. Pins and permanent unpin tombstones recover through actor-private record-delta personal_pin and private SSE; no shared read/activity state changes. Channel pins require channel.read and return canonical channel_id, scope_id and root_record_id (the channel UUID); thread_id is null. Imports remain thread-only. Unavailable targets remain removable.',
-          parameters: ['workspaceId','resourceType','resourceId'].map(name => ({name,in:'path',required:true,schema:name==='resourceType'?{type:'string',enum:['thread','task','document','channel']}:{type:'string',format:'uuid'}})),
+          description: 'Authenticated actor only. Pins and permanent unpin tombstones recover through actor-private record-delta personal_pin and private SSE; no shared read/activity state changes. File pins require file.read on the source channel and resolve active, unarchived Files only; root_record_id is the File UUID and thread_id is null. Channel pins require channel.read and return canonical channel_id, scope_id and root_record_id (the channel UUID); thread_id is null. Imports remain thread-only. Unavailable targets remain removable.',
+          parameters: ['workspaceId','resourceType','resourceId'].map(name => ({name,in:'path',required:true,schema:name==='resourceType'?{type:'string',enum:['thread','task','document','channel','file']}:{type:'string',format:'uuid'}})),
           requestBody: {required:true,content:{'application/json':{schema:{type:'object',additionalProperties:false,required:['pinned','expected_row_version','mutation_id'],properties:{pinned:{type:'boolean'},expected_row_version:{type:'integer',minimum:0,maximum:2147483646},mutation_id:{type:'string',format:'uuid'},import_only:{type:'boolean'},pinned_at:{type:'string',format:'date-time'}}}}}},
           responses: {'200':{description:'Canonical pin row (including tombstone), or original acknowledgement on exact retry'},'400':{description:'Invalid body or actor override'},'403':{description:'Membership and target read permission required; non-human thread readers also require participation'},'404':{description:'Explicit pin target unavailable'},'409':{description:'thread_pin_conflict or mutation_id_reused; do not silently rebase'}} },
       },
@@ -6534,6 +6534,14 @@ export function buildOpenApiDocument(origin: string) {
           },
         },
       },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/files/{fileId}/html': {
+        get: {
+          tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Project private HTML directly from a File',
+          description: 'Canvas-independent use of the same HTML resolver: file.read on the channel before version/byte access, workspace-partition and digest verification, independent ACL/version/digest validation for each manifest asset. Omitted version_id follows latest; explicit version_id browses only this File without changing it. Returns identity, workspace_id, title, source, content (HtmlArtifactContent) and at most 200 versions, as on the Canvas HTML route without naplet_id. No host fetch, credentials or anonymous authority. Clients must sandbox HTML without same-origin privileges. Denied/missing/foreign/invalid sources share one 404.',
+          parameters: [...['workspaceId', 'fileId'].map(name => ({ name, in: 'path', required: true, schema: { type: 'string', format: 'uuid' } })), { name: 'version_id', in: 'query', schema: { type: 'string', format: 'uuid' } }],
+          responses: { '200': { description: 'Private HTML source and manifest asset projection with revision list; Cache-Control private, no-store' }, '404': { description: 'file_html_unavailable' } },
+        },
+      },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/files/{fileId}/versions/{versionId}/object': {
         get: {
           tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Read immutable bytes of one File version',
@@ -6589,6 +6597,12 @@ export function buildOpenApiDocument(origin: string) {
         },
       },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/files/{fileId}': {
+        get: {
+          tags: ['Flight Deck PG'], security: [{ nip98: [] }], summary: 'Read a File and its current content classification',
+          description: 'Existing storage-link ACLs apply. file.content_type is the current object media type; file.artefact_type is html, excalidraw or null, derived from media type even for legacy Files without metadata. file.can_write is a viewer hint only; mutations recheck file.write or channel.write. No registry metadata grants execution or data access.',
+          parameters: ['workspaceId', 'fileId'].map(name => ({ name, in: 'path', required: true, schema: { type: 'string', format: 'uuid' } })),
+          responses: { '200': { description: 'identity and file including content_type, artefact_type, can_write and storage object metadata' }, '403': { description: 'Storage read denied' }, '404': { description: 'File or storage link unavailable' } },
+        },
         delete: {
           tags: ['Flight Deck PG'],
           security: [{ nip98: [] }],
@@ -6703,10 +6717,11 @@ export function buildOpenApiDocument(origin: string) {
         get: {
           tags: ['Flight Deck PG'], security: [{ nip98: [] }],
           summary: 'List readable channel Files, optionally by exact text attachment lineage',
-          description: 'Requires file.read or channel.read. The optional origin UUID parameters must be supplied together and are canonicalized to lowercase. Both metadata.text_attachment_lineage fields are matched in the database before the limit, within this workspace and channel. Existing archived filtering applies. Returns next_cursor:null; this is not a paginated listing.',
+          description: 'Requires file.read or channel.read. The optional origin UUID parameters must be supplied together and are canonicalized to lowercase. Both metadata.text_attachment_lineage fields are matched in the database before the limit, within this workspace and channel. Existing archived filtering applies. Each File adds content_type and artefact_type (html, excalidraw or null) from current stored media type, including legacy Files. Optional artefact_type filters in SQL before limit. Metadata never grants access. Returns next_cursor:null; this is not a paginated listing.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
             { name: 'channelId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+            { name: 'artefact_type', in: 'query', schema: { type: 'string', enum: ['html', 'excalidraw'] } },
             { name: 'origin_message_id', in: 'query', schema: { type: 'string', format: 'uuid' }, description: 'Requires origin_storage_object_id.' },
             { name: 'origin_storage_object_id', in: 'query', schema: { type: 'string', format: 'uuid' }, description: 'Requires origin_message_id.' },
             { name: 'archived', in: 'query', schema: { type: 'boolean', default: false } },

@@ -1,3 +1,4 @@
+import { classifyFlightDeckPgArtefact } from './flightdeck-pg-artefacts';
 import { reconcileFlightDeckPgDmDefaults } from './flightdeck-pg-dm-defaults';
 import { MembershipAdminError } from './flightdeck-pg-membership-admin';
 import { acquireDocumentEditSession } from './document-edit-session';
@@ -1534,8 +1535,10 @@ export function serializeFlightDeckPgFileVersion(
 }
 
 export function serializeFlightDeckPgFile(
-  file: FlightDeckPgFileRow,
+  file: FlightDeckPgFileRow & { content_type?: string | null },
   options: {
+    contentType?: string | null;
+    canWrite?: boolean;
     storageObject?: Record<string, unknown> | null;
     currentVersion?: FlightDeckPgFileVersionRow | null;
     currentVersionStorageObject?: V4StorageObject | Record<string, unknown> | null;
@@ -1550,6 +1553,11 @@ export function serializeFlightDeckPgFile(
     storage_object_id: file.storage_object_id,
     current_version_id: file.current_version_id,
     display_name: file.display_name,
+    ...((options.contentType !== undefined || file.content_type !== undefined) ? {
+      content_type: options.contentType ?? file.content_type ?? null,
+      artefact_type: classifyFlightDeckPgArtefact(options.contentType ?? file.content_type),
+    } : {}),
+    ...(options.canWrite !== undefined ? { can_write: options.canWrite } : {}),
     description: file.description,
     metadata: file.metadata,
     row_version: file.row_version,
@@ -4603,21 +4611,28 @@ export async function deleteFlightDeckPgDoc(
 }
 
 export async function listFlightDeckPgChannelFiles(
-  input: { workspaceId: string; channelId: string; limit: number; archived?: boolean; originMessageId?: string; originStorageObjectId?: string },
+  input: { workspaceId: string; channelId: string; limit: number; archived?: boolean; originMessageId?: string; originStorageObjectId?: string; artefactType?: 'html' | 'excalidraw' },
   sql: DbClient = getDb(),
-): Promise<FlightDeckPgFileRow[]> {
-  return sql<FlightDeckPgFileRow[]>`
-    SELECT *
-    FROM flightdeck_pg_files
-    WHERE workspace_id = ${input.workspaceId}
-      AND channel_id = ${input.channelId}
-      AND deleted_at IS NULL
-      AND (${input.archived === true} = (archived_at IS NOT NULL))
+): Promise<(FlightDeckPgFileRow & { content_type: string | null })[]> {
+  return sql<(FlightDeckPgFileRow & { content_type: string | null })[]>`
+    SELECT f.*, o.content_type
+    FROM flightdeck_pg_files f
+    LEFT JOIN v4_storage_objects o ON o.id = f.storage_object_id
+    WHERE f.workspace_id = ${input.workspaceId}
+      AND f.channel_id = ${input.channelId}
+      AND f.deleted_at IS NULL
+      AND (${input.archived === true} = (f.archived_at IS NOT NULL))
       AND (${input.originMessageId ?? null}::text IS NULL OR (
-        metadata -> 'text_attachment_lineage' ->> 'origin_message_id' = ${input.originMessageId ?? null}
-        AND metadata -> 'text_attachment_lineage' ->> 'origin_storage_object_id' = ${input.originStorageObjectId ?? null}
+        f.metadata -> 'text_attachment_lineage' ->> 'origin_message_id' = ${input.originMessageId ?? null}
+        AND f.metadata -> 'text_attachment_lineage' ->> 'origin_storage_object_id' = ${input.originStorageObjectId ?? null}
       ))
-    ORDER BY updated_at DESC, id ASC
+      AND (${input.artefactType ?? null}::text IS NULL OR
+        CASE lower(trim(split_part(o.content_type, ';', 1)))
+          WHEN 'text/html' THEN 'html'
+          WHEN 'application/xhtml+xml' THEN 'html'
+          WHEN 'application/vnd.excalidraw+json' THEN 'excalidraw'
+        END = ${input.artefactType ?? null})
+    ORDER BY f.updated_at DESC, f.id ASC
     LIMIT ${input.limit}
   `;
 }

@@ -225,4 +225,47 @@ describe.skipIf(!port || port === 5432)('Private HTML artifact naplets signed AP
     const tampered = await createFile(channelA, png, 'image/png', 'tampered.png', { sha256: 'a'.repeat(64) });
     expect((await request(ws(`/files/${tampered.fileId}/versions/${tampered.versionId}/object`), 'GET', 0)).status).toBe(409);
   });
+  test('direct channel discovery and HTML projection preserve ACLs, revisions and stale-write protection without a Canvas', async () => {
+    const image = await createFile(channelB, png, 'image/png', 'private.png');
+    const bytes = manifestHtml('Direct one', [{ name: 'private.png', file_id: image.fileId, version_id: image.versionId, sha256: sha(png) }]);
+    const html = await createFile(channelA, bytes, 'Text/HTML; charset=utf-8', 'Direct HTML');
+    const board = await createFile(channelA, encoder.encode('{"type":"excalidraw","elements":[]}'), 'application/vnd.excalidraw+json', 'Legacy board');
+    await createFile(channelA, encoder.encode('plain'), 'text/plain', 'Newest plain file');
+    // Legacy metadata is empty: MIME discovery works and filters before limit.
+    const found = await request(ws(`/channels/${channelA}/files?artefact_type=excalidraw&limit=1`), 'GET', 1);
+    expect(found.status).toBe(200);
+    expect(found.body.files).toHaveLength(1);
+    expect(found.body.files[0]).toMatchObject({ id: board.fileId, artefact_type: 'excalidraw', content_type: 'application/vnd.excalidraw+json' });
+    expect((await request(ws(`/channels/${channelA}/files?artefact_type=bogus`))).status).toBe(400);
+    expect((await request(ws(`/channels/${channelA}/files?artefact_type=html`), 'GET', 2)).status).toBe(403);
+    expect((await request(ws(`/files/${html.fileId}`), 'GET', 0)).body.file).toMatchObject({ can_write: true, artefact_type: 'html' });
+    expect((await request(ws(`/files/${html.fileId}`), 'GET', 1)).body.file.can_write).toBe(false);
+
+    const direct = await request(ws(`/files/${html.fileId}/html`), 'GET', 1);
+    expect(direct.status).toBe(200);
+    expect(direct.headers.get('cache-control')).toBe('private, no-store');
+    expect(direct.body.content.html).toContain('Direct one');
+    expect(direct.body.content.assets).toEqual([{ name: 'private.png', status: 'unavailable' }]);
+    expect(direct.body.source).toEqual({ type: 'html', id: html.fileId, version_id: null });
+    const next = await publish(html.fileId, html.versionId, encoder.encode('<h1>Direct two</h1>'));
+    expect(next.status).toBe(201);
+    expect((await publish(html.fileId, html.versionId, encoder.encode('stale'))).status).toBe(409);
+    expect((await request(ws(`/files/${html.fileId}/html`), 'GET', 1)).body.content.html).toContain('Direct two');
+    const historical = await request(ws(`/files/${html.fileId}/html?version_id=${html.versionId}`), 'GET', 1);
+    expect(historical.body.content.html).toContain('Direct one');
+    expect(historical.body.versions).toHaveLength(2);
+    for (const path of [
+      `/files/${html.fileId}/html?version_id=${board.versionId}`,
+      `/files/${html.fileId}/html?version_id=invalid`,
+      `/files/${board.fileId}/html`, `/files/${html.versionId}/html`,
+      `/files/${crypto.randomUUID()}/html`,
+    ]) expect((await request(ws(path), 'GET', 1)).body.error).toBe('file_html_unavailable');
+    const denied = await request(ws(`/files/${html.fileId}/html`), 'GET', 2);
+    expect(denied.status).toBe(404);
+    expect(denied.body.error).toBe('file_html_unavailable');
+    expect(JSON.stringify(denied.body)).not.toContain('Direct one');
+    await db`UPDATE flightdeck_pg_files SET archived_at=now() WHERE id=${html.fileId}`;
+    expect((await request(ws(`/files/${html.fileId}/html`))).status).toBe(404);
+  });
+
 });

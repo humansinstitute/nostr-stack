@@ -8,6 +8,7 @@ import { ensureRuntimeSchema } from '../src/schema/ensure-runtime-schema';
 import { readFileSync } from 'node:fs';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { readFlightDeckRecordPage } from '../src/services/flightdeck-record-delta';
+import { movePersonalPin } from '../src/services/personal-pin-order';
 import { mutateThreadPin, mutatePersonalPin } from '../src/services/thread-pins';
 import { listVisibleFlightDeckPgEvents, listVisibleFlightDeckPgEventsForAudience } from '../src/services/flightdeck-pg-api';
 const port=Number(process.env.RECORD_TEST_PORT);
@@ -167,6 +168,40 @@ describe.skipIf(!port || port===5432)('personal pin contract against isolated Po
   await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${w},${b},'member')`;
   await ensureRuntimeSchema();await ensureRuntimeSchema();
   expect((await db`SELECT * FROM flightdeck_pg_thread_pins WHERE id=${pin.id}`)[0]).toMatchObject({pinned:false,row_version:5,scope_id:source!.scope_id});
+ });
+
+ test('File pins use source ACL, private recovery, CAS ordering and unavailable-target unpin without editing content',async()=>{
+  const [channel]=await db`SELECT scope_id FROM flightdeck_pg_channels WHERE id=${c}`;
+  const [object]=await db`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,file_name,content_type,storage_path) VALUES('owner','creator','board.excalidraw','application/vnd.excalidraw+json','pin-file-fixture') RETURNING id`;
+  const [file]=await db`INSERT INTO flightdeck_pg_files(workspace_id,scope_id,channel_id,storage_object_id,display_name,created_by_actor_id,updated_by_actor_id) VALUES(${w},${channel!.scope_id},${c},${object!.id},'Pinned board',${a},${a}) RETURNING *`;
+  const id=file!.id;
+  const path=`/api/v4/flightdeck-pg/workspaces/${w}/me/pins/file/${id}`;
+  const beforeReads=[...(await db`SELECT * FROM flightdeck_pg_resource_view_states WHERE workspace_id=${w}`)];
+  const ownCursor=await synchronized(a),otherCursor=await synchronized(b);
+  expect((await request(path,'PUT',1,mutation(true))).status).toBe(403);
+  const input=mutation(true);const result=await request(path,'PUT',0,input);
+  expect(result.status).toBe(200);
+  const pin=result.body.pin;
+  expect(pin).toMatchObject({resource_type:'file',resource_id:id,root_record_id:id,channel_id:c,scope_id:channel!.scope_id,thread_id:null,pinned:true,row_version:1});
+  const own=await readFlightDeckRecordPage({workspaceId:w,actorId:a,cursor:ownCursor},db);
+  expect(own.changes.some(r=>r.family==='personal_pin'&&r.row?.resource_type==='file'&&r.row?.resource_id===id)).toBe(true);
+  expect((await readFlightDeckRecordPage({workspaceId:w,actorId:b,cursor:otherCursor},db)).changes.some(r=>r.family==='personal_pin')).toBe(false);
+  const ordered=await movePersonalPin(w,a,{resource_type:'file',resource_id:id,expected_row_version:1,before:null,mutation_id:crypto.randomUUID()},db);
+  const current=ordered.find(r=>r.id===pin.id)!;
+  const race=await Promise.all([0,1].map(()=>request(path,'PUT',0,mutation(false,current.row_version))));
+  expect(race.map(r=>r.status).sort()).toEqual([200,409]);
+  expect((await request(path,'PUT',0,input)).body.pin).toEqual(pin);
+  expect((await db`SELECT * FROM flightdeck_pg_files WHERE id=${id}`)[0]).toEqual(file);
+  expect([...(await db`SELECT * FROM flightdeck_pg_resource_view_states WHERE workspace_id=${w}`)]).toEqual(beforeReads);
+  const [now]=await db`SELECT * FROM flightdeck_pg_thread_pins WHERE id=${pin.id}`;
+  await db`UPDATE flightdeck_pg_files SET archived_at=now() WHERE id=${id}`;
+  expect((await request(path,'PUT',0,mutation(true,now!.row_version))).status).toBe(404);
+  expect((await request(path,'PUT',0,mutation(false,now!.row_version))).status).toBe(200);
+  // Runtime upgrades are repeatable even after retaining the new File target.
+  await ensureRuntimeSchema();await ensureRuntimeSchema();
+  expect((await db`SELECT resource_type,pinned FROM flightdeck_pg_thread_pins WHERE id=${pin.id}`)[0]).toMatchObject({resource_type:'file',pinned:false});
+  const [other]=await db`SELECT workspace_id FROM flightdeck_pg_workspace_memberships WHERE actor_id=${a} AND workspace_id<>${w}`;
+  expect((await request(`/api/v4/flightdeck-pg/workspaces/${other!.workspace_id}/me/pins/file/${id}`,'PUT',0,mutation(true))).status).toBe(404);
  });
 
 });

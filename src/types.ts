@@ -1259,6 +1259,17 @@ export interface FlightDeckPgResourceViewState {
   updated_at: Date;
 }
 
+/** Builtin rich File formats. Metadata is descriptive and grants no authority. */
+export type FlightDeckPgArtefactType = 'html' | 'excalidraw';
+export interface FlightDeckPgArtefactMetadata {
+  schema_version: 1;
+  type: FlightDeckPgArtefactType;
+  format_version: 1;
+  editor_id: 'builtin.html' | 'builtin.excalidraw';
+  template_id?: string;
+  style_id?: string;
+}
+
 export interface FlightDeckPgFile {
   id: string;
   workspace_id: string;
@@ -3378,7 +3389,7 @@ export interface HostingBillingStatus { can_top_up?: boolean; version: 1; billin
 /** Actor/workspace personal selection; false rows are durable unpin tombstones. */
 export interface FlightDeckPgPersonalPin {
  id: string; workspace_id: string; actor_id: string; thread_id: string | null;
- resource_type: 'thread' | 'task' | 'document' | 'channel'; resource_id: string;
+ resource_type: 'thread' | 'task' | 'document' | 'channel' | 'file'; resource_id: string;
  channel_id: string | null; scope_id?: string | null; root_record_id: string | null; pinned: boolean;
  /** Missing/null positions precede positioned rows in legacy timestamp/type-ID order. */
  order_position?: number | null;

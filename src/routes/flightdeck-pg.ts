@@ -8724,7 +8724,12 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/channels/:channelId/files', asy
     return validationError(c, identity, [{ path: 'query', code: 'invalid', message: 'origin_message_id and origin_storage_object_id must be supplied together as UUIDs' }]);
   }
 
+  const artefactType = c.req.query('artefact_type');
+  if (artefactType !== undefined && artefactType !== 'html' && artefactType !== 'excalidraw') {
+    return validationError(c, identity, [{ path: 'artefact_type', code: 'invalid', message: 'artefact_type must be html or excalidraw' }]);
+  }
   const files = await listFlightDeckPgChannelFiles({
+    artefactType,
     workspaceId: context.workspace.id,
     channelId,
     originMessageId,
@@ -8954,10 +8959,16 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/files/:fileId', async (c) => {
   const receiptRefusal = await receiptReadGuard(c, identity, 'file', file.id, { rowVersion: file.row_version, bodySha256Hex: readable.storageObject.sha256_hex ?? null });
   if (receiptRefusal) return receiptRefusal;
 
+  const writeAccess = await authorizeFlightDeckPgStorageAttach({
+    actorNpub: auth.userNpub, appNpub: context.workspace.app_npub,
+    workspaceId: context.workspace.id, entityType: 'file', channelId: file.channel_id,
+  });
   return c.json({
     identity,
     file: serializeFlightDeckPgFile(file, {
       storageObject: serializeFlightDeckPgStorageObjectMetadata(readable.storageObject),
+      contentType: readable.storageObject.content_type,
+      canWrite: writeAccess.allowed && !file.archived_at,
     }),
   });
 });
@@ -9403,6 +9414,42 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/files/:fileId/versions', async
     const message = error instanceof Error ? error.message : 'Flight Deck PG file version could not be created';
     return jsonError(c, 400, 'validation_error', message, identity);
   }
+});
+
+// Direct File projection shares the Canvas resolver; a Canvas grants no authority.
+flightDeckPgRouter.get('/workspaces/:workspaceId/files/:fileId/html', async (c) => {
+  const auth = await requireNip98AuthResolved(c);
+  if (auth instanceof Response) return auth;
+  const result = await requireFlightDeckPgContext(c, auth.userNpub);
+  if ('response' in result) return result.response;
+  const { context, identity } = result;
+  const fileId = c.req.param('fileId');
+  const requestedVersionId = String(c.req.query('version_id') || '').trim() || null;
+  const unavailable = () => jsonError(c, 404, 'file_html_unavailable', 'HTML File is unavailable', identity);
+  if (!isUuid(fileId) || (requestedVersionId && !isUuid(requestedVersionId))) return unavailable();
+  // Unlike the legacy Canvas resolver, the direct route accepts only a File ID.
+  const file = await resolveFlightDeckPgFile(context.workspace.id, fileId);
+  if (!file) return unavailable();
+  const artifact = await resolveFlightDeckPgHtmlArtifact({
+    workspaceId: context.workspace.id, appNpub: context.workspace.app_npub,
+    actorNpub: auth.userNpub, sourceId: file.id, requestedVersionId,
+  });
+  if (!artifact) return unavailable();
+  const receiptRefusal = await receiptReadGuard(c, identity, 'file', file.id, { versionId: artifact.content.version_id });
+  if (receiptRefusal) return receiptRefusal;
+  const versions = await listFlightDeckPgFileVersions({ workspaceId: context.workspace.id, fileId: artifact.fileId, limit: 200 });
+  c.header('Cache-Control', 'private, no-store');
+  return c.json({
+    workspace_id: context.workspace.id, identity, title: artifact.title,
+    source: { type: 'html', id: artifact.fileId, version_id: null },
+    content: artifact.content,
+    versions: versions.filter((version) => version.operation !== 'deleted').map((version) => ({
+      id: version.id, version_number: Number(version.version_number), created_at: version.created_at,
+      created_by_actor_npub: version.created_by_actor_npub ?? null,
+      content_type: version.content_type ?? null,
+      size_bytes: version.size_bytes === undefined || version.size_bytes === null ? null : Number(version.size_bytes),
+    })),
+  });
 });
 
 flightDeckPgRouter.get('/workspaces/:workspaceId/files/:fileId/versions/:versionId/object', async (c) => {

@@ -7,7 +7,7 @@ type Db = ReturnType<typeof getDb>;
 type PinReference = { resource_type: string; resource_id: string; expected_row_version: number };
 export type PersonalPinMove = PinReference & { before: PinReference | null; mutation_id: string };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const types = ['thread', 'task', 'document', 'channel'];
+const types = ['thread', 'task', 'document', 'channel', 'file'];
 const key = (r: { resource_type: string; resource_id: string }) => `${r.resource_type}:${r.resource_id}`;
 function reference(value: unknown): value is PinReference {
  const r = value as PinReference;

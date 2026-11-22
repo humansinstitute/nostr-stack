@@ -42,6 +42,7 @@ test.skipIf(!port||port===5432)('upgrades the real thread-only schema without lo
   expect([...(await db`SELECT * FROM flightdeck_pg_thread_pin_mutations`)]).toEqual(beforeReceipts);
   expect([...(await db`SELECT * FROM flightdeck_pg_record_journal WHERE workspace_id=${w} ORDER BY position`)]).toEqual(beforeJournal);
   await db`INSERT INTO flightdeck_pg_thread_pins(workspace_id,actor_id,resource_type,resource_id,thread_id,pinned) VALUES(${w},${a},'channel',${t},NULL,false)`;
+  await db`INSERT INTO flightdeck_pg_thread_pins(workspace_id,actor_id,resource_type,resource_id,thread_id,pinned) VALUES(${w},${a},'file',${t},NULL,false)`;
   const imported=await mutateThreadPin(w,a,t,{pinned:true,expected_row_version:0,mutation_id:crypto.randomUUID(),import_only:true},db);expect(imported.pinned).toBe(false);
  }finally{await db.end();const cleanup=postgres({...options,database:'postgres'});await cleanup.unsafe(`DROP DATABASE IF EXISTS ${name}`);await cleanup.end();}
 },30000);
