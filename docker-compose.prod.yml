@@ -143,6 +143,8 @@ services:
       args:
         BUN_IMAGE: ${TOWER_BUN_IMAGE:-oven/bun:1.2.23}
         TOWER_BUILD_TIME: ${TOWER_BUILD_TIME:-}
+        TOWER_GIT_COMMIT: ${TOWER_GIT_COMMIT:-}
+        TOWER_GIT_BRANCH: ${TOWER_GIT_BRANCH:-}
     container_name: wingman-tower-b3
     restart: unless-stopped
     depends_on:

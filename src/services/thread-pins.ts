@@ -59,6 +59,13 @@ export async function mutatePersonalPin(workspaceId: string, actorId: string, re
     }
    } else if(!b.import_only)throw new ThreadPinError(404,'thread_not_found');
   }
+  // Removal must survive a moved/deleted source channel. These are routing
+  // hints only; retaining a vanished channel would trip the location guard.
+  if(!b.pinned && channelId){
+   const [channel]=await sql`SELECT scope_id FROM flightdeck_pg_channels WHERE workspace_id=${workspaceId} AND id=${channelId} FOR KEY SHARE`;
+   if(channel)scopeId=channel.scope_id;
+   else {channelId=null;scopeId=null;}
+  }
   const [row]=await sql<FlightDeckPgPersonalPin[]>`INSERT INTO flightdeck_pg_thread_pins(workspace_id,actor_id,resource_type,resource_id,thread_id,channel_id,scope_id,root_record_id,pinned,pinned_at)
     VALUES(${workspaceId},${actorId},${resourceType},${resourceId},${resourceType==='thread'?resourceId:null},${channelId},${scopeId},${rootId},${b.pinned},${b.pinned ? (b.pinned_at ? new Date(b.pinned_at).toISOString() : new Date().toISOString()) : null})
     ON CONFLICT(workspace_id,actor_id,resource_type,resource_id) DO UPDATE SET pinned=EXCLUDED.pinned,channel_id=EXCLUDED.channel_id,scope_id=EXCLUDED.scope_id,root_record_id=EXCLUDED.root_record_id,

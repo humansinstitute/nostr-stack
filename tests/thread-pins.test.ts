@@ -167,7 +167,7 @@ describe.skipIf(!port || port===5432)('personal pin contract against isolated Po
   expect((await request(path,'PUT',1,mutation(false))).status).toBe(403);
   await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${w},${b},'member')`;
   await ensureRuntimeSchema();await ensureRuntimeSchema();
-  expect((await db`SELECT * FROM flightdeck_pg_thread_pins WHERE id=${pin.id}`)[0]).toMatchObject({pinned:false,row_version:5,scope_id:source!.scope_id});
+  expect((await db`SELECT * FROM flightdeck_pg_thread_pins WHERE id=${pin.id}`)[0]).toMatchObject({pinned:false,row_version:5,scope_id:null});
  });
 
  test('File pins use source ACL, private recovery, CAS ordering and unavailable-target unpin without editing content',async()=>{
@@ -175,6 +175,7 @@ describe.skipIf(!port || port===5432)('personal pin contract against isolated Po
   const [object]=await db`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,file_name,content_type,storage_path) VALUES('owner','creator','board.excalidraw','application/vnd.excalidraw+json','pin-file-fixture') RETURNING id`;
   const [file]=await db`INSERT INTO flightdeck_pg_files(workspace_id,scope_id,channel_id,storage_object_id,display_name,created_by_actor_id,updated_by_actor_id) VALUES(${w},${channel!.scope_id},${c},${object!.id},'Pinned board',${a},${a}) RETURNING *`;
   const id=file!.id;
+  await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission) VALUES(${w},'actor',${a},'channel',${c},'file.read')`;
   const path=`/api/v4/flightdeck-pg/workspaces/${w}/me/pins/file/${id}`;
   const beforeReads=[...(await db`SELECT * FROM flightdeck_pg_resource_view_states WHERE workspace_id=${w}`)];
   const ownCursor=await synchronized(a),otherCursor=await synchronized(b);

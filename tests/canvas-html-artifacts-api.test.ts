@@ -259,10 +259,10 @@ describe.skipIf(!port || port === 5432)('Private HTML artifact naplets signed AP
       `/files/${html.fileId}/html?version_id=invalid`,
       `/files/${board.fileId}/html`, `/files/${html.versionId}/html`,
       `/files/${crypto.randomUUID()}/html`,
-    ]) expect((await request(ws(path), 'GET', 1)).body.error).toBe('file_html_unavailable');
+    ]) expect((await request(ws(path), 'GET', 1)).body.code).toBe('file_html_unavailable');
     const denied = await request(ws(`/files/${html.fileId}/html`), 'GET', 2);
     expect(denied.status).toBe(404);
-    expect(denied.body.error).toBe('file_html_unavailable');
+    expect(denied.body.code).toBe('file_html_unavailable');
     expect(JSON.stringify(denied.body)).not.toContain('Direct one');
     await db`UPDATE flightdeck_pg_files SET archived_at=now() WHERE id=${html.fileId}`;
     expect((await request(ws(`/files/${html.fileId}/html`))).status).toBe(404);
