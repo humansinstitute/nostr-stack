@@ -1,3 +1,4 @@
+import { workspaceReportSchema } from './workspace-report-openapi';
 import { registeredAppStoragePaths } from './registered-app-storage-openapi';
 import { managedStorageCollectionPaths } from './managed-storage/openapi';
 import { workspaceMembershipAdminPaths } from './workspace-membership-admin-openapi';
@@ -5217,6 +5218,25 @@ export function buildOpenApiDocument(origin: string) {
             '401': { description: 'Invalid NIP-98 auth', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
             '403': { description: 'channel.manage required', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
             '404': { description: 'Channel not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+          },
+        },
+      },
+      '/api/v4/flightdeck-pg/workspaces/{workspaceId}/workspace-report': {
+        get: {
+          tags: ['Flight Deck PG'], summary: 'Read complete authorized workspace report', security: [{ nip98: [] }],
+          description: 'Fixed aggregate workspace-report-v1: one read-only repeatable-read snapshot, current membership and effective family ACLs, active kind=channel channels/scopes, no content. Complete activity/inventory with explicit bounded ranking and coverage. UTC rolling window; tasks include all nine states. No-store; fail closed above 2000 authorized channels, unsafe counts, unknown states or timeouts. See docs/contract/workspace-report-v1.md and FlightDeckPgWorkspaceReportResponse in src/types.ts.',
+          parameters: [
+            { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+            { name: 'range', in: 'query', required: true, schema: { type: 'string', enum: ['7d', '30d', '90d', 'all'] } },
+            { name: 'top_n', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 50, default: 10 } },
+            { name: 'app_npub', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'x-flightdeck-pg-app-npub', in: 'header', required: false, schema: { type: 'string' } },
+          ],
+          responses: {
+            '200': { description: 'Complete activity and inventory with bounded ranking and exact remainders', content: { 'application/json': { schema: workspaceReportSchema } } },
+            '400': { description: 'Invalid, unknown or duplicate query parameter' },
+            '401': { description: 'NIP-98 authentication required' }, '403': { description: 'Workspace membership or app mismatch' },
+            '404': { description: 'Workspace not found' }, '503': { description: 'Neutral report_unavailable or report_too_large; no partial data' },
           },
         },
       },

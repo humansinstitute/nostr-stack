@@ -660,6 +660,50 @@ describe('Flight Deck PG API routes', () => {
     }
   });
 
+  test('workspace report authenticates, rejects ambiguous queries, returns only aggregates and never bypasses owner grants', async () => {
+    const { workspaceId, ownerId } = await seedWorkspace('npub1workspacereportapi');
+    const base = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/workspace-report`;
+    expect((await app.request(`${base}?range=7d`)).status).toBe(401);
+    expect((await requestJson(`${base}?range=7d`, 'GET', inviteeSecret)).res.status).toBe(403);
+    expect((await requestJson(`${base}?range=7d`, 'GET', ownerSecret, undefined, { 'x-flightdeck-pg-app-npub': 'wrong' })).res.status).toBe(403);
+    for (const suffix of ['', '?range=ALL', '?range=7d&range=all', '?range=7d&top_n=01', '?range=all&viewer=other', '?range=all&top_n=51']) {
+      expect((await requestJson(base + suffix, 'GET', ownerSecret)).res.status).toBe(400);
+    }
+    const [scope] = await sql`INSERT INTO flightdeck_pg_scopes(workspace_id,name,kind) VALUES(${workspaceId},'Report','project') RETURNING id`;
+    const [channel] = await sql`INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name) VALUES(${workspaceId},${scope.id},'Report') RETURNING id`;
+    const read = () => requestJson(`${base}?range=90d`, 'GET', ownerSecret);
+    expect((await read()).json.inventory.channels).toBe(0);
+    await sql`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission)
+      VALUES(${workspaceId},'actor',${ownerId},'channel',${channel.id},'channel.read')`;
+    const result = await read();
+    expect(result.res.status).toBe(200);
+    expect(result.res.headers.get('cache-control')).toBe('no-store');
+    expect(result.json).toMatchObject({ format: 'workspace-report-v1', workspace_id: workspaceId, identity: { workspace_id: workspaceId }, complete: true,
+      inventory: { channels: 1, conversations: 0, tasks: {total:0,open:0,completed:0,archived:0} },
+      coverage: { tasks_channels:0,documents_channels:1,files_channels:1 }, ranking:{total_channels:1,returned_channels:1,has_more:false} });
+    const delegatedSecret = new Uint8Array(32).fill(45), delegatedNpub=nip19.npubEncode(getPublicKey(delegatedSecret));
+    await sql`INSERT INTO user_profiles(user_npub) VALUES(${GROUP_MEMBER_NPUB}) ON CONFLICT DO NOTHING`;
+    await sql`INSERT INTO user_workspace_keys(user_npub,workspace_owner_npub,ws_key_npub) VALUES(${GROUP_MEMBER_NPUB},${OWNER_NPUB},${delegatedNpub})`;
+    // Delegated session reads the member's family grants, never the owner's report.
+    expect((await requestJson(`${base}?range=all`, 'GET', delegatedSecret)).json.inventory.channels).toBe(0);
+    expect(result.json.as_of).toBe(result.json.to);
+    expect(Object.keys(result.json).sort()).toEqual(['identity','format','workspace_id','range','from','to','as_of','timezone','complete','channel_policy','activity','inventory','channels','ranking','coverage'].sort());
+  });
+
+  test('workspace report timeout returns a neutral failure without partial aggregates', async () => {
+    const {workspaceId}=await seedWorkspace('npub1reporttimeout');
+    let unlock!:()=>void, ready!:()=>void;
+    const locked=new Promise<void>(r=>{ready=r}), release=new Promise<void>(r=>{unlock=r});
+    const writer=sql.begin(async tx=>{ const lockDb=tx as unknown as typeof sql; await lockDb`LOCK TABLE flightdeck_pg_channels IN ACCESS EXCLUSIVE MODE`; ready(); await release; });
+    await locked;
+    try {
+      const result=await requestJson(`/api/v4/flightdeck-pg/workspaces/${workspaceId}/workspace-report?range=all`,'GET',ownerSecret);
+      expect(result.res.status).toBe(503);
+      expect(result.res.headers.get('cache-control')).toBe('no-store');
+      expect(result.json).toEqual({code:'report_unavailable',error:'Workspace report unavailable'});
+    } finally { unlock(); await writer; }
+  },15000);
+
   test('message activity authenticates workspace/app and rejects invalid ranges', async () => {
     const { workspaceId, ownerId } = await seedWorkspace('npub1messageactivityapi');
     const base = `/api/v4/flightdeck-pg/workspaces/${workspaceId}/message-activity`;

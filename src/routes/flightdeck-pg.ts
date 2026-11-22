@@ -1,3 +1,4 @@
+import { readFlightDeckPgWorkspaceReport, parseWorkspaceReportQuery, WorkspaceReportError } from '../services/flightdeck-pg-workspace-report';
 import QRCode from 'qrcode';
 import { readFipsIngressConfig } from '../fips-ingress';
 import { signWorkspaceConnection, signConnectionChallenge, WORKSPACE_QR_MAX_BYTES, type WorkspaceConnectionV3 } from '../services/workspace-connection';
@@ -6183,6 +6184,32 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/threads/:threadId/archive', a
     audit: { event_id: payload.auditId, operation: payload.operation, actor_npub: auth.userNpub },
     outbox: payload.outbox,
   });
+});
+
+flightDeckPgRouter.get('/workspaces/:workspaceId/workspace-report', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const auth = await requireNip98AuthResolved(c);
+  if (auth instanceof Response) return auth;
+  try {
+    return await getDb().begin('isolation level repeatable read read only', async (tx) => {
+      const sql = asDbClient(tx);
+      await sql`SET LOCAL statement_timeout = '10s'`;
+      const result = await requireFlightDeckPgContext(c, auth.userNpub, sql);
+      if ('response' in result) return result.response;
+      const { context, identity } = result;
+      const params = parseWorkspaceReportQuery(new URL(c.req.url).searchParams);
+      if (!params) return validationError(c, identity, [{ path: 'query', code: 'invalid', message: 'Expected range=7d|30d|90d|all and optional top_n integer 1..50' }]);
+      const requestedApps = [c.req.header('x-flightdeck-pg-app-npub'), c.req.query('app_npub')].filter(Boolean);
+      if (requestedApps.some(app => app !== context.workspace.app_npub)) return jsonError(c, 403, 'workspace_app_mismatch', 'Workspace app identity does not match', identity);
+      const report = await readFlightDeckPgWorkspaceReport({ workspaceId: context.workspace.id,
+        actorId: context.actor.id, groupIds: context.groupIds, ...params }, sql);
+      return c.json({ identity, ...report });
+    });
+  } catch (error) {
+    // Do not expose query text, denied resource IDs, counts or partial data.
+    const code = error instanceof WorkspaceReportError ? error.code : 'report_unavailable';
+    return c.json({ code, error: 'Workspace report unavailable' }, 503);
+  }
 });
 
 flightDeckPgRouter.get('/workspaces/:workspaceId/message-activity', async (c) => {

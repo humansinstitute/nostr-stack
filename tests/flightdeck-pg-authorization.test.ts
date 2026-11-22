@@ -1,3 +1,4 @@
+import { readFlightDeckPgWorkspaceReport, parseWorkspaceReportQuery, reportCount, workspaceReportTaskStates } from '../src/services/flightdeck-pg-workspace-report';
 import { readFlightDeckPgMessageActivity, parseMessageActivityRange } from '../src/services/flightdeck-pg-message-activity';
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { createHash } from 'crypto';
@@ -899,5 +900,132 @@ describe('Message activity aggregation', () => {
       await db`UPDATE flightdeck_pg_scopes SET archived_at = ${now} WHERE id = ${f.scopes.primary}`;
       expect((await readFlightDeckPgMessageActivity(input, db)).channels).toEqual([]);
     });
+  });
+});
+
+describe('Workspace report', () => {
+  const read = async (f: AuthorizationFixture, extra: Record<string, any> = {}, db = sql) => readFlightDeckPgWorkspaceReport({
+    workspaceId:f.workspaceId,actorId:f.actors.direct.id,groupIds:[],range:'7d',topN:10,...extra,
+  },db);
+  test('strict bounded inputs and unsafe/unknown counts fail closed', () => {
+    for (const q of ['', 'range=ALL', 'range=7d&top_n=0', 'range=7d&top_n=51', 'range=7d&top_n=1.0', 'range=7d&top_n=01', 'range=7d&top_n=1e1', 'range=7d&range=all', 'range=7d&scope=x']) expect(parseWorkspaceReportQuery(new URLSearchParams(q))).toBeNull();
+    expect(parseWorkspaceReportQuery(new URLSearchParams('range=90d'))).toEqual({range:'90d',topN:10});
+    expect(parseWorkspaceReportQuery(new URLSearchParams('range=all&top_n=50'))).toEqual({range:'all',topN:50});
+    for (const bad of ['9007199254740992', -1, 1.5, null, '', 'NaN']) expect(() => reportCount(bad)).toThrow();
+  });
+  test('family ACL, real inventory states, archive semantics, UTC edges and zero channels', async () => {
+    const f = await seedAuthorizationFixture('report-inventory');
+    await sql.begin('isolation level repeatable read', async tx => {
+      const db = tx as unknown as typeof sql;
+      const [clock] = await db`SELECT date_trunc('milliseconds',transaction_timestamp()) AS now`;
+      const now = clock.now as Date, from = new Date(now.getTime()-7*86400000);
+      const threads: string[] = [];
+      for (const archived of [false,true]) {
+        const [t] = await db`INSERT INTO flightdeck_pg_threads(workspace_id,scope_id,channel_id,title,created_by_actor_id,updated_by_actor_id,archived_at)
+          VALUES(${f.workspaceId},${f.scopes.primary},${f.channels.primary},'private thread',${f.actors.direct.id},${f.actors.direct.id},${archived?now:null}) RETURNING id`;
+        threads.push(t.id);
+      }
+      // Actual thread/channel IDs are counted once; branch/inherited transcripts are not read.
+      for (const [at,thread,deleted] of [[from,threads[0],false],[new Date(now.getTime()-1),threads[1],false],[from,null,false],[new Date(from.getTime()-1),threads[0],false],[now,threads[0],false],[from,threads[0],true]] as const) {
+        await db`INSERT INTO flightdeck_pg_messages(workspace_id,scope_id,channel_id,thread_id,body,created_by_actor_id,updated_by_actor_id,created_at,deleted_at)
+          VALUES(${f.workspaceId},${f.scopes.primary},${f.channels.primary},${thread},'never return secret',${f.actors.direct.id},${f.actors.direct.id},${at},${deleted?now:null})`;
+      }
+      const [point] = await db`SELECT id FROM flightdeck_pg_messages WHERE workspace_id=${f.workspaceId} AND thread_id=${threads[0]} AND deleted_at IS NULL ORDER BY created_at LIMIT 1`;
+      await db`UPDATE flightdeck_pg_threads SET parent_thread_id=${threads[0]},branch_point_message_id=${point.id} WHERE id=${threads[1]}`;
+      for (const state of workspaceReportTaskStates) await db`INSERT INTO flightdeck_pg_tasks(workspace_id,scope_id,channel_id,title,state,created_by_actor_id,updated_by_actor_id)
+        VALUES(${f.workspaceId},${f.scopes.primary},${f.channels.primary},'private task',${state},${f.actors.direct.id},${f.actors.direct.id})`;
+      for (const table of ['flightdeck_pg_docs','flightdeck_pg_files']) for (const mode of ['live','archived','deleted']) {
+      const [object] = await db`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,file_name,content_type,storage_path) VALUES(${f.actors.direct.npub},${f.actors.direct.npub},'secret','text/plain',${`fixture/report/${table}/${mode}`}) RETURNING id`;
+        const title = table.endsWith('docs') ? 'title' : 'display_name';
+        await db`INSERT INTO ${db(table)}(workspace_id,scope_id,channel_id,storage_object_id,${db(title)},created_by_actor_id,updated_by_actor_id,archived_at,deleted_at)
+          VALUES(${f.workspaceId},${f.scopes.primary},${f.channels.primary},${object.id},'private',${f.actors.direct.id},${f.actors.direct.id},${mode==='archived'?now:null},${mode==='deleted'?now:null})`;
+      }
+      await db`INSERT INTO flightdeck_pg_messages(workspace_id,scope_id,channel_id,body,created_by_actor_id,updated_by_actor_id,created_at)
+        VALUES(${f.workspaceId},${f.scopes.primary},${f.channels.sibling},'denied body',${f.actors.direct.id},${f.actors.direct.id},${from})`;
+      await db`INSERT INTO flightdeck_pg_tasks(workspace_id,scope_id,channel_id,title,state,created_by_actor_id,updated_by_actor_id)
+        VALUES(${f.workspaceId},${f.scopes.primary},${f.channels.sibling},'denied task','done',${f.actors.direct.id},${f.actors.direct.id})`;
+      let report = await read(f,{},db);
+      expect(report.activity).toEqual({messages:3,conversations:2});
+      expect(report.from).toBe(from.toISOString()); expect(report.to).toBe(now.toISOString()); expect(report.as_of).toBe(report.to);
+      expect(report.inventory).toMatchObject({channels:1,conversations:1,tasks:{total:0},documents:1,files:1});
+      expect(report.coverage).toEqual({tasks_channels:0,documents_channels:1,files_channels:1});
+      const groups = await getEffectiveFlightDeckPgGroupIds(f.workspaceId,f.actors.nested.id,db);
+      report = await read(f,{actorId:f.actors.nested.id,groupIds:groups},db);
+      expect(report.activity.messages).toBe(3);
+      expect(report.inventory.tasks).toEqual({total:9,open:6,completed:1,archived:2,by_state:Object.fromEntries(workspaceReportTaskStates.map(s=>[s,1])) as typeof report.inventory.tasks.by_state});
+      expect(report.coverage.tasks_channels).toBe(1);
+      for (const range of ['30d','90d','all'] as const) {
+        const wider=await read(f,{range},db);
+        expect(wider.activity.messages).toBe(4);
+        expect(wider.from).toBe(range==='all'?null:new Date(now.getTime()-(range==='30d'?30:90)*86400000).toISOString());
+      }
+      expect(report.channels.some(c=>c.channel_id===f.channels.sibling)).toBe(false);
+
+      expect(JSON.stringify(report)).not.toContain('private task'); expect(JSON.stringify(report)).not.toContain('never return secret');
+      expect((await read(f,{actorId:f.actors.workspaceOnly.id},db)).inventory.channels).toBe(0);
+      // Resource-family grant alone never reveals a channel or its resource counts.
+      await db`UPDATE flightdeck_pg_permission_grants SET revoked_at=${now} WHERE workspace_id=${f.workspaceId} AND permission='channel.read'`;
+      expect((await read(f,{actorId:f.actors.nested.id,groupIds:groups},db)).inventory.tasks.total).toBe(0);
+    });
+  });
+  test('complete ranking and remainder; channel-kind and lifecycle exclusions', async () => {
+    const f=await seedAuthorizationFixture('report-ranking');
+    for(let i=0;i<13;i++) {
+      const [c]=await sql`INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name,kind) VALUES(${f.workspaceId},${f.scopes.primary},${`zero ${i}`},'channel') RETURNING id`;
+      await sql`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission) VALUES(${f.workspaceId},'actor',${f.actors.direct.id},'channel',${c.id},'channel.read')`;
+      if(i<3) await sql`INSERT INTO flightdeck_pg_messages(workspace_id,scope_id,channel_id,body,created_by_actor_id,updated_by_actor_id,created_at) VALUES(${f.workspaceId},${f.scopes.primary},${c.id},'no hydrate',${f.actors.direct.id},${f.actors.direct.id},now()-interval '1 hour')`;
+    }
+    await sql`UPDATE flightdeck_pg_scopes SET kind='department' WHERE id=${f.scopes.primary}`;
+    const report=await read(f,{topN:2});
+    expect(report.inventory.channels).toBe(14); expect(report.channels.length).toBe(2);
+    expect(report.activity.messages).toBe(3); expect(report.ranking).toMatchObject({total_channels:14,returned_channels:2,has_more:true,other_messages:1});
+    expect(report.channels.reduce((n,r)=>n+r.messages,0)+report.ranking.other_messages).toBe(report.activity.messages);
+    expect(report.channels[0].channel_id < report.channels[1].channel_id).toBe(true);
+    await sql`UPDATE flightdeck_pg_channels SET kind='system' WHERE id=${f.channels.primary}`;
+    expect((await read(f)).inventory.channels).toBe(13);
+    await sql`UPDATE flightdeck_pg_channels SET kind='dm' WHERE id=${f.channels.primary}`;
+    expect((await read(f)).inventory.channels).toBe(13);
+    await sql`UPDATE flightdeck_pg_scopes SET archived_at=now() WHERE id=${f.scopes.primary}`;
+    expect((await read(f)).activity).toEqual({messages:0,conversations:0});
+  });
+  test('snapshot retains established ACL and next snapshot loses it', async () => {
+    const f=await seedAuthorizationFixture('report-snapshot');
+    await sql.begin('isolation level repeatable read read only',async tx=>{
+      const db=tx as unknown as typeof sql, first=await read(f,{},db);
+      await sql`UPDATE flightdeck_pg_permission_grants SET revoked_at=now() WHERE workspace_id=${f.workspaceId}`;
+      expect(await read(f,{},db)).toEqual(first);
+    });
+    expect((await read(f)).inventory.channels).toBe(0);
+  });
+  test('overlong source names fail without silent truncation', async () => {
+    const f=await seedAuthorizationFixture('report-label-bound');
+    await sql`UPDATE flightdeck_pg_channels SET name=${'x'.repeat(301)} WHERE id=${f.channels.primary}`;
+    await expect(read(f)).rejects.toMatchObject({code:'report_unavailable'});
+  });
+  test('unknown source states fail rather than omit data', async () => {
+    const f=await seedAuthorizationFixture('report-unknown-state');
+    const rollback = new Error('rollback disposable schema edit');
+    try {
+      await sql.begin(async tx=>{
+        const db=tx as unknown as typeof sql;
+        await db`ALTER TABLE flightdeck_pg_tasks DROP CONSTRAINT flightdeck_pg_tasks_state_check`;
+        await db`INSERT INTO flightdeck_pg_tasks(workspace_id,scope_id,channel_id,title,state,created_by_actor_id,updated_by_actor_id)
+          VALUES(${f.workspaceId},${f.scopes.primary},${f.channels.primary},'unknown','future_state',${f.actors.direct.id},${f.actors.direct.id})`;
+        await expect(read(f,{actorId:f.actors.nested.id,groupIds:[f.groups.parent]},db)).rejects.toMatchObject({code:'report_unavailable'});
+        throw rollback;
+      });
+    } catch(error) { if(error!==rollback) throw error; }
+  });
+  test('2000 authorized channels is complete; 2001 fails before content scans', async () => {
+    const f=await seedAuthorizationFixture('report-bound');
+    await sql`INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name,kind)
+      SELECT ${f.workspaceId},${f.scopes.primary},'bounded '||n,'channel' FROM generate_series(1,1999) n`;
+    await sql`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission)
+      SELECT ${f.workspaceId},'actor',${f.actors.direct.id},'channel',c.id,'channel.read' FROM flightdeck_pg_channels c WHERE c.workspace_id=${f.workspaceId} AND c.name LIKE 'bounded %'`;
+    expect((await read(f)).inventory.channels).toBe(2000);
+    await sql`UPDATE flightdeck_pg_permission_grants SET revoked_at=NULL WHERE workspace_id=${f.workspaceId}`;
+    await sql`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission)
+      VALUES(${f.workspaceId},'actor',${f.actors.direct.id},'channel',${f.channels.sibling},'channel.read')`;
+    await expect(read(f)).rejects.toMatchObject({code:'report_too_large'});
   });
 });

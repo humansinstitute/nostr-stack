@@ -3827,3 +3827,20 @@ export interface RegisteredAppStorageDescriptor {
 }
 export interface RegisteredAppStorageUpload { base64_data: string }
 export interface RegisteredAppStorageComplete { size_bytes: number; sha256_hex: string }
+
+/** Complete source totals with an explicitly bounded channel ranking. */
+export type FlightDeckPgWorkspaceReportRange = '7d' | '30d' | '90d' | 'all';
+export interface FlightDeckPgWorkspaceReportResponse {
+  identity: FlightDeckPgIdentity;
+  format: 'workspace-report-v1'; workspace_id: string; range: FlightDeckPgWorkspaceReportRange;
+  from: string | null; to: string; as_of: string; timezone: 'UTC'; complete: true;
+  channel_policy: 'active-project-channels';
+  activity: { messages: number; conversations: number };
+  inventory: { channels: number; conversations: number; tasks: {
+    total: number; open: number; completed: number; archived: number;
+    by_state: Record<'new' | 'ready' | 'in_progress' | 'review' | 'done' | 'archive' | 'backlog' | 'blocked' | 'archived', number>;
+  }; documents: number; files: number };
+  channels: Array<{ channel_id: string; scope_id: string; name: string; scope_name: string; messages: number; conversations: number }>;
+  ranking: { total_channels: number; returned_channels: number; has_more: boolean; other_messages: number; other_conversations: number };
+  coverage: { tasks_channels: number; documents_channels: number; files_channels: number };
+}
