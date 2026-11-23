@@ -90,9 +90,9 @@ All paths are under `/api/v4/hosting-billing`:
 
 | Method/path | Access/result |
 | --- | --- |
-| GET `/workspaces/:workspaceId/status` | Account owner or workspace.manage; shared balance, expiry, tariff, current measurements, burn/runout, Stripe availability |
+| GET `/workspaces/:workspaceId/status` | Account owner: shared balance, expiry, tariff, measurements and burn/runout. workspace.manage: workspace-only measurements, no account financial fields |
 | GET `/workspaces/:workspaceId/usage?limit=50` | Owner/manager; workspace-hour evidence, newest first, limit 1–200 |
-| GET `/workspaces/:workspaceId/ledger?limit=50` | Owner gets shared financial ledger; manager gets workspace debits; newest first |
+| GET `/workspaces/:workspaceId/ledger?limit=50` | Owner gets shared financial ledger; manager gets narrow workspace debits without account balances, reasons or actor identities; newest first |
 | POST `/workspaces/:workspaceId/checkout` | Account owner; amount_cents 500/1000/2500/5000/10000, idempotency_key, exact allowlisted return_url |
 | POST `/workspaces/:workspaceId/grant` | Platform ADMIN_NPUB only; integer amount_cents 1–1000000, reason, idempotency_key; actor/reason audited |
 | POST `/stripe/webhook` | Stripe raw-body signature, no NIP-98; server retrieves paid Checkout Session |
@@ -146,3 +146,11 @@ bun run privacy:check
 
 The fixture databases are uniquely named where supported and contain synthetic
 identities/data; no real account payment test or key search is performed.
+
+## Explicit workspace allocation successor
+
+[Stored metering and allocated billing](hosting-metering-v1.md) is disabled by default.
+Only explicit owner enrollment transitions a workspace to its separate owner-funded
+allocation in the same exact USD ledger. Existing account links, balances and history
+are retained; no implicit currency conversion or pricing-basis replacement occurs.
+The v1 runner/audit excludes periods at or after that workspace transition boundary.

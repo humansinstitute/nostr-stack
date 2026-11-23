@@ -48,7 +48,7 @@ export async function fulfillHostingCheckout(session:Stripe.Checkout.Session,db:
     if(o.mode!=='test'||session.client_reference_id!==o.id||session.metadata!.hosting_account_id!==o.account_id||session.currency!=='usd'||session.amount_total!==o.amount_cents
       ||(o.session_id&&o.session_id!==session.id)||typeof session.payment_intent!=='string')throw new HostingError(400,'stripe_binding_mismatch');
     if(o.fulfilled_at)return {credited:false,duplicate:true};
-    const a=await lockedAccount(o.account_id,tx,new Date());
+    const a=await lockedAccount(o.account_id,tx);
     const amount=centsUnits(o.amount_cents),paid=BigInt(a!.paid_units)+amount;
     // Unique payment_intent prevents two orders ever crediting the same payment.
     await tx`UPDATE hosting_checkout_orders SET session_id=${session.id},payment_intent=${session.payment_intent},fulfilled_at=now() WHERE id=${o.id}`;

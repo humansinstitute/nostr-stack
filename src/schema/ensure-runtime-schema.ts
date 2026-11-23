@@ -1,5 +1,7 @@
 import { managedAppStorageSql } from './managed-app-storage';
 import { reconcileFlightDeckPgDmDefaults } from '../services/flightdeck-pg-dm-defaults';
+import { hostingWorkspaceBillingV2Sql } from './hosting-workspace-billing-v2';
+import { hostingMeteringV1Sql } from './hosting-metering-v1';
 import { hostingBillingV1Sql } from './hosting-billing-v1';
 import { driveV1Sql } from './drive-v1';
 import { learningV1Sql } from './learning-v1';
@@ -4436,6 +4438,8 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
   await sql.unsafe(readFileSync(new URL('./blossom-message-publications.sql', import.meta.url), 'utf8'));
   await sql.unsafe(readFileSync(new URL('./app-blossom-publications.sql', import.meta.url), 'utf8'));
   await sql.unsafe(hostingBillingV1Sql);
+  await sql.unsafe(hostingMeteringV1Sql);
+  await sql.unsafe(hostingWorkspaceBillingV2Sql);
   // Shared notification inbox: tables, sequence/hint functions, transactional intake and view-state bridge triggers.
   await sql.unsafe(readFileSync(new URL('./notifications-v1.sql', import.meta.url), 'utf8'));
   await sql.unsafe(readFileSync(new URL('./unread-mentions-v1.sql', import.meta.url), 'utf8'));

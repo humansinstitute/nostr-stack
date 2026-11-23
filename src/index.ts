@@ -28,6 +28,8 @@ try {
 }
 
 startHostingBillingRunner();
+const { startWorkspaceBillingRunner } = await import('./services/hosting-workspace-billing');
+startWorkspaceBillingRunner();
 // Durable notification projection runs in this process (NOTIF_PROJECTOR=off disables it).
 startNotificationWorker();
 // Strict agent notification inbox projection (AGENT_NOTIF_PROJECTOR=off disables only this path).

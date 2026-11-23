@@ -3382,9 +3382,20 @@ export type FlightDeckPgScopeOrder = { id: string; workspace_id: string; actor_i
 export interface HostingBillingTariff { usd_per_gb_month: '5'; gb_bytes: 1000000000; month_hours: 720; units_per_usd: '144000000000'; }
 export interface HostingCheckoutRequest { amount_cents: 500 | 1000 | 2500 | 5000 | 10000; idempotency_key: string; return_url: string; }
 export interface HostingAdminGrantRequest { amount_cents: number; idempotency_key: string; reason: string; }
-export interface HostingUsageHour { workspace_id: string; account_id: string; hour: string; status: 'charged' | 'unavailable' | 'missed' | 'partial_hour'; bytes: string | null; debit_units: string; evidence: WorkspaceStorageUsage | { reason: string }; }
-export interface HostingLedgerEntry { id: string; account_id: string; workspace_id: string | null; kind: 'welcome' | 'usage' | 'admin' | 'stripe' | 'promo_expiry'; amount_units: string; paid_after_units: string; promo_after_units: string; idempotency_key: string; reason: string; actor_npub: string | null; created_at: string; }
-export interface HostingBillingStatus { can_top_up?: boolean; version: 1; billing_mode: 'usd_prepaid'; workspace_id: string; account_id: string; currency: 'USD'; tariff: HostingBillingTariff; balance_units: string; balance_usd: string; promo_units: string; promo_usd: string; promo_expires_at: string; paid_usd: string; billing_state: 'active' | 'read_only_grace' | 'measurement_pending'; depleted_at: string | null; grace_ends_at: string | null; hourly_burn_usd: string | null; estimated_runout_at: string | null; coverage: 'objects_and_logical_pg_rows'; measurements: HostingUsageHour[]; stripe: { configured: boolean; mode: string; live_rollout_blocked: boolean }; }
+export interface HostingUsageHour { workspace_id: string; account_id: string; hour: string; status: 'charged' | 'unavailable' | 'missed' | 'partial_hour'; bytes: string | null; debit_units: string; evidence: WorkspaceStorageUsage | { reason: string }; collected_at: string; }
+/** Safe manager status/usage projection; excludes arbitrary legacy evidence and payer identifiers. */
+export type HostingWorkspaceUsageMeasurement = Pick<HostingUsageHour, 'workspace_id' | 'hour' | 'status' | 'bytes' | 'debit_units'>;
+/** Full account ledger rows; manager rows deliberately omit financial metadata. */
+export interface HostingAccountLedgerEntry { id: string; account_id: string; workspace_id: string | null; balance_scope: 'account' | 'workspace'; kind: 'welcome' | 'usage' | 'admin' | 'stripe' | 'promo_expiry' | 'workspace_allocation' | 'workspace_usage'; amount_units: string; paid_after_units: string; promo_after_units: string; idempotency_key: string; reason: string; actor_npub: string | null; created_at: string; metadata: Record<string, unknown>; snapshot_id: string | null; rate_id: string | null; duration_seconds: number | null; }
+export interface HostingWorkspaceLedgerEntry { id: string; workspace_id: string; kind: 'usage' | 'workspace_usage'; amount_units: string; created_at: string; }
+export type HostingLedgerEntry = HostingAccountLedgerEntry | HostingWorkspaceLedgerEntry;
+export interface HostingAccountBillingStatus { can_top_up?: boolean; version: 1; billing_mode: 'usd_prepaid'; workspace_id: string; account_id: string; currency: 'USD'; tariff: HostingBillingTariff; balance_units: string; balance_usd: string; promo_units: string; promo_usd: string; promo_expires_at: string; paid_usd: string; billing_state: 'active' | 'read_only_grace' | 'measurement_pending'; depleted_at: string | null; grace_ends_at: string | null; hourly_burn_usd: string | null; estimated_runout_at: string | null; coverage: 'objects_and_logical_pg_rows'; measurements: Omit<HostingUsageHour, 'account_id' | 'collected_at'>[]; stripe: { configured: boolean; mode: string; live_rollout_blocked: boolean }; }
+export interface HostingWorkspaceBillingStatus { can_top_up?: boolean; version: 1; billing_mode: 'usd_prepaid'; workspace_id: string; financial_scope: 'workspace'; currency: 'USD'; measurements: HostingWorkspaceUsageMeasurement[]; stripe: HostingAccountBillingStatus['stripe']; }
+export interface HostingUnlinkedBillingStatus { can_top_up?: boolean; version: 1; billing_mode: 'legacy_unlinked'; workspace_id: string; stripe: HostingAccountBillingStatus['stripe']; }
+export type HostingBillingStatus = HostingAccountBillingStatus | HostingWorkspaceBillingStatus | HostingUnlinkedBillingStatus;
+export type HostingLedgerResponse = { workspace_id: string; account_id: string; entries: HostingAccountLedgerEntry[] } | { workspace_id: string; entries: HostingWorkspaceLedgerEntry[] };
+export type HostingUsageResponse = { workspace_id: string; account_id: string; entries: HostingUsageHour[] } | { workspace_id: string; entries: HostingWorkspaceUsageMeasurement[] };
+
 
 /** Actor/workspace personal selection; false rows are durable unpin tombstones. */
 export interface FlightDeckPgPersonalPin {
@@ -3880,3 +3891,73 @@ export type NappletRecord = {
   updated_by_npub: string; updated_at: string;
 };
 export type NappletPage<T, K extends string> = Record<K, T[]> & { next_cursor: string | null };
+
+/** Independent stored evidence; never implies a charge or account enrollment. */
+export interface HostingStorageSnapshot {
+  scope: 'workspace';
+  coverage: 'partial_attributed';
+  id: string;
+  workspace_id: string;
+  period_start: string;
+  period_end: string;
+  captured_at: string | null;
+  recorded_at: string;
+  measurement_version: 'stored-columns-accounting-excluded-v1';
+  status: 'measured' | 'unavailable' | 'missed' | 'partial_hour';
+  covered_bytes: string | null;
+  evidence: FlightDeckPgWorkspaceStorage | null;
+  reason: string | null;
+}
+export interface HostingStoredMetering {
+  version: 1;
+  workspace_id: string;
+  as_of: string;
+  cadence_seconds: 3600;
+  next_measurement_at: string | null;
+  freshness: 'current' | 'stale' | 'unavailable';
+  snapshots: HostingStorageSnapshot[];
+  settlement: { status: 'separate_costs_api'; reason: string };
+}
+
+export interface HostingStorageRateFact {
+  version: string;
+  effective_at: string;
+  measurement_version: 'stored-columns-accounting-excluded-v1';
+  numerator: string;
+  denominator: string;
+}
+export interface HostingWorkspaceCostEntry {
+  snapshot_id: string;
+  period_start: string;
+  status: 'charged' | 'unavailable' | 'missed' | 'partial_hour' | 'no_rate' | 'owner_changed';
+  duration_seconds: 3600;
+  debit_units: string | null;
+  carry_before: string | null;
+  carry_after: string | null;
+  rate_version: string | null;
+  numerator: string | null;
+  denominator: string | null;
+  ledger_id: string | null;
+  amount_units: string | null;
+}
+export interface HostingWorkspaceCosts {
+  version: 2;
+  workspace_id: string;
+  currency: 'USD';
+  units_per_usd: '144000000000';
+  as_of: string;
+  billing_mode: 'workspace_allocated' | 'not_enrolled';
+  wallet: null | {
+    enabled_at: string;
+    balance_units: string;
+    paid_units: string;
+    promo_units: string;
+    promo_expires_at: string | null;
+    depleted_at: string | null;
+  };
+  entries: HostingWorkspaceCostEntry[];
+  rates: HostingStorageRateFact[];
+  summary: { total_debit_units: string | null; charged_periods: string; unbilled_periods: string };
+  coverage: 'partial_attributed';
+  cost_precision: string;
+}

@@ -7,8 +7,9 @@ const rowLimit = 1000000; // Total retained rows across all measured tables.
 const objectLimit = 100000;
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 
-/** Call only after workspace.manage authorization, inside the report's read-only snapshot. */
-export async function readWorkspaceStorage(workspaceId: string, asOf: string, sql: Db): Promise<FlightDeckPgWorkspaceStorage> {
+/** Report callers require workspace.manage; the internal scheduler uses explicit schedules.
+ * Both callers supply a read-only repeatable-read transaction. */
+export async function readWorkspaceStorage(workspaceId: string, asOf: string, sql: Db, policy: 'report' | 'metering' = 'report'): Promise<FlightDeckPgWorkspaceStorage> {
   // Discover only public base tables with an explicit UUID workspace boundary.
   // No table names, contents, or instance-wide physical sizes leave this service.
   const tables = await sql<{ name: string; refs: string[]; columns: string[] }[]>`
@@ -21,6 +22,7 @@ export async function readWorkspaceStorage(workspaceId: string, asOf: string, sq
         AND a.atttypid='uuid'::regtype) AS refs
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='public' AND c.relkind='r' AND NOT c.relispartition
+      AND (${policy} <> 'metering' OR (c.relname !~ '^hosting_' AND c.relname !~ '^workspace_credit_' AND c.relname <> 'workspace_usage_hourly_audits'))
       AND EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname='workspace_id'
         AND a.atttypid='uuid'::regtype AND NOT a.attisdropped)
     ORDER BY c.relname LIMIT 257
@@ -101,6 +103,7 @@ export async function readWorkspaceStorage(workspaceId: string, asOf: string, sq
     provider_measured_at: null,
     last_object_completed_at: objects.last_completed_at?.toISOString() ?? null,
     caveats: [
+      ...(policy === 'metering' ? ['Metering policy excludes hosting, credit and usage-audit accounting tables to avoid charging for metering/financial evidence. This differs from the report inventory and is not the accepted hosting USD v1 billing basis.'] : []),
       'PostgreSQL column_bytes sums pg_column_size of individual stored fields in retained workspace rows; compressed and external datum sizes are included. Metadata and history are subsets, not additional bytes.',
       'Includes soft-deleted and archived rows and retained versions; history means tables named versions, audit or outbox. Excludes shared rows without workspace_id, legacy workspace namespaces, tuple headers/alignment, pages, indexes, TOAST container overhead, WAL, free space and backups.',
       'Object bytes are completed v4 storage metadata deduplicated by storage_path, attributed by explicit pg_workspace_id or retained workspace references (including deleted versions). Shared objects may be attributed to more than one workspace; workspace totals are not additive.',

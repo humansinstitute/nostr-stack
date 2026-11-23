@@ -24,9 +24,10 @@ export async function linkHostedAccount(workspaceId: string, ownerActorId: strin
   if (link!.account_id !== account!.id) throw new HostingError(409,'billing_owner_conflict');
   return account!;
 }
-export async function lockedAccount(id: string, db: Db, now: Date) {
+export async function lockedAccount(id: string, db: Db, clock: Date|(()=>Date)=()=>new Date()) {
   let [a] = await db`SELECT * FROM hosting_accounts WHERE id=${id} FOR UPDATE`;
   if (!a) throw new HostingError(404,'billing_account_not_found');
+  const now=typeof clock==='function'?clock():clock;
   if (new Date(a.promo_expires_at).getTime() <= now.getTime() && BigInt(a.promo_units)>0n) {
     await db`INSERT INTO hosting_ledger(account_id,kind,amount_units,paid_after_units,promo_after_units,idempotency_key,reason)
       VALUES(${id},'promo_expiry',${(-BigInt(a.promo_units)).toString()},${a.paid_units},0,'promo-expiry:v1','Welcome credit expired') ON CONFLICT DO NOTHING`;
@@ -37,7 +38,7 @@ export async function lockedAccount(id: string, db: Db, now: Date) {
 export async function grantHostingCredit(accountId: string, cents: number, key: string, reason: string, actor: string, db: Db=getDb()) {
   if (!Number.isSafeInteger(cents)||cents<=0||cents>1_000_000||typeof key!=='string'||!key||key.length>100||typeof reason!=='string'||!reason.trim()||reason.length>1000) throw new HostingError(400,'invalid_grant');
   return db.begin(async tx=> {
-    const sql=tx as unknown as Db, a=await lockedAccount(accountId,sql,new Date());
+    const sql=tx as unknown as Db, a=await lockedAccount(accountId,sql);
     const [prior]=await sql`SELECT * FROM hosting_ledger WHERE account_id=${accountId} AND idempotency_key=${`admin:${key}`}`;
     const amount=centsUnits(cents).toString();
     if(prior) { if(prior.amount_units!==amount||prior.reason!==reason||prior.actor_npub!==actor) throw new HostingError(409,'idempotency_conflict'); return prior; }
@@ -53,13 +54,18 @@ export function coveredBytes(usage: WorkspaceStorageUsage): bigint|null {
   if(required.some(c=>!c||c.bytes===null||c.status==='unavailable'||!Number.isSafeInteger(c.bytes)||c.bytes!<0))return null;
   return required.reduce((sum,c)=>sum+BigInt(c!.bytes!),0n);
 }
-export async function auditHostingHour(workspaceId: string, hour: Date, usage: WorkspaceStorageUsage|null, db: Db=getDb(), now=new Date()) {
-  if(hour.getTime()%3_600_000!==0||hour>now)throw new HostingError(400,'invalid_hour');
+export async function auditHostingHour(workspaceId: string, hour: Date, usage: WorkspaceStorageUsage|null, db: Db=getDb(), clock:Date|(()=>Date)=()=>new Date()) {
+  if(hour.getTime()%3_600_000!==0)throw new HostingError(400,'invalid_hour');
   return db.begin(async tx=> {
     const sql=tx as unknown as Db;
     const [link]=await sql`SELECT * FROM hosting_workspace_accounts WHERE workspace_id=${workspaceId}`;
     if(!link)return null;
+    await sql`SELECT id FROM hosting_accounts WHERE id=${link.account_id} FOR UPDATE`;
+    const now=typeof clock==='function'?clock():clock;
+    if(hour>now)throw new HostingError(400,'invalid_hour');
     const a=await lockedAccount(link.account_id,sql,now);
+    const [v2]=await sql`SELECT enabled_at FROM hosting_workspace_wallets WHERE workspace_id=${workspaceId}`;
+    if(v2&&hour>=new Date(v2.enabled_at))return null;
     const [prior]=await sql`SELECT * FROM hosting_usage_hours WHERE workspace_id=${workspaceId} AND hour=${hour}`;
     if(prior)return prior;
     const start=new Date(link.enabled_at).getTime();
@@ -113,25 +119,32 @@ export async function hostingStatus(workspaceId:string,db:Db=getDb(),now=new Dat
 }
 export function stripeAvailability(){return {configured:Boolean(process.env.STRIPE_SECRET_KEY&&process.env.STRIPE_WEBHOOK_SECRET&&process.env.HOSTING_STRIPE_RETURN_URLS),mode:process.env.HOSTING_STRIPE_MODE||'test',live_rollout_blocked:true};}
 export async function hostingWriteBlock(workspaceId:string, db:Db=getDb()) {
+  const [wallet]=await db`SELECT w.*,a.npub AS payer_npub,s.workspace_owner_npub FROM hosting_workspace_wallets w JOIN flightdeck_pg_actors a ON a.id=w.owner_actor_id JOIN flightdeck_pg_workspaces s ON s.id=w.workspace_id WHERE w.workspace_id=${workspaceId} AND w.enabled_at<=now()`;
+  if(wallet){
+    if(wallet.payer_npub!==wallet.workspace_owner_npub)return {code:'hosting_owner_changed',error:'Workspace billing owner requires explicit reconciliation',status:402,automatic_deletion:false};
+    const promo=wallet.promo_expires_at&&new Date(wallet.promo_expires_at)>new Date()?BigInt(wallet.promo_units):0n;
+    return wallet.depleted_at&&BigInt(wallet.paid_units)+promo<=0n?{code:'hosting_balance_exhausted',error:'Workspace hosting allocation exhausted',status:402,grace_ends_at:new Date(new Date(wallet.depleted_at).getTime()+21*86400000).toISOString(),automatic_deletion:false}:null;
+  }
   const [a]=await db`SELECT a.* FROM hosting_workspace_accounts l JOIN hosting_accounts a ON a.id=l.account_id WHERE l.workspace_id=${workspaceId}`;
   if(!a||!a.depleted_at)return null;
   const promo=new Date(a.promo_expires_at)>new Date()?BigInt(a.promo_units):0n;
   return BigInt(a.paid_units)+promo<=0n?{code:'hosting_balance_exhausted',error:'Hosting balance exhausted',status:402,grace_ends_at:new Date(new Date(a.depleted_at).getTime()+21*86400000).toISOString(),automatic_deletion:false}:null;
 }
-export async function runHostingBillingTick(db:Db=getDb(),now=new Date(),collect=collectWorkspaceStorageUsage) {
+export async function runHostingBillingTick(db:Db=getDb(),clock:Date|(()=>Date)=()=>new Date(),collect=collectWorkspaceStorageUsage) {
   // Session-level singleton lock on a reserved connection; released even on failure.
   const connection=await db.reserve();
   try {
     const [lock]=await connection`SELECT pg_try_advisory_lock(1440000720) AS acquired`;
     if(!lock?.acquired)return;
-    const links=await db`SELECT l.*,max(h.hour) AS last_hour FROM hosting_workspace_accounts l LEFT JOIN hosting_usage_hours h USING(workspace_id) GROUP BY l.workspace_id`;
+    const now=typeof clock==='function'?clock():clock;
+    const links=await db`SELECT l.*,max(h.hour) AS last_hour FROM hosting_workspace_accounts l LEFT JOIN hosting_usage_hours h USING(workspace_id) WHERE NOT EXISTS(SELECT 1 FROM hosting_workspace_wallets w WHERE w.workspace_id=l.workspace_id AND w.enabled_at<=${now}) GROUP BY l.workspace_id`;
     for(const l of links) {
       const current=Math.floor(now.getTime()/3600000)*3600000;
       const start=l.last_hour?new Date(l.last_hour).getTime()+3600000:Math.floor(new Date(l.enabled_at).getTime()/3600000)*3600000;
       // Bounded restart work; next tick resumes remaining hours.
       for(let h=start,count=0;h<=current&&count<744;h+=3600000,count++) {
         const usage=h===current?await collect(l.workspace_id,db):null;
-        await auditHostingHour(l.workspace_id,new Date(h),usage,db,now);
+        await auditHostingHour(l.workspace_id,new Date(h),usage,db,clock);
       }
     }
   } finally {await connection`SELECT pg_advisory_unlock(1440000720)`;connection.release();}
@@ -140,4 +153,13 @@ export function startHostingBillingRunner() {
   let running=false;
   const tick=async()=>{if(running)return;running=true;try{await runHostingBillingTick();}catch{console.error('[hosting-billing] tick failed; retry next minute');}finally{running=false;}};
   void tick();const timer=setInterval(()=>void tick(),60000);timer.unref();return ()=>clearInterval(timer);
+}
+
+/** Workspace-scoped projection: never reads shared balance or other-workspace samples. */
+export async function workspaceHostingStatus(workspaceId:string,db:Db=getDb()) {
+  const [link]=await db`SELECT account_id FROM hosting_workspace_accounts WHERE workspace_id=${workspaceId}`;
+  if(!link)return {version:1,billing_mode:'legacy_unlinked',workspace_id:workspaceId,stripe:stripeAvailability()};
+  const measurements=await db`SELECT workspace_id,status,bytes,debit_units,hour FROM hosting_usage_hours WHERE workspace_id=${workspaceId} ORDER BY hour DESC LIMIT 1`;
+  // Internal account ID supports route dispatch; stripped from the status projection.
+  return {version:1,billing_mode:'usd_prepaid',workspace_id:workspaceId,account_id:link.account_id,financial_scope:'workspace',currency:'USD',measurements,stripe:stripeAvailability()};
 }
