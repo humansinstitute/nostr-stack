@@ -1,3 +1,4 @@
+import { nappletOpenApiPaths } from './napplet-openapi';
 import { workspaceReportSchema } from './workspace-report-openapi';
 import { registeredAppStoragePaths } from './registered-app-storage-openapi';
 import { managedStorageCollectionPaths } from './managed-storage/openapi';
@@ -4423,6 +4424,7 @@ export function buildOpenApiDocument(origin: string) {
     },
     security: [{ nip98: [] }],
     paths: {
+      ...nappletOpenApiPaths(),
       ...managedStorageCollectionPaths,
       ...registeredAppStoragePaths,
       ...workspaceMembershipAdminPaths,

@@ -164,3 +164,15 @@ work. These names identify compatibility contracts, not additional products:
 
 See [branding compatibility](docs/branding-compatibility.md) for the retained-name
 inventory and the separate runtime migration boundary.
+
+## Common napplet namespaces
+
+The [napplet runtime API](docs/contract/napplet-runtime-v1.md) provides stable
+workspace/application/napplet installations and named personal or explicitly
+shared team JSON collections. NIP-98 identities, independent audience/data grants,
+revision checks, bounded pagination and retained versions remain server enforced.
+The portable bundle manifest is protocol v3. Existing org-data static napplets,
+File-backed tracker data and their versions remain unchanged; compatible import
+is explicit and preserves the source. Personal signing and DM operations are not
+implemented by this data API. Service activation and client/device acceptance
+must be verified separately from source tests.

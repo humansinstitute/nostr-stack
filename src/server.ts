@@ -1,3 +1,4 @@
+import { nappletRouter } from './routes/napplets';
 import { registeredAppStorageRouter } from './routes/registered-app-storage';
 import { installationRouter, installationHtml } from './routes/installation';
 import { managedStorageRouter } from './managed-storage/routes';
@@ -132,6 +133,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.route('/api/v4/billing', billingRouter);
   app.route('/api/v4/flightdeck-pg', driveRouter);
   app.route('/api/v4/flightdeck-pg', agentNotificationsRouter);
+  app.route('/api/v4/flightdeck-pg', nappletRouter);
   app.route('/api/v4/flightdeck-pg', flightDeckPgRouter);
   app.route('/api/v4/flightdeck-pg', wappActivityFlightDeckRouter);
   app.route('/api/v4/flightdeck-pg', wappManagementRouter);

@@ -3844,3 +3844,30 @@ export interface FlightDeckPgWorkspaceReportResponse {
   ranking: { total_channels: number; returned_channels: number; has_more: boolean; other_messages: number; other_conversations: number };
   coverage: { tasks_channels: number; documents_channels: number; files_channels: number };
 }
+
+/** Online-only, workspace/application/stable napplet namespace contract. */
+export type NappletBundle = { file_id: string; file_version_id: string; sha256_hex: string };
+export type NappletManifest = {
+  version: 3; napplet_id: string; bundle_version: string; title: string; icon: string;
+  runtime: { protocol: 3; min_host: number };
+  collections: Record<string, { scope: 'personal' | 'team'; schema_version: number; operations: Array<'list' | 'get' | 'create' | 'update' | 'delete'> }>;
+  capabilities: Record<string, { version: number; resources: string[]; operations: string[] }>;
+};
+export type NappletInstallation = {
+  workspace_id: string; app_npub: string; napplet_id: string;
+  owner_npub: string; publisher_npub: string; display_name: string; audience_npubs: string[];
+  bundle: NappletBundle; manifest: NappletManifest;
+  pending_release: { bundle: NappletBundle; manifest: NappletManifest } | null;
+  revision: number; removed: boolean; created_at: string; updated_at: string;
+};
+export type NappletCollection = {
+  id: string; workspace_id: string; app_npub: string; napplet_id: string; name: string;
+  scope: 'personal' | 'team'; owner_npub: string; read_npubs: string[]; write_npubs: string[];
+  schema_version: number; revision: number; created_at: string; updated_at: string;
+};
+export type NappletRecord = {
+  collection_id: string; id: string; revision: number; schema_version: number;
+  data: Record<string, unknown> | null; deleted: boolean; provenance: NappletBundle | null;
+  updated_by_npub: string; updated_at: string;
+};
+export type NappletPage<T, K extends string> = Record<K, T[]> & { next_cursor: string | null };
