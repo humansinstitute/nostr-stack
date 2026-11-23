@@ -1061,8 +1061,8 @@ describe('Workspace storage retained metadata', () => {
     expect(metrics('object_storage').provider_actual_bytes).toMatchObject({value:null,status:'unavailable'});
     expect(metrics('postgres').physical_bytes).toMatchObject({value:null,status:'unavailable'});
     expect(metrics('postgres').history_rows.value).toBeGreaterThanOrEqual(2);
-    expect(metrics('postgres').row_json_bytes.value).toBeGreaterThan(0);
-    expect(calls).toBe(3);
+    expect(metrics('postgres').column_bytes.value).toBeGreaterThan(0);
+    expect(calls).toBe(4);
     expect(JSON.stringify(report)).not.toContain('synthetic/');
     await sql`UPDATE flightdeck_pg_scopes SET description=repeat('x',10000) WHERE workspace_id=${other.workspaceId}`;
     const isolated=await readWorkspaceStorage(f.workspaceId,report.as_of,sql);
@@ -1070,12 +1070,44 @@ describe('Workspace storage retained metadata', () => {
     await object('synthetic/head',21);
     await expect(readWorkspaceStorage(f.workspaceId,report.as_of,sql)).rejects.toThrow('Workspace report unavailable');
   });
-  test('row budget fails closed rather than reporting truncated or zero usage', async () => {
+  test('sizes compressed and external datums without JSON or composite expansion', async () => {
+    const f=await seedAuthorizationFixture('storage-datums');
+    await sql`CREATE TABLE usage_test_versions(workspace_id uuid, body text, metadata jsonb)`;
+    try {
+      const read=()=>readWorkspaceStorage(f.workspaceId,'2026-01-01T00:00:00.000Z',sql);
+      const values=(report: Awaited<ReturnType<typeof read>>)=>Object.fromEntries(report.groups[0].metrics.map(m=>[m.id,m.value]));
+      const before=values(await read());
+      await sql`INSERT INTO usage_test_versions VALUES(${f.workspaceId},repeat('x',1000000),jsonb_build_object('content',repeat('z',1000000)))`;
+      const [compressed]=await sql`SELECT pg_column_size(body) AS bytes,octet_length(body) AS logical FROM usage_test_versions`;
+      expect(compressed.bytes).toBeLessThan(compressed.logical/10);
+      await sql`ALTER TABLE usage_test_versions ALTER COLUMN body SET STORAGE EXTERNAL`;
+      await sql`INSERT INTO usage_test_versions SELECT ${f.workspaceId},string_agg(md5(i::text),''),NULL FROM generate_series(1,10000) i`;
+      const [external]=await sql`SELECT pg_column_size(body) AS bytes,octet_length(body) AS logical FROM usage_test_versions WHERE metadata IS NULL`;
+      expect(external.bytes).toBe(320000);
+      expect(external.logical).toBe(320000);
+      const [expected]=await sql`SELECT sum(pg_column_size(workspace_id)::bigint+pg_column_size(body)+coalesce(pg_column_size(metadata),0))::text AS bytes,
+        sum(coalesce(pg_column_size(metadata),0))::text AS metadata FROM usage_test_versions`;
+      const after=values(await read());
+      expect(after.column_bytes!-before.column_bytes!).toBe(Number(expected.bytes));
+      expect(after.metadata_column_bytes!-before.metadata_column_bytes!).toBe(Number(expected.metadata));
+      expect(after.history_column_bytes!-before.history_column_bytes!).toBe(Number(expected.bytes));
+      expect(after.history_rows!-before.history_rows!).toBe(2);
+    } finally {await sql`DROP TABLE usage_test_versions`;}
+  });
+  test('accepts over 100000 narrow rows but rejects total budget before sizing payloads', async () => {
     const f=await seedAuthorizationFixture('storage-limit');
     await sql`CREATE TABLE usage_test_rows(workspace_id uuid, body text)`;
+    await sql`CREATE TABLE usage_test_rows_more(workspace_id uuid, body text)`;
     try {
       await sql`INSERT INTO usage_test_rows SELECT ${f.workspaceId}::uuid,'synthetic' FROM generate_series(1,100001)`;
-      await expect(readWorkspaceStorage(f.workspaceId,'2026-01-01T00:00:00.000Z',sql)).rejects.toMatchObject({code:'report_too_large'});
-    } finally {await sql`DROP TABLE usage_test_rows`;}
-  });
+      const report=await readWorkspaceStorage(f.workspaceId,'2026-01-01T00:00:00.000Z',sql);
+      expect(report.groups[0].metrics.find(m=>m.id==='rows')!.value).toBeGreaterThan(100000);
+      await sql`INSERT INTO usage_test_rows_more SELECT ${f.workspaceId}::uuid,'synthetic' FROM generate_series(1,900000)`;
+      let queries=0;
+      const counted=new Proxy(sql,{apply(target,thisArg,args){queries++;return Reflect.apply(target,thisArg,args);},
+        get(target,prop){if(prop==='unsafe') return (query:string,...args: any[])=>{queries++;expect(query).not.toContain('pg_column_size');return (target.unsafe as any)(query,...args);};return Reflect.get(target,prop);}});
+      await expect(readWorkspaceStorage(f.workspaceId,'2026-01-01T00:00:00.000Z',counted)).rejects.toMatchObject({code:'report_too_large'});
+      expect(queries).toBe(2);
+    } finally {await sql`DROP TABLE usage_test_rows`;await sql`DROP TABLE usage_test_rows_more`;}
+  }, 20000);
 });

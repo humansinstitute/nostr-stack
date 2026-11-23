@@ -3828,6 +3828,7 @@ export interface RegisteredAppStorageDescriptor {
 export interface RegisteredAppStorageUpload { base64_data: string }
 export interface RegisteredAppStorageComplete { size_bytes: number; sha256_hex: string }
 
+/** Generic metric envelope; stored-column estimates exclude physical container overhead. */
 export interface FlightDeckPgWorkspaceStorage {
   format: 'workspace-storage-v1'; workspace_id: string; scope: 'current-workspace'; as_of: string; activity_range_applies: false;
   groups: Array<{ id: string; metrics: Array<{ id: string; value: number | null; unit: 'bytes' | 'count';

@@ -28,20 +28,23 @@ never zero. Group IDs and metric IDs are unique within their containing arrays.
 Limits: 8 groups, 32 metrics per group, 64 characters per ID/method, 16 caveats of
 1024 characters each. Values are nonnegative safe integers or null; unavailable
 means null. All numeric storage metrics in this version are conservative
-`estimated` measurements of logical rows or recorded object metadata. No metric
+`estimated` measurements of stored column data or recorded object metadata. No metric
 currently asserts provider-confirmed `actual` bytes.
 
 PostgreSQL metric IDs:
 
 - `rows`: retained rows in public, nonpartitioned base tables with an explicit
   UUID `workspace_id` equal to the requested PG workspace UUID.
-- `row_json_bytes`: sum of UTF-8 byte lengths of PostgreSQL `to_jsonb(row)::text`.
-  This includes row fields and JSON serialization overhead; it is a logical data
-  estimate, not PostgreSQL on-disk tuple size.
-- `metadata_json_bytes`: UTF-8 serialized `metadata` fields, a subset of row bytes.
-- `history_rows`, `history_row_json_bytes`: subsets for table names containing
+- `column_bytes` (`stored-column-size`): sum of `pg_column_size` on each
+  individual nonnull stored field. This includes compressed and externally
+  stored datum sizes without serializing JSON or detoasting composite rows.
+  It is an attributable stored-column estimate, not physical disk usage.
+- `metadata_column_bytes` (`stored-column-size-subset`): the same measurement
+  on `metadata` fields only, a subset of `column_bytes`.
+- `history_rows`, `history_column_bytes`: subsets for table names containing
   `versions`, `audit` or `outbox`. This naming convention is explicit; it does not
-  claim semantic classification of arbitrary app payloads.
+  claim semantic classification of arbitrary app payloads. History bytes use
+  `stored-column-size-subset`.
 - `tables_measured`: tables included in the row measurement.
 - `physical_bytes`: null/unavailable. No `pg_database_size` or instance totals.
 
@@ -70,9 +73,13 @@ returned. No cloud credentials, listing, HEAD requests or separate catalogue are
 required.
 
 Queries run in the existing read-only repeatable-read report transaction with a
-10-second per-statement timeout. Three extra SQL statements discover at most 256
-tables, aggregate at most 100,000 rows per table and aggregate at most 100,000
-attributed object metadata rows. Discovery/row/object excess fails with
+10-second per-statement timeout. Four extra SQL statements discover at most 256
+tables (at most 256 live columns each), preflight narrow row counts, size columns,
+and aggregate at most 100,000 attributed object metadata rows. Preflight counts
+at most 1,000,001 rows per table and rejects a TOTAL exceeding 1,000,000 retained
+rows before sizing payloads. Successful measurements therefore size at most one
+million rows across all tables, under the same repeatable-read snapshot. This
+replaces the original 100,000-row per-table cap; the timeout is unchanged. Discovery/row/object excess fails with
 `503 report_too_large`; missing schema, timeout, unsafe counts or conflicting
 sizes for one object key fail with neutral `503 report_unavailable`. No partial
 summary or fallback zero is returned. There are no per-channel/entity/provider
@@ -95,7 +102,7 @@ object references named `storage_object_id`, and a partial covered subtotal in
 independent transactions with a 60-second cache. Its result cannot supply the
 report's single-snapshot row/history breakdown or the same `as_of` timestamp.
 
-This versioned report extension measures all qualifying public workspace-UUID
+This versioned report extension measures stored column datums in all qualifying public workspace-UUID
 base tables, additionally includes `head_storage_object_id` recovery references
 and explicitly workspace-attributed uploads, and fails closed on incomplete
 queries. Consequently its logical row and object estimates can differ from the
@@ -104,3 +111,22 @@ invoice. Do not substitute this extension for hosting/billing accounting or add
 its totals to console categories. No billing, console collector, or existing
 storage-usage route is changed by this extension. Any future consolidation must
 preserve those contracts and separately review measurement scope changes.
+
+## Measurement revision and examples
+
+The envelope is unchanged. Current metric IDs replace the initial unactivated
+`row_json_bytes`, `metadata_json_bytes` and `history_row_json_bytes` methods;
+those JSON-serialization estimates were too expensive for a real workspace.
+`tests/fixtures/workspace-storage-v1.json` remains a historical generic-envelope
+example. `tests/fixtures/workspace-storage-columns-v1.json` is the current,
+fully synthetic stored-column example. Generic hosts accept both; cartridge
+labels should call the current PostgreSQL section "Stored-column estimate".
+No host metric allowlist or new host build is needed for metric ID evolution.
+
+Stored datum bytes include PostgreSQL compression, and out-of-line values count
+their represented stored size rather than only a TOAST pointer. They exclude
+heap tuple headers, alignment, page slack, indexes, TOAST chunk/container overhead,
+WAL, dead MVCC versions, free space and backups. These exclusions mean the sum is
+neither exact physical workspace disk nor an uncompressed logical JSON size.
+See PostgreSQL's [database object size functions](https://www.postgresql.org/docs/16/functions-admin.html#FUNCTIONS-ADMIN-DBSIZE)
+and [TOAST storage](https://www.postgresql.org/docs/16/storage-toast.html).
