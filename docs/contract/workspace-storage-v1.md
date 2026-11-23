@@ -85,3 +85,22 @@ Rollback is the previous backend image/source and omission of `storage` by the
 client. This change performs no data writes and requires no data rollback. A
 portable host capability/parser update is required before opting in from strict
 existing hosts; publishing a napplet alone does not change host validation.
+
+## Relationship to the console usage collector
+
+The existing `/storage-usage` response and its cached collector in
+`src/services/workspace-storage-usage.ts` retain their existing meaning and
+behavior. That collector measures direct `flightdeck_pg_*` UUID-owned rows,
+object references named `storage_object_id`, and a partial covered subtotal in
+independent transactions with a 60-second cache. Its result cannot supply the
+report's single-snapshot row/history breakdown or the same `as_of` timestamp.
+
+This versioned report extension measures all qualifying public workspace-UUID
+base tables, additionally includes `head_storage_object_id` recovery references
+and explicitly workspace-attributed uploads, and fails closed on incomplete
+queries. Consequently its logical row and object estimates can differ from the
+console's covered subtotal. Neither is a physical disk measurement or a provider
+invoice. Do not substitute this extension for hosting/billing accounting or add
+its totals to console categories. No billing, console collector, or existing
+storage-usage route is changed by this extension. Any future consolidation must
+preserve those contracts and separately review measurement scope changes.
