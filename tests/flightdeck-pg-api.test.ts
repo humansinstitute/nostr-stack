@@ -690,6 +690,39 @@ describe('Flight Deck PG API routes', () => {
     expect(Object.keys(result.json).sort()).toEqual(['identity','format','workspace_id','range','from','to','as_of','timezone','complete','channel_policy','activity','inventory','channels','ranking','coverage'].sort());
   });
 
+  test('workspace storage requires effective management, preserves default shape and isolates workspace/app', async () => {
+    const {workspaceId,ownerId,groupMemberId}=await seedWorkspace('npub1storageusageapi');
+    const base=`/api/v4/flightdeck-pg/workspaces/${workspaceId}/workspace-report?range=7d`;
+    expect((await requestJson(base,'GET',ownerSecret)).json.storage).toBeUndefined();
+    const read=()=>requestJson(base+'&storage=workspace','GET',ownerSecret);
+    const first=await read();
+    expect(first.res.status).toBe(200);
+    expect(first.json.storage).toMatchObject({format:'workspace-storage-v1',workspace_id:workspaceId,scope:'current-workspace',activity_range_applies:false});
+    expect(first.json.storage.as_of).toBe(first.json.as_of);
+    for (const query of ['&storage=invalid','&storage=workspace&storage=workspace']) {
+      expect((await requestJson(base+query,'GET',ownerSecret)).res.status).toBe(400);
+    }
+    expect((await requestJson(base+'&storage=workspace&app_npub=wrong','GET',ownerSecret)).res.status).toBe(403);
+    expect((await requestJson(base+'&storage=workspace','GET',groupMemberSecret)).res.status).toBe(403);
+    // An administrative role alone cannot bypass server grants.
+    await sql`UPDATE flightdeck_pg_workspace_memberships SET role='admin' WHERE workspace_id=${workspaceId} AND actor_id=${groupMemberId}`;
+    expect((await requestJson(base+'&storage=workspace','GET',groupMemberSecret)).res.status).toBe(403);
+    await sql`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,permission)
+      VALUES(${workspaceId},'actor',${groupMemberId},'workspace','workspace.manage')`;
+    expect((await requestJson(base+'&storage=workspace','GET',groupMemberSecret)).res.status).toBe(200);
+    const [agent]=await sql`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${AGENT_NPUB},'agent') ON CONFLICT(npub) DO UPDATE SET kind='agent' RETURNING id`;
+    await sql`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspaceId},${agent.id},'agent')`;
+    expect((await requestJson(base+'&storage=workspace','GET',agentSecret)).res.status).toBe(403);
+    await sql`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,permission)
+      VALUES(${workspaceId},'actor',${agent.id},'workspace','workspace.manage')`;
+    expect((await requestJson(base+'&storage=workspace','GET',agentSecret)).res.status).toBe(200);
+    const other=await seedWorkspace('npub1storageusageother');
+    expect((await requestJson(`/api/v4/flightdeck-pg/workspaces/${other.workspaceId}/workspace-report?range=all&storage=workspace`,'GET',agentSecret)).res.status).toBe(403);
+    await sql`UPDATE flightdeck_pg_permission_grants SET revoked_at=now() WHERE workspace_id=${workspaceId} AND principal_actor_id=${ownerId} AND permission='workspace.manage'`;
+    expect((await read()).res.status).toBe(403);
+    expect((await requestJson(base,'GET',ownerSecret)).res.status).toBe(200);
+  });
+
   test('workspace report timeout returns a neutral failure without partial aggregates', async () => {
     const {workspaceId}=await seedWorkspace('npub1reporttimeout');
     let unlock!:()=>void, ready!:()=>void;

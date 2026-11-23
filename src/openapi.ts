@@ -5226,10 +5226,11 @@ export function buildOpenApiDocument(origin: string) {
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/workspace-report': {
         get: {
           tags: ['Flight Deck PG'], summary: 'Read complete authorized workspace report', security: [{ nip98: [] }],
-          description: 'Fixed aggregate workspace-report-v1: one read-only repeatable-read snapshot, current membership and effective family ACLs, active kind=channel channels/scopes, no content. Complete activity/inventory with explicit bounded ranking and coverage. UTC rolling window; tasks include all nine states. No-store; fail closed above 2000 authorized channels, unsafe counts, unknown states or timeouts. See docs/contract/workspace-report-v1.md and FlightDeckPgWorkspaceReportResponse in src/types.ts.',
+          description: 'Optional storage=workspace requires effective workspace.manage, adds all-time current-workspace logical JSON row/history and deduplicated completed object metadata estimates. Physical PostgreSQL and provider-confirmed bytes are unavailable (null). Measurement query failures return 503, never fake zero. No database-wide metrics or cloud listing. Fixed aggregate workspace-report-v1: one read-only repeatable-read snapshot, current membership and effective family ACLs, active kind=channel channels/scopes, no content. Complete activity/inventory with explicit bounded ranking and coverage. UTC rolling window; tasks include all nine states. No-store; fail closed above 2000 authorized channels, unsafe counts, unknown states or timeouts. See docs/contract/workspace-report-v1.md and FlightDeckPgWorkspaceReportResponse in src/types.ts.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
             { name: 'range', in: 'query', required: true, schema: { type: 'string', enum: ['7d', '30d', '90d', 'all'] } },
+            { name: 'storage', in: 'query', required: false, schema: { type: 'string', enum: ['workspace'] }, description: 'Explicit workspace.manage-only all-time storage summary; omitted by default for strict existing callers' },
             { name: 'top_n', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 50, default: 10 } },
             { name: 'app_npub', in: 'query', required: false, schema: { type: 'string' } },
             { name: 'x-flightdeck-pg-app-npub', in: 'header', required: false, schema: { type: 'string' } },

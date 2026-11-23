@@ -1,3 +1,4 @@
+import { readWorkspaceStorage } from '../src/services/flightdeck-pg-workspace-storage';
 import { readFlightDeckPgWorkspaceReport, parseWorkspaceReportQuery, reportCount, workspaceReportTaskStates } from '../src/services/flightdeck-pg-workspace-report';
 import { readFlightDeckPgMessageActivity, parseMessageActivityRange } from '../src/services/flightdeck-pg-message-activity';
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
@@ -1027,5 +1028,54 @@ describe('Workspace report', () => {
     await sql`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,resource_channel_id,permission)
       VALUES(${f.workspaceId},'actor',${f.actors.direct.id},'channel',${f.channels.sibling},'channel.read')`;
     await expect(read(f)).rejects.toMatchObject({code:'report_too_large'});
+  });
+});
+
+describe('Workspace storage retained metadata', () => {
+  test('counts retained deleted versions once per object path, excludes other workspace, and uses bounded aggregate queries', async () => {
+    const f=await seedAuthorizationFixture('storage-retained');
+    const other=await seedAuthorizationFixture('storage-other');
+    const object=async (path:string, bytes:number, complete=true, workspace=f.workspaceId) => {
+      const [o]=await sql`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,content_type,size_bytes,storage_path,completed_at,pg_workspace_id)
+        VALUES('synthetic-owner','synthetic-author','text/plain',${bytes},${path},${complete?new Date():null},${workspace}) RETURNING id`;
+      return o.id as string;
+    };
+    const head=await object('synthetic/head',20), history=await object('synthetic/retained',30);
+    await object('synthetic/head',20); // Same physical key, independent metadata row.
+    await object('synthetic/pending',900,false);
+    await object('synthetic/other',700,true,other.workspaceId);
+    const [file]=await sql`INSERT INTO flightdeck_pg_files(workspace_id,scope_id,channel_id,storage_object_id,created_by_actor_id,updated_by_actor_id,deleted_at)
+      VALUES(${f.workspaceId},${f.scopes.primary},${f.channels.primary},${head},${f.actors.direct.id},${f.actors.direct.id},now()) RETURNING id`;
+    await sql`INSERT INTO flightdeck_pg_file_versions(workspace_id,file_id,version_number,storage_object_id,created_by_actor_id)
+      VALUES(${f.workspaceId},${file.id},1,${history},${f.actors.direct.id}),(${f.workspaceId},${file.id},2,${head},${f.actors.direct.id})`;
+    // Older upload with no explicit workspace owner is recovered through retained version reference.
+    await sql`UPDATE v4_storage_objects SET pg_workspace_id=NULL WHERE id=${history}`;
+    let calls=0;
+    const counted=new Proxy(sql,{apply(target,thisArg,args){calls++; return Reflect.apply(target,thisArg,args);},
+      get(target,prop){if(prop==='unsafe') return (...args: any[])=>{calls++;return (target.unsafe as any)(...args);};return Reflect.get(target,prop);}});
+    const report=await readWorkspaceStorage(f.workspaceId,'2026-01-01T00:00:00.000Z',counted);
+    const metrics=(group:string)=>Object.fromEntries(report.groups.find(g=>g.id===group)!.metrics.map(m=>[m.id,m]));
+    expect(metrics('object_storage').bytes.value).toBe(50);
+    expect(metrics('object_storage').objects.value).toBe(2);
+    expect(metrics('object_storage').pending_objects.value).toBe(1);
+    expect(metrics('object_storage').provider_actual_bytes).toMatchObject({value:null,status:'unavailable'});
+    expect(metrics('postgres').physical_bytes).toMatchObject({value:null,status:'unavailable'});
+    expect(metrics('postgres').history_rows.value).toBeGreaterThanOrEqual(2);
+    expect(metrics('postgres').row_json_bytes.value).toBeGreaterThan(0);
+    expect(calls).toBe(3);
+    expect(JSON.stringify(report)).not.toContain('synthetic/');
+    await sql`UPDATE flightdeck_pg_scopes SET description=repeat('x',10000) WHERE workspace_id=${other.workspaceId}`;
+    const isolated=await readWorkspaceStorage(f.workspaceId,report.as_of,sql);
+    expect(isolated.groups).toEqual(report.groups);
+    await object('synthetic/head',21);
+    await expect(readWorkspaceStorage(f.workspaceId,report.as_of,sql)).rejects.toThrow('Workspace report unavailable');
+  });
+  test('row budget fails closed rather than reporting truncated or zero usage', async () => {
+    const f=await seedAuthorizationFixture('storage-limit');
+    await sql`CREATE TABLE usage_test_rows(workspace_id uuid, body text)`;
+    try {
+      await sql`INSERT INTO usage_test_rows SELECT ${f.workspaceId}::uuid,'synthetic' FROM generate_series(1,100001)`;
+      await expect(readWorkspaceStorage(f.workspaceId,'2026-01-01T00:00:00.000Z',sql)).rejects.toMatchObject({code:'report_too_large'});
+    } finally {await sql`DROP TABLE usage_test_rows`;}
   });
 });

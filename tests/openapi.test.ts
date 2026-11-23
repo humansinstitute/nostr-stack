@@ -341,3 +341,15 @@ describe('Context Tree v1 contract publication', () => {
     expect(body.components.schemas.ContextReference.properties.resolution.oneOf[0].additionalProperties).toBe(false);
   });
 });
+
+
+test('workspace report storage is explicitly optional with bounded generic metric schema', async () => {
+  const app=createApp();
+  const body=await (await app.request('/openapi.json')).json();
+  const endpoint=body.paths['/api/v4/flightdeck-pg/workspaces/{workspaceId}/workspace-report'].get;
+  expect(endpoint.parameters.find((p: any)=>p.name==='storage')).toMatchObject({required:false,schema:{enum:['workspace']}});
+  const schema=endpoint.responses['200'].content['application/json'].schema;
+  expect(schema.required).not.toContain('storage');
+  expect(schema.properties.storage.properties.groups.maxItems).toBe(8);
+  expect(schema.properties.storage.properties.groups.items.properties.metrics.maxItems).toBe(32);
+});

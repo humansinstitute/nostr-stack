@@ -1,3 +1,4 @@
+import { readWorkspaceStorage } from '../services/flightdeck-pg-workspace-storage';
 import { readFlightDeckPgWorkspaceReport, parseWorkspaceReportQuery, WorkspaceReportError } from '../services/flightdeck-pg-workspace-report';
 import QRCode from 'qrcode';
 import { readFipsIngressConfig } from '../fips-ingress';
@@ -6198,11 +6199,21 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/workspace-report', async (c) =>
       if ('response' in result) return result.response;
       const { context, identity } = result;
       const params = parseWorkspaceReportQuery(new URL(c.req.url).searchParams);
-      if (!params) return validationError(c, identity, [{ path: 'query', code: 'invalid', message: 'Expected range=7d|30d|90d|all and optional top_n integer 1..50' }]);
+      if (!params) return validationError(c, identity, [{ path: 'query', code: 'invalid', message: 'Expected range=7d|30d|90d|all, optional top_n integer 1..50 and storage=workspace' }]);
       const requestedApps = [c.req.header('x-flightdeck-pg-app-npub'), c.req.query('app_npub')].filter(Boolean);
       if (requestedApps.some(app => app !== context.workspace.app_npub)) return jsonError(c, 403, 'workspace_app_mismatch', 'Workspace app identity does not match', identity);
+      if (params.storage) {
+        const decision = await authorizeFlightDeckPgOperation({ actorNpub: auth.userNpub,
+          appNpub: context.workspace.app_npub, workspaceId: context.workspace.id,
+          permission: 'workspace.manage', resource: { type: 'workspace' } }, sql);
+        if (!decision.allowed) return authorizationError(c, decision, identity, 'workspace.manage');
+      }
       const report = await readFlightDeckPgWorkspaceReport({ workspaceId: context.workspace.id,
         actorId: context.actor.id, groupIds: context.groupIds, ...params }, sql);
+      if (params.storage) {
+        report.storage = await readWorkspaceStorage(context.workspace.id, report.as_of, sql);
+        if (Buffer.byteLength(JSON.stringify(report)) > 65536) throw new WorkspaceReportError('report_too_large');
+      }
       return c.json({ identity, ...report });
     });
   } catch (error) {

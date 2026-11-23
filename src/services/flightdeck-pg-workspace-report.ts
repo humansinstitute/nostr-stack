@@ -6,14 +6,16 @@ export const workspaceReportTaskStates = ['new', 'ready', 'in_progress', 'review
 export class WorkspaceReportError extends Error {
   constructor(public code: 'report_too_large' | 'report_unavailable') { super('Workspace report unavailable'); }
 }
-export function parseWorkspaceReportQuery(params: URLSearchParams): { range: FlightDeckPgWorkspaceReportRange; topN: number } | null {
-  if ([...params.keys()].some(key => !['range', 'top_n', 'app_npub'].includes(key)) ||
+export function parseWorkspaceReportQuery(params: URLSearchParams): { range: FlightDeckPgWorkspaceReportRange; topN: number; storage?: 'workspace' } | null {
+  if ([...params.keys()].some(key => !['range', 'top_n', 'app_npub', 'storage'].includes(key)) ||
       [...new Set(params.keys())].some(key => params.getAll(key).length !== 1)) return null;
+  const storage = params.get('storage');
+  if (storage !== null && storage !== 'workspace') return null;
   const range = params.get('range');
   if (range !== '7d' && range !== '30d' && range !== '90d' && range !== 'all') return null;
   const top = params.get('top_n') ?? '10';
   if (!/^(?:[1-9]|[1-4][0-9]|50)$/.test(top)) return null;
-  return { range, topN: Number(top) };
+  return { range, topN: Number(top), ...(storage ? { storage: 'workspace' as const } : {}) };
 }
 export function reportCount(value: unknown): number {
   if ((typeof value !== 'number' && typeof value !== 'string') || !/^(0|[1-9][0-9]*)$/.test(String(value))) throw new WorkspaceReportError('report_unavailable');

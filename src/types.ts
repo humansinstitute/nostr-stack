@@ -3828,6 +3828,13 @@ export interface RegisteredAppStorageDescriptor {
 export interface RegisteredAppStorageUpload { base64_data: string }
 export interface RegisteredAppStorageComplete { size_bytes: number; sha256_hex: string }
 
+export interface FlightDeckPgWorkspaceStorage {
+  format: 'workspace-storage-v1'; workspace_id: string; scope: 'current-workspace'; as_of: string; activity_range_applies: false;
+  groups: Array<{ id: string; metrics: Array<{ id: string; value: number | null; unit: 'bytes' | 'count';
+    method: string; status: 'estimated' | 'actual' | 'unavailable' }> }>;
+  provider_measured_at: string | null; last_object_completed_at: string | null; caveats: string[];
+}
+
 /** Complete source totals with an explicitly bounded channel ranking. */
 export type FlightDeckPgWorkspaceReportRange = '7d' | '30d' | '90d' | 'all';
 export interface FlightDeckPgWorkspaceReportResponse {
@@ -3842,6 +3849,7 @@ export interface FlightDeckPgWorkspaceReportResponse {
   }; documents: number; files: number };
   channels: Array<{ channel_id: string; scope_id: string; name: string; scope_name: string; messages: number; conversations: number }>;
   ranking: { total_channels: number; returned_channels: number; has_more: boolean; other_messages: number; other_conversations: number };
+  storage?: FlightDeckPgWorkspaceStorage;
   coverage: { tasks_channels: number; documents_channels: number; files_channels: number };
 }
 
