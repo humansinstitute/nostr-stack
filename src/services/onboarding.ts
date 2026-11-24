@@ -4,6 +4,9 @@ import { getDb } from '../db';
 import { resolveOrCreateFlightDeckPgActor } from './flightdeck-pg-authorization';
 import { generatedFlightDeckPgWorkspaceServiceNpub, setupFlightDeckPgDevWorkspace } from './flightdeck-pg-setup';
 import { HostingError, unitsUsd } from './hosting-billing';
+import { netFundedCents } from './hosting-funding';
+import { resolveCheckoutOrders } from './hosting-stripe';
+import { resolveIntentLightningQuotes } from './hosting-lightning';
 
 type Db = ReturnType<typeof getDb>;
 export const ONBOARDING_MIN_FUNDING_CENTS = 2100;
@@ -77,9 +80,11 @@ export async function revokeInvite(id: string, actorNpub: string, db: Db = getDb
   return row; // Existing seats stay valid; revocation only stops new admissions.
 }
 /** Administrative release of an unredeemed seat (for example, an abandoned claimant). */
-export async function releaseInviteSeat(inviteId: string, ownerNpub: string, actorNpub: string, db: Db = getDb()) {
+export async function releaseInviteSeat(inviteId: string, ownerNpub: string, actorNpub: string, db: Db = getDb(), resolver: CheckoutResolver = defaultResolver) {
   if (!config.adminNpub || actorNpub !== config.adminNpub) throw new HostingError(403, 'platform_admin_required');
   if (!UUID.test(inviteId)) throw new HostingError(404, 'invite_not_found');
+  const pending = await db`SELECT i.id FROM onboarding_intents i JOIN flightdeck_pg_actors a ON a.id=i.owner_actor_id WHERE i.invite_id=${inviteId} AND a.npub=${ownerNpub}`;
+  await resolveIntentCheckouts(pending.map(i => i.id as string), db, resolver);
   return db.begin(async tx => {
     const sql = tx as unknown as Db;
     const [invite] = await sql`SELECT id FROM onboarding_invites WHERE id=${inviteId} FOR UPDATE`;
@@ -135,13 +140,26 @@ export async function listAgentOffers(db: Db = getDb()) {
 }
 const offerView = (o: any) => ({ id: o.id as string, template: o.template as string, model_ref: o.model_ref as string, rate_version: o.rate_version as string, default_daily_cap_cents: o.default_daily_cap_cents as number, max_daily_cap_cents: o.max_daily_cap_cents as number });
 
-/** Stage 1 cannot verify a provider session's terminal state, so any unfulfilled attached order is treated as outstanding:
+/** An attached order is outstanding until the provider has confirmed a terminal state (paid, or expired and so unpayable):
  * its seat may not be released or reused because a late verified payment must still find its guaranteed seat. */
 async function hasOutstandingCheckout(intentIds: string[], sql: Db) {
   if (!intentIds.length) return false;
-  const [row] = await sql`SELECT 1 FROM hosting_checkout_orders WHERE intent_id=ANY(${intentIds}::uuid[]) AND fulfilled_at IS NULL LIMIT 1`;
-  return Boolean(row);
+  const [row] = await sql`SELECT 1 FROM hosting_checkout_orders WHERE intent_id=ANY(${intentIds}::uuid[]) AND fulfilled_at IS NULL AND terminal_at IS NULL LIMIT 1`;
+  // A Lightning quote is outstanding until the provider verified it settled, expired or cancelled (including unreconciled or inconsistent ones).
+  const [quote] = await sql`SELECT 1 FROM hosting_lightning_quotes WHERE intent_id=ANY(${intentIds}::uuid[]) AND state IN ('issuing','open','late_payment','mismatch') LIMIT 1`;
+  return Boolean(row || quote);
 }
+/** Asks the provider (outside any transaction or lock) to settle every unfulfilled checkout of these intents: paid ones are
+ * credited, open ones are expired. Whatever cannot be verified stays outstanding and keeps blocking cancel/release. */
+async function resolveIntentCheckouts(intentIds: string[], db: Db, resolver: CheckoutResolver, lightning: LightningResolver = resolveIntentLightningQuotes) {
+  if (!intentIds.length) return;
+  await lightning(intentIds, db);
+  const orders = await db`SELECT id FROM hosting_checkout_orders WHERE intent_id=ANY(${intentIds}::uuid[]) AND fulfilled_at IS NULL AND terminal_at IS NULL`;
+  if (orders.length) await resolver(orders.map(o => o.id as string), db);
+}
+export type CheckoutResolver = (orderIds: string[], db: Db) => Promise<unknown>;
+export type LightningResolver = (intentIds: string[], db: Db) => Promise<unknown>;
+const defaultResolver: CheckoutResolver = (ids, db) => resolveCheckoutOrders(ids, db);
 
 // ---- Intents -----------------------------------------------------------------------------------------------------
 
@@ -189,6 +207,7 @@ async function view(row: any, sql: Db) {
     agent_state: (row.agent_offer_id ? (row.steps.agent ? 'provisioned' : 'selected_not_provisioned') : 'none') as 'none' | 'selected_not_provisioned' | 'provisioned',
     funding_cents: row.funding_cents as number, return_state: row.return_state as string | null,
     funded: row.funded_at !== null, funded_at: row.funded_at as string | null,
+    funding_reversed: row.funded_settlement_id ? (await netFundedCents(sql, row.funded_settlement_id)) < row.funding_cents : false,
     steps: Object.fromEntries(Object.entries(row.steps as Record<string, any>).map(([k, v]) => [k, { completed_at: v.completed_at as string }])),
     last_error: row.last_error as string | null, workspace_id: row.workspace_id as string | null,
     provisioned_at: row.provisioned_at as string | null, intro_ends_at: row.intro_ends_at as string | null,
@@ -260,7 +279,9 @@ export async function updateIntent(id: string, ownerNpub: string, body: any, db:
   });
 }
 /** Owner cancels before any verified funding. Releases the invitation seat; credit already paid is never touched. */
-export async function cancelIntent(id: string, ownerNpub: string, db: Db = getDb()) {
+export async function cancelIntent(id: string, ownerNpub: string, db: Db = getDb(), resolver: CheckoutResolver = defaultResolver) {
+  // A paid-but-unseen or still-open checkout is settled with the provider first; a verified payment funds the intent instead of cancelling it.
+  await resolveIntentCheckouts([(await ownedIntent(id, ownerNpub, db)).id as string], db, resolver);
   return db.begin(async tx => {
     const sql = tx as unknown as Db;
     const peek = await ownedIntent(id, ownerNpub, sql);
@@ -270,7 +291,7 @@ export async function cancelIntent(id: string, ownerNpub: string, db: Db = getDb
     const row = await ownedIntent(id, ownerNpub, sql, true);
     if (row.status === 'cancelled') return view(row, sql);
     if (row.status !== 'open') throw new HostingError(409, 'intent_not_cancellable');
-    // A checkout may already exist and still be paid later; keep the intent and its seat until stage 2 can verify terminal state.
+    // A checkout the provider has not confirmed terminal may still be paid; keep the intent and its seat.
     if (await hasOutstandingCheckout([row.id], sql)) throw new HostingError(409, 'checkout_outstanding');
     const [updated] = await sql`UPDATE onboarding_intents SET status='cancelled',revision=revision+1,updated_at=now() WHERE id=${row.id} RETURNING *`;
     const [still] = await sql`SELECT 1 FROM onboarding_intents WHERE invite_id=${row.invite_id} AND owner_actor_id=${row.owner_actor_id} AND status IN ('open','funded','provisioning','provisioned')`;
@@ -279,11 +300,11 @@ export async function cancelIntent(id: string, ownerNpub: string, db: Db = getDb
   });
 }
 /** Verified-payment binding point. Called only inside the fulfilment transaction after the ledger credit is written. */
-export async function markOnboardingFunded(order: { id: string; intent_id: string; account_id: string; amount_cents: number }, sql: Db) {
+export async function markOnboardingFunded(order: { id: string; intent_id: string; account_id: string; amount_cents: number }, settlementId: string, sql: Db, checkoutOrderId: string | null = order.id) {
   const [intent] = await sql`SELECT * FROM onboarding_intents WHERE id=${order.intent_id} FOR UPDATE`;
   if (!intent || intent.account_id !== order.account_id) throw new HostingError(400, 'stripe_binding_mismatch');
   if (intent.status !== 'open' || order.amount_cents < intent.funding_cents) return false; // credit stays in the account either way
-  await sql`UPDATE onboarding_intents SET status='funded',funded_order_id=${order.id},funded_at=now(),last_error=NULL,revision=revision+1,updated_at=now() WHERE id=${intent.id}`;
+  await sql`UPDATE onboarding_intents SET status='funded',funded_order_id=${checkoutOrderId},funded_settlement_id=${settlementId},funded_at=now(),last_error=NULL,revision=revision+1,updated_at=now() WHERE id=${intent.id}`;
   return true;
 }
 export async function intentForCheckout(id: string, ownerNpub: string, db: Db = getDb()) {
@@ -322,11 +343,12 @@ const STEPS: { name: string; run: (ctx: StepContext) => Promise<Record<string, u
 ];
 export const ONBOARDING_STEP_NAMES = STEPS.map(s => s.name);
 
-/** Funding evidence is re-derived from the fulfilled order and its ledger credit, not trusted from the intent flag alone. */
+/** Funding evidence is re-derived from the immutable settlement and its provider reversals, not trusted from the intent flag alone.
+ * A refund or lost dispute that leaves less than the chosen amount funded stops provisioning; completed provisioning is never undone. */
 async function assertFundedEvidence(intent: any, sql: Db) {
-  const [order] = await sql`SELECT o.*,l.amount_units FROM hosting_checkout_orders o LEFT JOIN hosting_ledger l ON l.account_id=o.account_id AND l.idempotency_key='stripe:'||o.payment_intent
-    WHERE o.id=${intent.funded_order_id} AND o.intent_id=${intent.id} AND o.account_id=${intent.account_id} AND o.fulfilled_at IS NOT NULL`;
-  if (!order || order.amount_units === null || BigInt(order.amount_units) < BigInt(intent.funding_cents) * 1_440_000_000n) throw new HostingError(402, 'funding_required');
+  const [settlement] = await sql`SELECT s.* FROM hosting_funding_settlements s WHERE s.id=${intent.funded_settlement_id} AND s.intent_id=${intent.id} AND s.account_id=${intent.account_id}`;
+  if (!settlement || BigInt(settlement.amount_units) < BigInt(intent.funding_cents) * 1_440_000_000n) throw new HostingError(402, 'funding_required');
+  if (await netFundedCents(sql, settlement.id) < intent.funding_cents) throw new HostingError(402, 'funding_reversed');
 }
 export async function provisionIntent(id: string, ownerNpub: string, db: Db = getDb(), hooks: { beforeStep?: (name: string) => Promise<void> | void } = {}) {
   requireOnboardingEnabled();

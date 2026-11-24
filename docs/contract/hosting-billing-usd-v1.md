@@ -119,8 +119,8 @@ credit. Event failures return non-2xx so Stripe retries. The SDK's standard time
 tolerance rejects stale signatures. Browser redirect parameters have no authority.
 
 **Live mode is blocked with `stripe_live_rollout_blocked`.** Refund/dispute ledger
-reconciliation and real provider acceptance remain required before lifting that
-block. This first pass neither claims refunds/disputes are handled nor silently
+reconciliation is implemented in source ([funding-reversals-v1.md](funding-reversals-v1.md)); real
+provider acceptance remains required before lifting that block. This first pass neither claims refunds/disputes are handled nor silently
 permits live payments. Synthetic signed fixtures prove code behavior only. Test
 Checkout → verified provider webhook → observed account balance must be demonstrated
 using authorized credentials before claiming payment readiness.

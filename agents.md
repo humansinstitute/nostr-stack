@@ -54,6 +54,7 @@ It does not own:
 - storage ACLs and blob metadata: `src/routes/storage.ts`, `src/services/storage.ts`
 - admin and table viewer: `src/routes/admin.ts`, `src/admin-token.ts`
 - invited onboarding, capped invitations and funded provisioning: `src/routes/onboarding.ts`, `src/services/onboarding.ts`, `src/schema/onboarding-v1.ts`, contract `docs/contract/onboarding-v1.md`
+- shared funding settlement, Stripe refund/dispute reconciliation, checkout terminal holds and the provider-neutral Lightning port: `src/services/hosting-funding.ts`, `src/services/hosting-stripe.ts`, `src/services/hosting-lightning.ts`, `src/schema/hosting-funding-v1.ts`, contract `docs/contract/funding-reversals-v1.md`
 - strict agent notification inbox and notification-only delivery classification: `src/routes/agent-notifications.ts`, `src/services/agent-notifications.ts`, `src/services/agent-notification-projector.ts`, `src/schema/agent-notifications-v1.sql`, contract `docs/contract/agent-notifications-v1.md`
 
 ## Integration boundaries

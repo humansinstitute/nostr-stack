@@ -7,6 +7,7 @@ import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { setDb, closeDb } from '../src/db';
 import { config } from '../src/config';
 import { splitSqlStatements } from '../src/schema/sql-statements';
+import { ensureRuntimeSchema } from '../src/schema/ensure-runtime-schema';
 import { linkHostedAccount, grantHostingCredit, auditHostingHour, coveredBytes, USD_UNITS, unitsUsd, hostingStatus, runHostingBillingTick } from '../src/services/hosting-billing';
 import { fulfillHostingCheckout, receiveHostingStripeWebhook, createHostingCheckout, hostingStripeClient } from '../src/services/hosting-stripe';
 import { storageUsageSnapshot } from '../src/services/workspace-storage-usage';
@@ -36,6 +37,8 @@ describe.skipIf(!port||port===5432)('USD hosting on disposable PostgreSQL',()=>{
     const admin=postgres({...conn,database:'postgres'});await admin.unsafe(`CREATE DATABASE ${name}`);await admin.end();
     db=postgres({...conn,database:name});setDb(db);
     for(const statement of splitSqlStatements(readFileSync(new URL('../src/schema/001_init.sql',import.meta.url),'utf8')))await db.unsafe(statement);
+    // Funding settlements are runtime-schema tables (additive over the bootstrap).
+    await ensureRuntimeSchema(db);
     const [o]=await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${owner},'human') RETURNING id`;actor=o!.id;
     const [m]=await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${other},'human') RETURNING id`;outsider=m!.id;
     [a,b]=[randomUUID(),randomUUID()];

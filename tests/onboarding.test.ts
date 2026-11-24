@@ -300,7 +300,7 @@ describe.skipIf(!port || port === 5432)('invited onboarding on disposable Postgr
 
   test('contract: OpenAPI publishes every onboarding route and keeps the live Stripe gate', async () => {
     const document = buildOpenApiDocument('http://localhost') as any;
-    for (const path of ['/invites/{code}', '/account', '/agent-offers', '/intents', '/intents/{id}', '/intents/{id}/options', '/intents/{id}/cancel', '/intents/{id}/checkout', '/intents/{id}/provision', '/admin/invites', '/admin/invites/{id}/revoke', '/admin/invites/{id}/release-seat', '/admin/agent-offers']) {
+    for (const path of ['/invites/{code}', '/account', '/agent-offers', '/intents', '/intents/{id}', '/intents/{id}/options', '/intents/{id}/cancel', '/intents/{id}/checkout', '/intents/{id}/provision', '/admin/invites', '/admin/invites/{id}/revoke', '/admin/invites/{id}/release-seat', '/admin/refunds', '/intents/{id}/lightning/quote', '/intents/{id}/lightning/quotes/{quoteId}/refresh', '/admin/lightning/reconcile', '/admin/lightning-refunds', '/admin/agent-offers']) {
       expect(document.paths[`/api/v4/onboarding${path}`]).toBeDefined();
     }
     expect(document.components.schemas.OnboardingIntent.properties.funding_cents.minimum).toBe(2100);

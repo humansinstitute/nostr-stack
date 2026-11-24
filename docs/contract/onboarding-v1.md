@@ -48,9 +48,11 @@ automatic expiry. Capacity is counted in per-identity **seats**:
 - **Redeemed** at successful provisioning.
 - **Released** only when the owner cancels their last unfunded intent, or an
   administrator releases an unredeemed seat that has no funded/provisioning intent.
-  Stage 1 cannot verify a provider session's terminal state, so **either release is
-  refused (`checkout_outstanding`) while any unfulfilled checkout is attached** to
-  the identity's intents; a late verified payment must still find its seat. Checkout
+  **Either release is refused (`checkout_outstanding`) while any attached checkout or
+  Lightning quote is not provider-verified terminal.** Cancel/release first ask the
+  provider to settle the hold (credit a paid session, expire an open one, cancel or
+  observe an expired invoice); only a verified `expired`/`cancelled` provider state,
+  bound to the order, frees the seat. A late verified payment must still find its seat. Checkout
   creation locks the intent and requires `open`; cancel, release and claim lock
   invite → seat → intent in that order, and fulfilment locks the intent when it funds
   it, so funding and release cannot interleave.
@@ -70,10 +72,12 @@ unique PaymentIntent credits the ledger once (`stripe:<payment_intent>`). Intent
 checkout (`POST /intents/{id}/checkout`) uses the intent's server-held amount and
 marks the intent `funded` in the same transaction as the credit. Redirects, unpaid
 events and client flags cannot fund; provisioning also re-derives the evidence from
-the fulfilled order and ledger credit. There is no credit-mint API. Live Stripe stays
-blocked (`stripe_live_rollout_blocked`); Lightning, refunds and disputes are the
-payments slice. Credit above or beyond an intent (for example a payment landing
-after cancellation) remains in the account.
+the immutable settlement, net of provider reversals (`402 funding_reversed` when a
+refund or lost dispute leaves less than the chosen amount; completed provisioning is
+never undone). There is no credit-mint API. Live Stripe stays blocked
+(`stripe_live_rollout_blocked`). Lightning, refunds, disputes and checkout terminal
+state: [funding-reversals-v1.md](funding-reversals-v1.md). Credit above or beyond an
+intent (for example a payment landing after cancellation) remains in the account.
 
 ## Provisioning
 
@@ -107,8 +111,9 @@ introductory period is not charged.
 - Accounts opened here carry `opened_by='onboarding'`; the legacy
   `linkHostedAccount` no longer writes a welcome ledger entry for them (it would
   be an unbacked snapshot of a zero promotional balance).
-- Stripe live mode, Lightning, refunds, disputes and provider-state checkout expiry
-  remain the payments slice.
+- Stripe live mode, a real Lightning provider adapter, runtime reserve registration
+  (storage runway, agent holds) and live refund acceptance remain release gates; see
+  [funding-reversals-v1.md](funding-reversals-v1.md).
 
 ## Validation
 

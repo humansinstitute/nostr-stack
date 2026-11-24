@@ -1,7 +1,10 @@
 import { Hono } from 'hono';
 import { requireNip98AuthResolved, verifyStrictNip98Mutation } from '../auth';
 import { HostingError } from '../services/hosting-billing';
-import { createHostingCheckout } from '../services/hosting-stripe';
+import { createHostingCheckout, requestStripeRefund } from '../services/hosting-stripe';
+import { fundingReversalSummary } from '../services/hosting-funding';
+import { issueLightningQuote, readLightningQuote, reconcileOpenLightningQuotes, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
+import { getDb } from '../db';
 import {
   cancelIntent, createAgentOffer, createIntent, createInvite, intentForCheckout, inviteAvailability, listAgentOffers, listIntents, listInvites,
   openOwnerAccount, provisionIntent, readIntent, readOwnerAccount, releaseInviteSeat, revokeInvite, updateIntent,
@@ -31,7 +34,10 @@ const guard = (handler: (c: any) => Promise<Response>) => async (c: any) => {
 };
 
 onboardingRouter.get('/invites/:code', guard(async c => c.json(await inviteAvailability(c.req.param('code')))));
-onboardingRouter.get('/account', guard(async c => c.json({ account: await readOwnerAccount(await reader(c)) })));
+onboardingRouter.get('/account', guard(async c => {
+  const account = await readOwnerAccount(await reader(c));
+  return c.json({ account, funding: account ? await fundingReversalSummary(getDb(), account.account_id) : null });
+}));
 onboardingRouter.post('/account', guard(async c => { const { actor } = await mutation(c); return c.json({ account: await openOwnerAccount(actor) }); }));
 onboardingRouter.get('/agent-offers', guard(async c => { await reader(c); return c.json({ offers: await listAgentOffers() }); }));
 onboardingRouter.get('/intents', guard(async c => c.json({ intents: await listIntents(await reader(c)) })));
@@ -56,6 +62,17 @@ onboardingRouter.post('/intents/:id/checkout', guard(async c => {
   // Amount is always the intent's server-held figure; the payment is bound to this intent and owner account.
   return c.json(await createHostingCheckout(target.accountId, { amount_cents: target.amountCents, ...body }, undefined, undefined, { intentId: target.intentId }), 201);
 }));
+onboardingRouter.post('/intents/:id/lightning/quote', guard(async c => {
+  const { actor, body } = await mutation(c);
+  return c.json({ quote: await issueLightningQuote(c.req.param('id'), actor, body) }, 201);
+}));
+// Server-side re-poll of the provider for this quote. The caller supplies no settlement evidence; only provider-verified state credits.
+onboardingRouter.post('/intents/:id/lightning/quotes/:quoteId/refresh', guard(async c => {
+  const { actor } = await mutation(c);
+  const row = await readLightningQuote(c.req.param('quoteId'), c.req.param('id'), actor);
+  const quote = await resolveLightningQuote(row.id);
+  return c.json({ quote, intent: await readIntent(c.req.param('id'), actor) });
+}));
 onboardingRouter.post('/intents/:id/provision', guard(async c => {
   const { actor } = await mutation(c);
   return c.json({ intent: await provisionIntent(c.req.param('id'), actor) });
@@ -71,3 +88,6 @@ onboardingRouter.post('/admin/invites/:id/release-seat', guard(async c => {
   return c.json(await releaseInviteSeat(c.req.param('id'), body.owner_npub, actor));
 }));
 onboardingRouter.post('/admin/agent-offers', guard(async c => { const { actor, body } = await mutation(c); return c.json({ offer: await createAgentOffer(body, actor) }, 201); }));
+onboardingRouter.post('/admin/refunds', guard(async c => { const { actor, body } = await mutation(c); return c.json({ refund: await requestStripeRefund(body, actor) }, 201); }));
+onboardingRouter.post('/admin/lightning/reconcile', guard(async c => { const { actor } = await mutation(c); return c.json(await reconcileOpenLightningQuotes(actor)); }));
+onboardingRouter.post('/admin/lightning-refunds', guard(async c => { const { actor, body } = await mutation(c, 8192); return c.json({ refund: await requestLightningRefund(body, actor) }, 201); }));
