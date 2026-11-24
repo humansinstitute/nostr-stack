@@ -74,13 +74,23 @@ chain over what it received and matches `manifest.sections.*.chain` and `items` 
 - `status` is `complete` only when no reason applies; `incomplete_reasons` ⊆ `writes_during_export`, `dangling_relationships`,
   `asset_issues`, `uncovered_content`. `integrity.exported_scope_complete` is true when the only reason is `uncovered_content`.
 
-**Known gap:** the napplet registry (capability model of the org-data napplet routes), drive share descriptors, registered-app and
-managed storage (app delegation, not member ACL) and Git repositories are still not exported, so every manifest is currently
-`incomplete` with `uncovered_content`; each is listed in `coverage.uncovered_required` with its reason. Closing the first two needs
-per-family authorization adapters; app storage needs the app-delegation contract; Git needs a Forgejo byte/archive provider and
-workspace attribution (see `hosting-storage-peak-v1.md`). `response_activities` (transient status), `channel_move_receipts` and
+**Registry, drive and app adapters (content section, each under its own route's read rule):**
+
+| Table(s) | Rule |
+| --- | --- |
+| `napplets`, `napplet_releases` | The registry list rule: owner, publisher or audience member; removed installations are not delivered. Bundle bytes are not re-exported through the napplet route: they arrive via the file records only when the member can read that file. |
+| `napplet_collections`, `napplet_records`, `napplet_record_versions` | The collection rule (owner, `read_npubs` or `write_npubs`) on an open installation; records only when the manifest declares `list` for that collection, their versions only when it also declares `get`; deleted records are not delivered. (These two child tables carry no `workspace_id`, so the billable-table classifier cannot see them; they are listed under `content_tables`.) |
+| `napplet_installations`, `napplet_bundles` (org-data napplets) | The org-data catalogue: installed bundles with their html for any `org_data.read` member; bundle version metadata only for `napplet.install`/`napplet.publish` holders. The html of a published but uninstalled version has no read route and is not delivered. |
+| `drive_shares` | The discovery rule (`GET /drive/shares`): enabled shares whose owner is still a member; `workspace` audience for everyone, `private` only for its owner. Query parity is tested against `discoverDriveShares`. |
+| `app_storage_objects` | Registered-app private objects are readable only through generic canonical-owner recovery: the workspace owner receives completed objects (with bytes verified in `assets`); every other member receives nothing. |
+
+**Known gap:** managed-app storage (`managed_*`: ciphertext chunks readable only by the delegated app's own signer, no member or owner
+read route) and Git repositories (Forgejo owns them; no workspace attribution or byte/archive provider exists, see
+`hosting-storage-peak-v1.md`) are still not exported, so every manifest is currently `incomplete` with `uncovered_content`; each is
+listed in `coverage.uncovered_required` with its reason. `response_activities` (transient status), `channel_move_receipts` and
 `agent_work_receipts` (receipts) are classified `operational`, not content: a reclassification is a one-line change. Until the
-required list is empty no client may present this export as a complete exit or backup.
+required list is empty no client may present this export as a complete exit or backup. Offline recovery (30-day encrypted copy,
+support restore, expiry) is a separate, unbuilt capability; see `hosting-recovery-seam-v1.md`.
 
 ## Validation
 

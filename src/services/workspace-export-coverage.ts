@@ -20,9 +20,7 @@ export const EXPORT_REQUIRED_CATEGORIES: ReadonlySet<UncoveredCategory> = new Se
 
 const list = (category: UncoveredCategory, ...tables: string[]) => tables.map(t => [`flightdeck_pg_${t}`, category] as const);
 export const EXPORT_UNCOVERED: Record<string, UncoveredCategory> = Object.fromEntries([
-  ...list('content', 'drive_shares', 'napplets', 'napplet_bundles', 'napplet_collections', 'napplet_releases'),
   ...list('operational', 'response_activities', 'channel_move_receipts', 'agent_work_receipts'),
-  ...list('app_data', 'app_storage_objects'),
   ['managed_app_storage_objects', 'app_data'], ['managed_storage_graph', 'app_data'], ['managed_storage_refs', 'app_data'], ['managed_storage_set_pages', 'app_data'], ['managed_storage_sets', 'app_data'],
   ['git_branch_policies', 'git'], ['git_forgejo_repository_bindings', 'git'], ['git_forgejo_workspace_bindings', 'git'], ['git_repositories', 'git'], ['git_repository_grants', 'git'], ['git_workspace_namespaces', 'git'],
   ...list('derived', 'storage_links'),
@@ -30,21 +28,17 @@ export const EXPORT_UNCOVERED: Record<string, UncoveredCategory> = Object.fromEn
     'wapp_publishing_destinations', 'wapp_publishing_grants', 'agent_access_profiles', 'daily_scope_agent_access', 'canvas_visibility_principals'),
   ...list('settings', 'workspace_general', 'notification_categories', 'notification_channel_preferences', 'notification_preferences', 'notification_rules', 'notification_sources',
     'agent_notification_subscriptions', 'private_preferences', 'personal_agent_settings', 'event_subscription_agents', 'wapp_activity_mutes', 'wapp_activity_user_state',
-    'napplet_installations', 'app_blossom_publications', 'blossom_message_publications', 'blossom_publications'),
+    'app_blossom_publications', 'blossom_message_publications', 'blossom_publications'),
 ]);
 /** Why a table is not delivered yet, for tables where the reason is not obvious from the category. */
 export const UNCOVERED_REASON: Record<string, string> = {
-  flightdeck_pg_napplet_bundles: 'Needs the napplet registry capability model (org-data napplet routes).', flightdeck_pg_napplets: 'Needs the napplet registry capability model.',
-  flightdeck_pg_napplet_collections: 'Needs the napplet registry capability model.', flightdeck_pg_napplet_releases: 'Needs the napplet registry capability model.',
-  flightdeck_pg_drive_shares: 'Owner-private share descriptors with host endpoints; needs an owner-only adapter and a decision on exporting endpoints.',
-  flightdeck_pg_app_storage_objects: 'Registered-app data is governed by app delegation (docs/contract/registered-app-storage-v1.md), not by member ACL.',
   flightdeck_pg_response_activities: 'Transient response-status rows (queued/thinking/cleared, with expiry); not retained customer content.',
   flightdeck_pg_channel_move_receipts: 'Idempotency receipts of channel moves; the moved records themselves are exported.',
   flightdeck_pg_agent_work_receipts: 'Delivery receipts of the agent notification pipeline; the underlying records are exported.',
   flightdeck_pg_canvas_visibility_principals: 'Sharing topology of a canvas; its content is exported under the canvas visibility rule.',
   git_repositories: 'Forgejo owns repositories natively; no workspace attribution or byte/archive provider exists in Tower (docs/contract/hosting-storage-peak-v1.md).',
 };
-for (const table of Object.keys(EXPORT_UNCOVERED)) if (table.startsWith('git_') || table.startsWith('managed_')) UNCOVERED_REASON[table] ??= table.startsWith('git_') ? UNCOVERED_REASON.git_repositories! : 'Registered-app data is governed by app delegation (docs/contract/managed-app-storage.md), not by member ACL.';
+for (const table of Object.keys(EXPORT_UNCOVERED)) if (table.startsWith('git_') || table.startsWith('managed_')) UNCOVERED_REASON[table] ??= table.startsWith('git_') ? UNCOVERED_REASON.git_repositories! : 'Ciphertext chunks of a delegated managed app are read only by that app\'s own signer under its delegation (docs/contract/managed-app-storage.md); no member or owner read route exists to export through.';
 
 /** Billable tables the export does not deliver, with the reason class. Computed from the classification, not hand-maintained. */
 export function exportCoverage() {

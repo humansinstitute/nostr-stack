@@ -3,6 +3,7 @@ import { authorizeFlightDeckPgOperation, getEffectiveFlightDeckPgGroupIds } from
 import { listVisibleFlightDeckPgCanvases } from './flightdeck-pg-canvases';
 import type { RecordEntry } from './flightdeck-record-visibility';
 import { OrgDataError, orgOperation } from './org-data';
+import { MORE_ADAPTERS } from './workspace-export-adapters-more';
 
 type Db = ReturnType<typeof getDb>;
 export type ExportViewer = { workspaceId: string; actorId: string; npub: string; appNpub: string };
@@ -104,6 +105,7 @@ EXPORT_ADAPTERS.push(
       return out;
     } },
 );
+EXPORT_ADAPTERS.push(...MORE_ADAPTERS);
 export const EXPORT_ADAPTER_TABLES: string[] = EXPORT_ADAPTERS.map(a => a.table);
 export const keyFamily = (table: string) => `table:${table}`;
 

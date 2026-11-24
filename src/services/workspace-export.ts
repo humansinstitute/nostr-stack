@@ -146,6 +146,7 @@ async function contentPage(workspaceId: string, viewer: Awaited<ReturnType<typeo
         const row = a.omit ? Object.fromEntries(Object.entries(r.row).filter(([column]) => !a.omit!(column))) : r.row;
         page.items.push({ kind: 'table_row', table: a.table, key: r.k, row });
         page.identities.push(`table_row:${a.table}:${r.k}`);
+        page.assets.push(...objectRefs(keyFamily(a.table), r.k, row));
         page.bytes += Number(r.bytes); page.keys.push({ family: keyFamily(a.table), id: r.k, refs });
         page.tables![a.table] = (page.tables![a.table] ?? 0) + 1;
       }

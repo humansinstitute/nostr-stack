@@ -348,7 +348,8 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     expect(mine.manifest.integrity.dangling_relationships).toEqual([]);
     const required = owned.manifest.coverage.uncovered_required.map((u: any) => u.table);
     expect(required).not.toContain('flightdeck_pg_org_data_records');
-    expect(required).toEqual(expect.arrayContaining(['flightdeck_pg_napplet_bundles', 'flightdeck_pg_drive_shares', 'managed_storage_sets', 'git_repositories']));
+    expect(required).toEqual(expect.arrayContaining(['managed_storage_sets', 'git_repositories']));
+    for (const delivered of ['flightdeck_pg_napplets', 'flightdeck_pg_napplet_releases', 'flightdeck_pg_napplet_collections', 'flightdeck_pg_napplet_bundles', 'flightdeck_pg_napplet_installations', 'flightdeck_pg_drive_shares', 'flightdeck_pg_app_storage_objects']) expect(required).not.toContain(delivered);
     expect(required).not.toContain('flightdeck_pg_canvases');
     expect(owned.manifest.coverage.uncovered.find((u: any) => u.table === 'git_repositories').reason).toContain('Forgejo');
     expect(owned.manifest.coverage.uncovered.find((u: any) => u.table === 'flightdeck_pg_response_activities').category).toBe('operational');
@@ -365,6 +366,78 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     expect(result.manifest.integrity.dangling_relationships).toEqual([expect.objectContaining({ child: 'table:flightdeck_pg_reactions', parent: 'message', count: 1, sample: [expect.any(String)] })]);
     expect(result.manifest.incomplete_reasons).toContain('dangling_relationships');
     await db`DELETE FROM flightdeck_pg_reactions WHERE target_id=${orphan}`;
+  });
+
+  test('napplet registry, org napplets, drive shares and registered-app objects follow their own read rules', async () => {
+    await db`DELETE FROM workspace_exports WHERE workspace_id=${ws}`;
+    const app = 'export-app';
+    const manifest = { collections: { notes: { scope: 'team', schema_version: 1, operations: ['list', 'get', 'create'] }, hidden: { scope: 'team', schema_version: 1, operations: ['create'] } } };
+    const bundle = { file_id: ids.file, file_version: 1, sha256_hex: 'a'.repeat(64) };
+    const install = (id: string, over: Record<string, unknown> = {}) => db`INSERT INTO flightdeck_pg_napplets(workspace_id,app_npub,napplet_id,owner_npub,publisher_npub,display_name,audience_npubs,bundle,manifest,removed)
+      VALUES(${ws},${app},${id},${owner},${owner},${id},${db.json((over.audience ?? []) as any)},${db.json(bundle as any)},${db.json(manifest as any)},${over.removed === true})`;
+    await install('nap-a', { audience: [reader] }); await install('nap-b'); await install('nap-gone', { audience: [reader], removed: true });
+    for (const [n, rev] of [['nap-a', 1], ['nap-a', 2], ['nap-b', 1], ['nap-gone', 1]] as const) await db`INSERT INTO flightdeck_pg_napplet_releases(workspace_id,app_npub,napplet_id,revision,bundle,manifest,publisher_npub) VALUES(${ws},${app},${n},${rev},${db.json(bundle as any)},${db.json(manifest as any)},${owner})`;
+    const collection = async (n: string, name: string, read: string[]) => (await db`INSERT INTO flightdeck_pg_napplet_collections(workspace_id,app_npub,napplet_id,name,scope,owner_npub,read_npubs,schema_version) VALUES(${ws},${app},${n},${name},'team',${owner},${db.json(read as any)},1) RETURNING id`)[0]!.id as string;
+    const cShared = await collection('nap-a', 'notes', [reader]), cClosed = await collection('nap-a', 'hidden', [reader]), cOwnerOnly = await collection('nap-b', 'notes', []);
+    // The member's own collection: readable by them as owner, never by the napplet's owner.
+    const cReaderOwn = (await db`INSERT INTO flightdeck_pg_napplet_collections(workspace_id,app_npub,napplet_id,name,scope,owner_npub,read_npubs,schema_version) VALUES(${ws},${app},'nap-a','notes','personal',${reader},'[]'::jsonb,1) RETURNING id`)[0]!.id as string;
+    const record = async (c: string, id: string, deleted = false, revs = 1) => {
+      await db`INSERT INTO flightdeck_pg_napplet_records(collection_id,id,revision,schema_version,data,deleted,updated_by_npub) VALUES(${c},${id},${revs},1,${db.json({ id } as any)},${deleted},${owner})`;
+      for (let r = 1; r <= revs; r++) await db`INSERT INTO flightdeck_pg_napplet_record_versions(collection_id,id,revision,schema_version,data,deleted,updated_by_npub,updated_at) VALUES(${c},${id},${r},1,${db.json({ id, r } as any)},false,${owner},now())`;
+    };
+    await record(cShared, 'r1', false, 2); await record(cShared, 'r-del', true); await record(cClosed, 'r-hidden'); await record(cOwnerOnly, 'r-owner');
+    // Drive shares: the discovery rule (enabled, owner still a member; private only for its owner).
+    const share = (id: string, actor: string, audience: string, enabled = true) => db`INSERT INTO flightdeck_pg_drive_shares(id,workspace_id,owner_actor_id,host_npub,endpoint,name,host_name,audience,enabled) VALUES(${id},${ws},${actor},${owner},'https://drive.example.invalid','s','h',${audience},${enabled})`;
+    const [sOwnerPriv, sOwnerShared, sReaderPriv, sOff, sGone] = Array.from({ length: 5 }, () => randomUUID());
+    const [{ id: goneActor }] = await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${npubOf(keyOf())},'human') RETURNING id` as any;
+    await share(sOwnerPriv!, ownerId, 'private'); await share(sOwnerShared!, ownerId, 'workspace'); await share(sReaderPriv!, readerId, 'private'); await share(sOff!, ownerId, 'workspace', false); await share(sGone!, goneActor, 'workspace');
+    // Registered-app objects: only the workspace owner receives completed ones, with verified bytes.
+    const appObject = await object('app-private', 'app bytes');
+    await db`INSERT INTO flightdeck_pg_app_storage_objects(storage_object_id,workspace_id,app_npub,actor_id) VALUES(${appObject},${ws},${app},${ownerId})`;
+    const [unfinished] = await db`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,content_type,size_bytes,storage_path,pg_workspace_id) VALUES(${owner},${owner},'text/plain',3,'fixture/unfinished',${ws}) RETURNING id`;
+    await db`INSERT INTO flightdeck_pg_app_storage_objects(storage_object_id,workspace_id,app_npub,actor_id) VALUES(${unfinished!.id},${ws},${app},${ownerId})`;
+    // Org napplets: the installed bundle's html for org_data.read members; version metadata only for publishers/installers.
+    await db`INSERT INTO flightdeck_pg_napplet_bundles(workspace_id,key,version,title,bridge_version,capabilities,html,sha256,created_by_actor_id) VALUES(${ws},'dash',1,'Dash',1,'[]'::jsonb,'<p>one</p>',${sha('<p>one</p>')},${ownerId}),(${ws},'dash',2,'Dash',1,'[]'::jsonb,'<p>two</p>',${sha('<p>two</p>')},${ownerId})`;
+    await db`INSERT INTO flightdeck_pg_napplet_installations(workspace_id,key,version) VALUES(${ws},'dash',1)`;
+    await grant(ownerId, null, 'napplet.install');
+    for (const permission of ['workspace.read', 'org_data.read']) await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id,principal_type,principal_actor_id,resource_type,permission) SELECT ${ws},'actor',${readerId},'workspace',${permission} WHERE NOT EXISTS(SELECT 1 FROM flightdeck_pg_permission_grants WHERE workspace_id=${ws} AND principal_actor_id=${readerId} AND permission=${permission} AND revoked_at IS NULL)`;
+
+    const owned = await run(owner), mine = await run(reader);
+    const rows = (r: any, table: string) => r.seen.content.filter((i: any) => i.table === `flightdeck_pg_${table}`);
+    const keys = (r: any, table: string) => rows(r, table).map((i: any) => i.key).sort();
+    const nul = '\u0001', pad = (n: number) => String(n).padStart(10, '0');
+    // Napplet registry: the list rule (owner / publisher / audience, not removed), the collection rule, declared operations only.
+    expect(keys(owned, 'napplets')).toEqual(['nap-a', 'nap-b']);
+    expect(keys(mine, 'napplets')).toEqual(['nap-a']);
+    expect(keys(owned, 'napplet_releases')).toEqual([`nap-a${nul}${pad(1)}`, `nap-a${nul}${pad(2)}`, `nap-b${nul}${pad(1)}`]);
+    expect(keys(mine, 'napplet_releases')).toEqual([`nap-a${nul}${pad(1)}`, `nap-a${nul}${pad(2)}`]);
+    expect(keys(owned, 'napplet_collections')).toEqual([cShared, cClosed, cOwnerOnly].sort());
+    expect(keys(mine, 'napplet_collections')).toEqual([cShared, cClosed, cReaderOwn].sort());
+    expect(keys(owned, 'napplet_records')).toEqual([`${cShared}${nul}r1`, `${cOwnerOnly}${nul}r-owner`].sort()); // deleted rows and collections without a declared `list` are not delivered
+    expect(keys(mine, 'napplet_records')).toEqual([`${cShared}${nul}r1`]);
+    expect(keys(mine, 'napplet_record_versions')).toEqual([`${cShared}${nul}r1${nul}${pad(1)}`, `${cShared}${nul}r1${nul}${pad(2)}`]);
+    expect(owned.manifest.integrity.dangling_relationships).toEqual([]);
+    expect(mine.manifest.integrity.dangling_relationships).toEqual([]);
+    // Drive: private shares only for their owner, enabled shares of current members only.
+    expect(keys(owned, 'drive_shares')).toEqual([sOwnerPriv, sOwnerShared].sort());
+    expect(keys(mine, 'drive_shares')).toEqual([sOwnerShared, sReaderPriv].sort());
+    expect(rows(owned, 'drive_shares')[0].row.owner_npub).toBe(owner);
+    // Registered-app objects: owner only, completed only, bytes verified in the assets section.
+    expect(keys(owned, 'app_storage_objects')).toEqual([appObject]);
+    expect(keys(mine, 'app_storage_objects')).toEqual([]);
+    expect(owned.seen.assets.find((a: any) => a.object_id === appObject)).toMatchObject({ status: 'verified', sha256_hex: sha('app bytes') });
+    expect(mine.seen.assets.some((a: any) => a.object_id === appObject)).toBe(false);
+    // Org napplets: installed html for every org_data.read member; version metadata for the installer only.
+    expect(rows(owned, 'napplet_installations').map((i: any) => i.row.html)).toEqual(['<p>one</p>']);
+    expect(rows(mine, 'napplet_installations').map((i: any) => i.row.html)).toEqual(['<p>one</p>']);
+    expect(keys(owned, 'napplet_bundles')).toEqual([`dash${nul}${pad(1)}`, `dash${nul}${pad(2)}`]);
+    expect(keys(mine, 'napplet_bundles')).toEqual([]);
+    expect(rows(owned, 'napplet_bundles').every((i: any) => i.row.html === undefined)).toBe(true); // metadata only; html has no read route for uninstalled versions
+    // Parity with the discovery route's own query.
+    const { discoverDriveShares } = await import('../src/services/drive');
+    expect((await discoverDriveShares(ws, readerId)).map(s => s.id).sort()).toEqual(keys(mine, 'drive_shares'));
+    expect((await discoverDriveShares(ws, ownerId)).map(s => s.id).sort()).toEqual(keys(owned, 'drive_shares'));
+    await db`DELETE FROM workspace_exports WHERE workspace_id=${ws}`;
   });
 
   test('a write during the export is reported, never hidden', async () => {
