@@ -154,3 +154,5 @@ Only explicit owner enrollment transitions a workspace to its separate owner-fun
 allocation in the same exact USD ledger. Existing account links, balances and history
 are retained; no implicit currency conversion or pricing-basis replacement occurs.
 The v1 runner/audit excludes periods at or after that workspace transition boundary.
+
+Invited onboarding reuses this ledger and Stripe proof; see [onboarding-v1.md](onboarding-v1.md).

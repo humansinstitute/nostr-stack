@@ -1,6 +1,7 @@
 import Stripe from 'stripe';
 import { getDb } from '../db';
 import { centsUnits, lockedAccount, HostingError } from './hosting-billing';
+import { markOnboardingFunded, ONBOARDING_MIN_FUNDING_CENTS } from './onboarding';
 type Db=ReturnType<typeof getDb>;
 export function hostingStripeClient() {
   const key=process.env.STRIPE_SECRET_KEY;
@@ -11,9 +12,9 @@ export function hostingStripeClient() {
   if(!key.startsWith('sk_test_')&&!key.startsWith('rk_test_'))throw new HostingError(503,'stripe_mode_mismatch');
   return new Stripe(key,{maxNetworkRetries:2,timeout:15000});
 }
-export async function createHostingCheckout(accountId:string,body:unknown,db:Db=getDb(),client=hostingStripeClient()) {
+export async function createHostingCheckout(accountId:string,body:unknown,db:Db=getDb(),client=hostingStripeClient(),opts:{intentId?:string}={}) {
   const b=body as any;
-  if(!b||Object.keys(b).sort().join(',')!=='amount_cents,idempotency_key,return_url'||![500,1000,2500,5000,10000].includes(b.amount_cents)
+  if(!b||Object.keys(b).sort().join(',')!=='amount_cents,idempotency_key,return_url'||!(opts.intentId?Number.isSafeInteger(b.amount_cents)&&b.amount_cents>=ONBOARDING_MIN_FUNDING_CENTS&&b.amount_cents<=1_000_000:[500,1000,2500,5000,10000].includes(b.amount_cents))
     ||typeof b.idempotency_key!=='string'||!/^[a-zA-Z0-9_-]{8,100}$/.test(b.idempotency_key)||typeof b.return_url!=='string')throw new HostingError(400,'invalid_checkout');
   const allowed=(process.env.HOSTING_STRIPE_RETURN_URLS||'').split(',').map(s=>s.trim());
   if(!allowed.includes(b.return_url))throw new HostingError(400,'return_url_not_allowed');
@@ -22,10 +23,15 @@ export async function createHostingCheckout(accountId:string,body:unknown,db:Db=
   const order=await db.begin(async transaction=>{
     const tx=transaction as unknown as Db;
     await tx`SELECT id FROM hosting_accounts WHERE id=${accountId} FOR UPDATE`;
-    const [o]=await tx`INSERT INTO hosting_checkout_orders(account_id,idempotency_key,amount_cents,return_url,mode)
-      VALUES(${accountId},${b.idempotency_key},${b.amount_cents},${b.return_url},'test')
-      ON CONFLICT(account_id,idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING *`;
-    if(o!.amount_cents!==b.amount_cents||o!.return_url!==b.return_url||o!.mode!=='test')throw new HostingError(409,'idempotency_conflict');return o!;
+    // Legacy checkout never references onboarding columns; only intent-bound orders carry intent_id.
+    const [o]=opts.intentId
+      ?await tx`INSERT INTO hosting_checkout_orders(account_id,idempotency_key,amount_cents,return_url,mode,intent_id)
+        VALUES(${accountId},${b.idempotency_key},${b.amount_cents},${b.return_url},'test',${opts.intentId})
+        ON CONFLICT(account_id,idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING *`
+      :await tx`INSERT INTO hosting_checkout_orders(account_id,idempotency_key,amount_cents,return_url,mode)
+        VALUES(${accountId},${b.idempotency_key},${b.amount_cents},${b.return_url},'test')
+        ON CONFLICT(account_id,idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING *`;
+    if(o!.amount_cents!==b.amount_cents||o!.return_url!==b.return_url||o!.mode!=='test'||(o!.intent_id??null)!==(opts.intentId??null))throw new HostingError(409,'idempotency_conflict');return o!;
   });
   const session=order.session_id?await client.checkout.sessions.retrieve(order.session_id):await client.checkout.sessions.create({
     mode:'payment',allowed_payment_method_types:['card'],client_reference_id:order.id,
@@ -55,6 +61,8 @@ export async function fulfillHostingCheckout(session:Stripe.Checkout.Session,db:
     await tx`UPDATE hosting_accounts SET paid_units=${paid.toString()},depleted_at=CASE WHEN ${paid.toString()}::numeric+promo_units>0 THEN NULL ELSE depleted_at END WHERE id=${o.account_id}`;
     await tx`INSERT INTO hosting_ledger(account_id,kind,amount_units,paid_after_units,promo_after_units,idempotency_key,reason,metadata)
       VALUES(${o.account_id},'stripe',${amount.toString()},${paid.toString()},${a!.promo_units},${`stripe:${session.payment_intent}`},'Verified paid Stripe Checkout',${tx.json({session_id:session.id,payment_intent:session.payment_intent,mode:'test'})})`;
+    // Only this verified, ledgered payment may fund an onboarding intent; redirects and client claims cannot.
+    if(o.intent_id)await markOnboardingFunded(o,tx);
     return {credited:true};
   });
 }

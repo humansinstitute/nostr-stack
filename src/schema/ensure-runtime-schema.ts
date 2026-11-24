@@ -3,6 +3,7 @@ import { reconcileFlightDeckPgDmDefaults } from '../services/flightdeck-pg-dm-de
 import { hostingWorkspaceBillingV2Sql } from './hosting-workspace-billing-v2';
 import { hostingMeteringV1Sql } from './hosting-metering-v1';
 import { hostingBillingV1Sql } from './hosting-billing-v1';
+import { onboardingV1Sql } from './onboarding-v1';
 import { driveV1Sql } from './drive-v1';
 import { learningV1Sql } from './learning-v1';
 import { learningResearchV1Sql } from './learning-research-v1';
@@ -4440,6 +4441,7 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
   await sql.unsafe(hostingBillingV1Sql);
   await sql.unsafe(hostingMeteringV1Sql);
   await sql.unsafe(hostingWorkspaceBillingV2Sql);
+  await sql.unsafe(onboardingV1Sql);
   // Shared notification inbox: tables, sequence/hint functions, transactional intake and view-state bridge triggers.
   await sql.unsafe(readFileSync(new URL('./notifications-v1.sql', import.meta.url), 'utf8'));
   await sql.unsafe(readFileSync(new URL('./unread-mentions-v1.sql', import.meta.url), 'utf8'));
