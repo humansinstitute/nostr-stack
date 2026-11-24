@@ -157,8 +157,9 @@ the manager before any runtime or live validation.
 `active`, `warning` (30/7/1-day runway), `read_only` (funds exhausted: 30 free days from `depleted_at`, writes blocked by
 the existing 402 boundary, export available, no debt, exit fee or back-charge, a top-up resumes charging prospectively),
 `removal_due` (the 30 days ended), `no_billed_workspace` or `unknown`. It always reports `automatic_deletion:false`,
-`live_removal_performed:false` and `offline_recovery:{available:false,verified:false,promised:false}`: no isolated encrypted
-offline copy, support restore or expiry exists, so nothing may be described as recoverable. `export_complete` stays false while
+`live_removal_performed:false` and `offline_recovery:{available,verified,promised,expires_at,reason}`, derived from
+[hosting-recovery-seam-v1.md](hosting-recovery-seam-v1.md): all false today (no vault is configured), and `promised` can only become true
+for an unexpired copy sealed by a production vault that passed an isolated restore, so nothing may be described as recoverable. `export_complete` stays false while
 the [migration export](workspace-migration-export-v1.md) manifest is incomplete.
 
 Durable notices (`hosting_lifecycle_notices`) are recorded once per account, kind and cycle by the periodic runner

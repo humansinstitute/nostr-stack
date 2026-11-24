@@ -43,7 +43,7 @@ onboardingSchemas.OnboardingLifecycle = object({
   runway: { type: 'object' },
   read_only: { oneOf: [{ type: 'null' }, { type: 'object', description: 'Entered when funds are exhausted. 30 free days; writes blocked, export available, no debt, exit fee or back-charge; a top-up resumes charging prospectively.' }] },
   removal: object({ due_at: nullableDateTime, due: { type: 'boolean' }, automatic_deletion: { const: false }, live_removal_performed: { const: false }, note: { type: ['string', 'null'] } }),
-  offline_recovery: object({ available: { const: false }, verified: { const: false }, promised: { const: false }, reason: { type: 'string' } }),
+  offline_recovery: object({ available: { type: 'boolean' }, verified: { type: 'boolean' }, promised: { type: 'boolean', description: 'True only for an unexpired copy sealed by a production vault that passed an isolated restore test. Always false until such a vault is configured and used.' }, expires_at: { type: ['string', 'null'], format: 'date-time' }, reason: { type: 'string' } }),
   agents: { type: 'object' }, export_complete: { type: 'boolean', description: 'False while the migration export manifest is incomplete (see workspace migration export).' },
 }) as any;
 onboardingSchemas.OnboardingLifecycleNotice = lifecycleNotice as any;

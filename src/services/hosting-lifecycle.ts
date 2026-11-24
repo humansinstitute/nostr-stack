@@ -1,6 +1,7 @@
 import { getDb } from '../db';
 import { HostingError } from './hosting-billing';
 import { accountStorageSummary } from './hosting-storage';
+import { accountRecoveryState } from './hosting-recovery';
 
 type Db = ReturnType<typeof getDb>;
 const DAY = 86_400_000;
@@ -42,10 +43,7 @@ export async function accountLifecycle(db: Db, accountId: string, now = new Date
       due_at: ends ? ends.toISOString() : null, due: removalDue, automatic_deletion: false, live_removal_performed: false,
       note: removalDue ? 'The free read-only period has ended. Nothing is deleted automatically; any removal is a separate, explicit operator action.' : null,
     },
-    offline_recovery: {
-      available: false, verified: false, promised: false,
-      reason: 'No isolated, encrypted, expiring offline recovery copy or support restore exists or has been verified. Live removal must not be described as erasure or as recoverable.',
-    },
+    offline_recovery: await accountRecoveryState(db, accountId, now),
     agents: { resume_requires_explicit_confirmation: true, implemented: false },
     export_complete: false, // see docs/contract/workspace-migration-export-v1.md: every manifest is incomplete while content families are unexported
   };

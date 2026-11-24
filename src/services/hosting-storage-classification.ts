@@ -47,7 +47,7 @@ export const EXCLUDED_STORAGE_TABLES: Record<string, string> = {
   flightdeck_pg_hosted_signups: 'accounting',
   hosting_storage_enrollments: 'accounting', hosting_storage_deltas: 'accounting', hosting_storage_anchors: 'accounting',
   hosting_storage_boundaries: 'accounting', hosting_storage_hours: 'accounting',
-  hosting_agent_grants: 'accounting', hosting_agent_holds: 'accounting',
+  hosting_agent_grants: 'accounting', hosting_agent_holds: 'accounting', hosting_recovery_copies: 'accounting',
   // Sync projection: trigger-maintained JSON copies of the entity tables above. Counting them would bill the same content twice.
   flightdeck_pg_record_current: 'service_replica', flightdeck_pg_record_heads: 'service_replica',
   flightdeck_pg_record_journal: 'service_replica', flightdeck_pg_record_clock: 'service_replica',
