@@ -7,8 +7,8 @@ import { config } from '../src/config';
 import { closeDb, setDb } from '../src/db';
 import { ensureRuntimeSchema } from '../src/schema/ensure-runtime-schema';
 import { splitSqlStatements } from '../src/schema/sql-statements';
-import { registerFundingReserve } from '../src/services/hosting-funding';
-import { configureLightningProvider, issueLightningQuote, reconcileOpenLightningQuotes, requestLightningRefund, resolveLightningQuote, type LightningProvider } from '../src/services/hosting-lightning';
+import { registerFundingReserve, REQUIRED_RESERVE_SOURCES } from '../src/services/hosting-funding';
+import { configureLightningProvider, issueLightningQuote, reconcileOpenLightningQuotes, REFUND_RATE_MAX_AGE_MS, requestLightningRefund, resolveLightningQuote, type LightningProvider } from '../src/services/hosting-lightning';
 import { cancelIntent, createIntent, createInvite, provisionIntent, readIntent } from '../src/services/onboarding';
 import { USD_UNITS } from '../src/services/hosting-billing';
 
@@ -19,6 +19,11 @@ const admin = newNpub();
 const usd = (cents: number) => (BigInt(cents) * (USD_UNITS / 100n)).toString();
 const sha = (hex: string) => createHash('sha256').update(Buffer.from(hex, 'hex')).digest('hex');
 const PAYEE = 'fixture-payee-node';
+/** Bounded synthetic providers standing in for the later storage-protection and agent-hold slices; fixtures only. */
+const registerBothReserves = (units: () => Promise<bigint> | bigint) => {
+  const off = [registerFundingReserve('storage_protection', async () => units()), registerFundingReserve('agent_holds', async () => 0n)];
+  return () => off.forEach(fn => fn());
+};
 
 /** Fixture-only provider honouring the NStack port. It is never reachable in production: no route, environment value or request registers a provider. */
 class FakeLightning implements LightningProvider {
@@ -43,10 +48,13 @@ class FakeLightning implements LightningProvider {
   async cancelInvoice(hash: string) { if (!this.cancelSupported) throw new Error('unsupported'); const r = this.invoices.get(hash)!; if (r.status === 'pending') r.status = 'cancelled'; return { status: r.status }; }
   pay(hash: string, over: Record<string, unknown> = {}) { Object.assign(this.invoices.get(hash)!, { status: 'settled', received: this.invoices.get(hash)!.amountSats, settledAt: new Date().toISOString() }, over); }
   refunds = new Map<string, any>();
+  payCalls: string[] = []; payDelayMs = 0; quoteOverride: ((q: any) => any) | null = null; decodeOverride: ((d: any) => any) | null = null;
   payouts = {
-    quoteSats: async (cents: number) => ({ sats: cents * this.satsPerCent, rate: { source: 'fixture-fx', quotedAt: new Date().toISOString() } }),
-    decodeInvoice: async (bolt11: string) => { const r = this.refunds.get(bolt11)!; return { paymentHash: r.hash, amountSats: r.sats, expiresAt: r.expiresAt, payeeRef: 'customer-node' }; },
+    quoteSats: async (cents: number) => { const q = { sats: cents * this.satsPerCent, rate: { source: 'fixture-fx', quotedAt: new Date().toISOString() } }; return this.quoteOverride ? this.quoteOverride(q) : q; },
+    decodeInvoice: async (bolt11: string) => { const r = this.refunds.get(bolt11)!; const d = { paymentHash: r.hash, amountSats: r.sats, expiresAt: r.expiresAt, payeeRef: 'customer-node' }; return this.decodeOverride ? this.decodeOverride(d) : d; },
     pay: async (req: { bolt11: string; orderRef: string }) => {
+      this.payCalls.push(req.orderRef);
+      if (this.payDelayMs) await new Promise(resolve => setTimeout(resolve, this.payDelayMs));
       const r = this.refunds.get(req.bolt11)!;
       if (this.payFails === 'unknown') throw new Error('timeout');
       if (this.payFails === 'definite') return { status: 'failed' as const };
@@ -216,7 +224,13 @@ describe.skipIf(!port || port === 5432)('Lightning funding port on disposable Po
     const ok = f.customerInvoice(1000 * 25);
     await expect(requestLightningRefund(request(ok, { customer_verified: false }), admin, db as any, f)).rejects.toMatchObject({ code: 'invalid_refund' });
     await expect(requestLightningRefund(request(ok), admin, db as any, f)).rejects.toMatchObject({ code: 'refund_reserves_unregistered' });
-    let held = 0n; const unregister = registerFundingReserve(async () => held);
+    // Either required source alone is not enough: both storage protection and agent holds must be accounted for.
+    for (const only of REQUIRED_RESERVE_SOURCES) {
+      const lone = registerFundingReserve(only, async () => 0n);
+      await expect(requestLightningRefund(request(ok), admin, db as any, f)).rejects.toMatchObject({ code: 'refund_reserves_unregistered' });
+      lone();
+    }
+    let held = 0n; const unregister = registerBothReserves(() => held);
     await expect(requestLightningRefund(request(ok), newNpub(), db as any, f)).rejects.toMatchObject({ code: 'platform_admin_required' });
     const original = f.payouts; (f as any).payouts = undefined;
     await expect(requestLightningRefund(request(ok), admin, db as any, f)).rejects.toMatchObject({ code: 'lightning_refund_unavailable' });
@@ -249,5 +263,144 @@ describe.skipIf(!port || port === 5432)('Lightning funding port on disposable Po
     expect((await requestLightningRefund(request(liar, { amount_cents: 500 }), admin, db as any, f)).state).toBe('pending');
     expect(await paidUnits(a.intent.account_id)).toBe(BigInt(usd(3500)));
     unregister();
+  });
+
+  /** A Lightning-funded account with a settled payment to refund against. */
+  const fundedLightning = async (f: FakeLightning, label: string, cents = 5000) => {
+    const a = await start(label, cents);
+    const quote = await issueLightningQuote(a.intent.id, a.owner, { idempotency_key: key() }, db as any);
+    f.pay(quote.payment_hash!); await resolveLightningQuote(quote.id, db as any, f);
+    const [settlement] = await db`SELECT * FROM hosting_funding_settlements WHERE order_id=${quote.id}`;
+    return { accountId: a.intent.account_id as string, settlementId: settlement!.id as string };
+  };
+  const refundBody = (settlementId: string, invoice: string, over: Record<string, unknown> = {}) => ({ settlement_id: settlementId, amount_cents: 1000, invoice, customer_verified: true, idempotency_key: key(), reason: 'customer left', ...over });
+  const claimCount = async () => (await db`SELECT count(*)::int AS n FROM hosting_lightning_payout_claims`)[0]!.n as number;
+  const adjustmentCount = async () => (await db`SELECT count(*)::int AS n FROM hosting_funding_adjustments`)[0]!.n as number;
+
+  test('refund quote and decoded invoice fail closed on invalid expiry, sats, rate time and rate identity', async () => {
+    const f = new FakeLightning(); configureLightningProvider(f);
+    const x = await fundedLightning(f, 'Validation Owner');
+    const off = registerBothReserves(() => 0n);
+    const inv = f.customerInvoice(1000 * 25);
+    const before = { paid: await paidUnits(x.accountId), adjustments: await adjustmentCount(), claims: await claimCount() };
+    const ago = (ms: number) => new Date(Date.now() - ms).toISOString(), ahead = (ms: number) => new Date(Date.now() + ms).toISOString();
+    const badQuotes: [string, (q: any) => any][] = [
+      ['NaN sats', q => ({ ...q, sats: NaN })], ['zero sats', q => ({ ...q, sats: 0 })], ['negative sats', q => ({ ...q, sats: -5 })],
+      ['unsafe sats', q => ({ ...q, sats: 2 ** 60 })], ['fractional sats', q => ({ ...q, sats: 12.5 })], ['string sats', q => ({ ...q, sats: '25000' })],
+      ['no rate', q => ({ sats: q.sats })], ['empty rate source', q => ({ ...q, rate: { ...q.rate, source: '' } })], ['blank rate source', q => ({ ...q, rate: { ...q.rate, source: '  ' } })],
+      ['non-string rate ref', q => ({ ...q, rate: { ...q.rate, ref: 7 } })], ['missing rate time', q => ({ ...q, rate: { source: q.rate.source } })],
+      ['unparseable rate time', q => ({ ...q, rate: { ...q.rate, quotedAt: 'yesterday-ish' } })], ['null rate time', q => ({ ...q, rate: { ...q.rate, quotedAt: null } })],
+      ['future rate time', q => ({ ...q, rate: { ...q.rate, quotedAt: ahead(60_000) } })], ['stale rate time', q => ({ ...q, rate: { ...q.rate, quotedAt: ago(REFUND_RATE_MAX_AGE_MS + 60_000) } })],
+    ];
+    for (const [label, mutate] of badQuotes) {
+      f.quoteOverride = mutate;
+      await expect(requestLightningRefund(refundBody(x.settlementId, inv), admin, db as any, f), label).rejects.toMatchObject({ code: 'refund_quote_invalid' });
+    }
+    f.quoteOverride = null;
+    const badInvoices: [string, (d: any) => any][] = [
+      ['NaN expiry', d => ({ ...d, expiresAt: 'not-a-date' })], ['missing expiry', d => ({ ...d, expiresAt: undefined })], ['null expiry', d => ({ ...d, expiresAt: null })],
+      ['expired', d => ({ ...d, expiresAt: ago(1000) })], ['zero sats', d => ({ ...d, amountSats: 0 })], ['amountless invoice', d => ({ ...d, amountSats: null })],
+      ['NaN sats', d => ({ ...d, amountSats: NaN })], ['unsafe sats', d => ({ ...d, amountSats: 2 ** 60 })], ['negative sats', d => ({ ...d, amountSats: -1 })],
+      ['bad hash', d => ({ ...d, paymentHash: 'zz' })], ['missing payee', d => ({ ...d, payeeRef: '' })], ['our own node as payee', d => ({ ...d, payeeRef: PAYEE })],
+    ];
+    for (const [label, mutate] of badInvoices) {
+      f.decodeOverride = mutate;
+      await expect(requestLightningRefund(refundBody(x.settlementId, inv), admin, db as any, f), label).rejects.toMatchObject({ code: 'refund_invoice_invalid' });
+    }
+    f.decodeOverride = null;
+    // An injected clock makes a currently-fresh rate stale without touching the provider.
+    const later = () => new Date(Date.now() + REFUND_RATE_MAX_AGE_MS + 120_000);
+    await expect(requestLightningRefund(refundBody(x.settlementId, inv), admin, db as any, f, later)).rejects.toMatchObject({ code: 'refund_quote_invalid' });
+    // Nothing was withheld, claimed or sent for any rejected request.
+    expect(await paidUnits(x.accountId)).toBe(before.paid); expect(await adjustmentCount()).toBe(before.adjustments);
+    expect(await claimCount()).toBe(before.claims); expect(f.payCalls).toEqual([]);
+    // The same invoice is accepted once it is well-formed and the rate is fresh (boundaries are not over-blocking).
+    expect((await requestLightningRefund(refundBody(x.settlementId, inv), admin, db as any, f)).state).toBe('succeeded');
+    off();
+  });
+
+  test('reserve registration needs every named source and rejects invalid reserve values, failing closed', async () => {
+    const f = new FakeLightning(); configureLightningProvider(f);
+    const x = await fundedLightning(f, 'Reserve Owner');
+    expect([...REQUIRED_RESERVE_SOURCES]).toEqual(['storage_protection', 'agent_holds']);
+    expect(() => registerFundingReserve('anything_else' as any, async () => 0n)).toThrow();
+    expect(() => registerFundingReserve('agent_holds', 'nope' as any)).toThrow();
+    const off = registerBothReserves(() => 0n);
+    expect(() => registerFundingReserve('agent_holds', async () => 0n)).toThrow();
+    off();
+    // Each source is checked on every refund: negative, non-bigint and throwing sources refuse the refund and withhold nothing.
+    const before = await paidUnits(x.accountId), claims = await claimCount();
+    for (const [label, value] of [['negative', () => -1n], ['number', () => 5 as any], ['string', () => '0' as any], ['undefined', () => undefined as any], ['throws', () => { throw new Error('storage unavailable'); }]] as [string, () => bigint][]) {
+      for (const bad of REQUIRED_RESERVE_SOURCES) {
+        const offs = REQUIRED_RESERVE_SOURCES.map(name => registerFundingReserve(name, async () => (name === bad ? value() : 0n)));
+        await expect(requestLightningRefund(refundBody(x.settlementId, f.customerInvoice(1000 * 25)), admin, db as any, f), `${bad} ${label}`).rejects.toThrow();
+        offs.forEach(fn => fn());
+      }
+    }
+    expect(await paidUnits(x.accountId)).toBe(before); expect(await claimCount()).toBe(claims);
+    // Both bounded synthetic sources participating (and a positive agent hold counted) lets the fixture flow proceed.
+    const offs = [registerFundingReserve('storage_protection', async () => BigInt(usd(3000))), registerFundingReserve('agent_holds', async () => BigInt(usd(1500)))];
+    await expect(requestLightningRefund(refundBody(x.settlementId, f.customerInvoice(1000 * 25), { amount_cents: 1000 }), admin, db as any, f)).rejects.toMatchObject({ code: 'refund_exceeds_available' });
+    offs.forEach(fn => fn());
+    const ok = registerBothReserves(() => 0n);
+    expect((await requestLightningRefund(refundBody(x.settlementId, f.customerInvoice(1000 * 25)), admin, db as any, f)).state).toBe('succeeded');
+    ok();
+  });
+
+  test('one customer invoice is claimed globally before any payout: concurrent refunds across accounts pay once', async () => {
+    const f = new FakeLightning(); configureLightningProvider(f);
+    const off = registerBothReserves(() => 0n);
+    const a = await fundedLightning(f, 'Race A'), b = await fundedLightning(f, 'Race B'), c = await fundedLightning(f, 'Race C');
+    const [paidA, paidB, paidC] = [await paidUnits(a.accountId), await paidUnits(b.accountId), await paidUnits(c.accountId)];
+    // The provider's payout is slow, so a second request would sail past any check made only after payment.
+    f.payDelayMs = 400;
+    const shared = f.customerInvoice(1000 * 25);
+    const results = await Promise.allSettled([a, b, c].map(x => requestLightningRefund(refundBody(x.settlementId, shared), admin, db as any, f)));
+    const won = results.filter(r => r.status === 'fulfilled'), lost = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
+    expect(won.length).toBe(1); expect(lost.length).toBe(2);
+    expect(lost.every(r => r.reason?.code === 'refund_invoice_invalid')).toBe(true);
+    expect(f.payCalls.length).toBe(1);
+    const debited = [paidA - await paidUnits(a.accountId), paidB - await paidUnits(b.accountId), paidC - await paidUnits(c.accountId)];
+    expect(debited.filter(d => d > 0n)).toEqual([BigInt(usd(1000))]); expect(debited.filter(d => d === 0n).length).toBe(2);
+    expect((await db`SELECT count(*)::int AS n FROM hosting_lightning_payout_claims WHERE payment_hash=${f.refunds.get(shared).hash}`)[0]!.n).toBe(1);
+    // A later request from any account or settlement, with any key, is refused without a second hold or payout.
+    f.payDelayMs = 0;
+    const adjustments = await adjustmentCount();
+    for (const x of [a, b, c]) await expect(requestLightningRefund(refundBody(x.settlementId, shared), admin, db as any, f)).rejects.toMatchObject({ code: 'refund_invoice_invalid' });
+    expect(await adjustmentCount()).toBe(adjustments); expect(f.payCalls.length).toBe(1);
+    // The claim is permanent and immutable.
+    await expect(db`DELETE FROM hosting_lightning_payout_claims`).rejects.toThrow();
+    await expect(db`UPDATE hosting_lightning_payout_claims SET account_id=account_id`).rejects.toThrow();
+    off();
+  });
+
+  test('an invoice reused after an ambiguous payout stays held for the original request, never guessed', async () => {
+    const f = new FakeLightning(); configureLightningProvider(f);
+    const off = registerBothReserves(() => 0n);
+    const a = await fundedLightning(f, 'Ambiguous A'), b = await fundedLightning(f, 'Ambiguous B');
+    const inv = f.customerInvoice(1000 * 25), paidB = await paidUnits(b.accountId);
+    const first = refundBody(a.settlementId, inv); f.payFails = 'unknown';
+    await expect(requestLightningRefund(first, admin, db as any, f)).rejects.toMatchObject({ code: 'refund_outcome_unknown' });
+    expect(await paidUnits(a.accountId)).toBe(BigInt(usd(4000)));
+    // Another account, another settlement of the same account, and the same account with a new key are all refused; no funds move and nothing is sent.
+    const second = await fundedLightning(f, 'Ambiguous A2');
+    for (const attempt of [refundBody(b.settlementId, inv), refundBody(a.settlementId, inv), refundBody(second.settlementId, inv)]) {
+      await expect(requestLightningRefund(attempt, admin, db as any, f)).rejects.toMatchObject({ code: 'refund_invoice_invalid' });
+    }
+    expect(await paidUnits(b.accountId)).toBe(paidB); expect(await paidUnits(a.accountId)).toBe(BigInt(usd(4000))); expect(f.payCalls.length).toBe(1);
+    // The same request replays idempotently and resolves exactly once; the funds stay withheld, the invoice stays claimed.
+    f.payFails = 'none';
+    expect((await requestLightningRefund(first, admin, db as any, f)).state).toBe('succeeded');
+    expect(await paidUnits(a.accountId)).toBe(BigInt(usd(4000)));
+    // A definite failure keeps the claim too: the customer must supply a fresh invoice.
+    const failing = f.customerInvoice(500 * 25); f.payFails = 'definite';
+    expect((await requestLightningRefund(refundBody(a.settlementId, failing, { amount_cents: 500 }), admin, db as any, f)).state).toBe('failed');
+    await expect(requestLightningRefund(refundBody(a.settlementId, failing, { amount_cents: 500 }), admin, db as any, f)).rejects.toMatchObject({ code: 'refund_invoice_invalid' });
+    // An invoice that is one of our own receiving invoices is never a valid payout target.
+    const own = (await db`SELECT payment_hash FROM hosting_lightning_quotes LIMIT 1`)[0]!.payment_hash as string;
+    f.decodeOverride = d => ({ ...d, paymentHash: own });
+    await expect(requestLightningRefund(refundBody(a.settlementId, f.customerInvoice(1000 * 25)), admin, db as any, f)).rejects.toMatchObject({ code: 'refund_invoice_invalid' });
+    f.decodeOverride = null;
+    off();
   });
 });

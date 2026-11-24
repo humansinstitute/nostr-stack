@@ -9,7 +9,7 @@ import { closeDb, setDb } from '../src/db';
 import { ensureRuntimeSchema } from '../src/schema/ensure-runtime-schema';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { createHostingCheckout, fulfillHostingCheckout, receiveHostingStripeWebhook, reconcileStripePayment, requestStripeRefund, resolveCheckoutOrders } from '../src/services/hosting-stripe';
-import { registerFundingReserve, fundingReversalSummary } from '../src/services/hosting-funding';
+import { registerFundingReserve, fundingReversalSummary, REQUIRED_RESERVE_SOURCES } from '../src/services/hosting-funding';
 import { cancelIntent, createIntent, createInvite, openOwnerAccount, provisionIntent, readIntent, releaseInviteSeat } from '../src/services/onboarding';
 import { USD_UNITS } from '../src/services/hosting-billing';
 
@@ -196,10 +196,17 @@ describe.skipIf(!port || port === 5432)('shared funding settlement, reversals an
     // Release gate: with no registered reserve (storage runway / agent holds) an empty registry is not proof of unreserved funds.
     await expect(requestStripeRefund(request(), admin, db as any, f as any)).rejects.toMatchObject({ code: 'refund_reserves_unregistered' });
     expect(await paidUnits(x.accountId)).toBe(BigInt(usd(5000)));
+    // Either required source alone (storage protection or agent holds) still leaves refunds closed.
+    for (const only of REQUIRED_RESERVE_SOURCES) {
+      const lone = registerFundingReserve(only, async () => 0n);
+      await expect(requestStripeRefund(request(), admin, db as any, f as any)).rejects.toMatchObject({ code: 'refund_reserves_unregistered' });
+      lone();
+    }
     await expect(requestStripeRefund(request(), newNpub(), db as any, f as any)).rejects.toMatchObject({ code: 'platform_admin_required' });
     // Reserved funds (registered by storage/agent slices) are not refundable.
     let held = BigInt(usd(4000));
-    const unregister = registerFundingReserve(async () => held);
+    const offStorage = registerFundingReserve('storage_protection', async () => held), offAgents = registerFundingReserve('agent_holds', async () => 0n);
+    const unregister = () => { offStorage(); offAgents(); };
     await expect(requestStripeRefund(request(), admin, db as any, f as any)).rejects.toMatchObject({ code: 'refund_exceeds_available' });
     held = 0n;
     const body = request();

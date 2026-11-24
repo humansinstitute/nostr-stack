@@ -63,18 +63,38 @@ export async function applyAdjustment(sql: Db, settlement: any, d: DesiredAdjust
   return { adjustment: row!, delta };
 }
 
-/** Funds reserved against purchased credit (storage runway, agent holds). Later slices register their reserve here; nothing is reserved today. */
+/** Funds reserved against purchased credit. Refunds open only when EVERY required source below is registered, because an
+ * unaccounted reserve would let support refund credit that storage protection or an agent hold still depends on.
+ * Integration contract for the later slices (docs/contract/funding-reversals-v1.md):
+ *  - `storage_protection`: the storage-runway units that must stay funded so stored data is not endangered by a refund.
+ *  - `agent_holds`: units held for agent work already admitted but not yet metered.
+ * Each source is async `(sql, accountId) => bigint`, read inside the refund transaction under the account lock, and must return a
+ * non-negative bigint (zero when nothing is reserved). A throwing source or an invalid value fails the refund closed. */
+export const REQUIRED_RESERVE_SOURCES = ['storage_protection', 'agent_holds'] as const;
+export type ReserveSourceName = typeof REQUIRED_RESERVE_SOURCES[number];
 export type ReserveSource = (sql: Db, accountId: string) => Promise<bigint>;
-const reserveSources: ReserveSource[] = [];
-export function registerFundingReserve(source: ReserveSource) { reserveSources.push(source); return () => { const i = reserveSources.indexOf(source); if (i >= 0) reserveSources.splice(i, 1); }; }
-/** Support refunds stay gated until at least one real reserve (storage runway, agent holds) participates. */
-export const hasFundingReserves = () => reserveSources.length > 0;
+const reserveSources = new Map<ReserveSourceName, ReserveSource>();
+/** Trusted startup hook for the storage and agent slices only; no route or request reaches it. Returns the unregister function. */
+export function registerFundingReserve(name: ReserveSourceName, source: ReserveSource) {
+  if (!(REQUIRED_RESERVE_SOURCES as readonly string[]).includes(name) || typeof source !== 'function') throw new HostingError(500, 'reserve_source_invalid');
+  if (reserveSources.has(name)) throw new HostingError(500, 'reserve_source_already_registered');
+  reserveSources.set(name, source);
+  return () => { if (reserveSources.get(name) === source) reserveSources.delete(name); };
+}
+export const missingFundingReserves = () => REQUIRED_RESERVE_SOURCES.filter(name => !reserveSources.has(name));
+/** Support refunds stay gated until every required reserve (storage protection and agent holds) participates. */
+export const hasFundingReserves = () => missingFundingReserves().length === 0;
 
-/** Purchased credit that may leave the account: positive paid balance minus every registered reserve. Promotional credit is never refundable. */
-export async function availableRefundableUnits(sql: Db, accountId: string, extra: ReserveSource[] = []) {
+/** Purchased credit that may leave the account: positive paid balance minus every required reserve. Promotional credit is never refundable. */
+export async function availableRefundableUnits(sql: Db, accountId: string) {
+  if (!hasFundingReserves()) throw new HostingError(503, 'refund_reserves_unregistered');
   const [a] = await sql`SELECT paid_units FROM hosting_accounts WHERE id=${accountId}`;
   let free = big(a!.paid_units);
-  for (const source of [...reserveSources, ...extra]) free -= await source(sql, accountId);
+  for (const name of REQUIRED_RESERVE_SOURCES) {
+    const reserved = await reserveSources.get(name)!(sql, accountId);
+    if (typeof reserved !== 'bigint' || reserved < 0n) throw new HostingError(503, 'refund_reserve_invalid');
+    free -= reserved;
+  }
   return free > 0n ? free : 0n;
 }
 

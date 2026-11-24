@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { config } from '../config';
 import { getDb } from '../db';
 import { HostingError } from './hosting-billing';
-import { applyAdjustment, availableRefundableUnits, hasFundingReserves, recordSettlement, refundableCents, UNITS_PER_CENT } from './hosting-funding';
+import { applyAdjustment, availableRefundableUnits, missingFundingReserves, recordSettlement, refundableCents, UNITS_PER_CENT } from './hosting-funding';
 import { markOnboardingFunded, requireOnboardingEnabled } from './onboarding';
 
 type Db = ReturnType<typeof getDb>;
@@ -162,23 +162,49 @@ export async function reconcileOpenLightningQuotes(actorNpub: string, db: Db = g
 
 // ---- Support-assisted refund to a verified customer invoice --------------------------------------------------------
 
+/** A payout rate older than this is not a current provider conversion and cannot bound the refunded sats. */
+export const REFUND_RATE_MAX_AGE_MS = 300_000;
+const isTime = (v: unknown) => typeof v === 'string' && v !== '' && !Number.isNaN(new Date(v).getTime());
+type Decoded = Awaited<ReturnType<NonNullable<LightningProvider['payouts']>['decodeInvoice']>>;
+type PayoutQuote = Awaited<ReturnType<NonNullable<LightningProvider['payouts']>['quoteSats']>>;
+/** Shape of the provider's decode of the customer invoice. Anything unparseable (NaN expiry, non-positive or unsafe sats, bad hash,
+ * missing or our own payee) is refused before any funds are withheld. */
+function invoiceIsWellFormed(d: Decoded, p: LightningProvider) {
+  return !!d && HASH.test(d.paymentHash as string) && Number.isSafeInteger(d.amountSats) && (d.amountSats as number) >= 1 && isTime(d.expiresAt)
+    && typeof d.payeeRef === 'string' && d.payeeRef !== '' && d.payeeRef !== p.payeeRef;
+}
+/** The provider's own current USD to sats conversion must be positive, identified (source) and fresh, never from the future. */
+function payoutQuoteIsCurrent(q: PayoutQuote, now: Date) {
+  if (!q || !Number.isSafeInteger(q.sats) || q.sats < 1 || !q.rate || typeof q.rate.source !== 'string' || !q.rate.source.trim()
+    || (q.rate.ref !== undefined && typeof q.rate.ref !== 'string') || !isTime(q.rate.quotedAt)) return false;
+  const age = now.getTime() - new Date(q.rate.quotedAt).getTime();
+  return age >= 0 && age <= REFUND_RATE_MAX_AGE_MS;
+}
+
 /** Funds are withheld first (bounded by the payment's remaining amount and unreserved paid balance), then the provider pays the
- * customer's invoice. The sat amount may not exceed the provider's own current conversion of the refunded USD. */
-export async function requestLightningRefund(body: unknown, actorNpub: string, db: Db = getDb(), p: LightningProvider = lightningProvider()) {
+ * customer's invoice. The sat amount may not exceed the provider's own current conversion of the refunded USD. The customer invoice's
+ * payment hash is claimed globally and durably inside the same transaction as the hold, before any payout is attempted. */
+export async function requestLightningRefund(body: unknown, actorNpub: string, db: Db = getDb(), p: LightningProvider = lightningProvider(), now: () => Date = () => new Date()) {
   if (!config.adminNpub || actorNpub !== config.adminNpub) throw new HostingError(403, 'platform_admin_required');
   const b = body as any;
   if (!b || Object.keys(b).sort().join(',') !== 'amount_cents,customer_verified,idempotency_key,invoice,reason,settlement_id' || b.customer_verified !== true || !Number.isSafeInteger(b.amount_cents) || b.amount_cents < 1
     || typeof b.idempotency_key !== 'string' || !KEY.test(b.idempotency_key) || typeof b.reason !== 'string' || !b.reason.trim() || b.reason.length > 500
     || typeof b.invoice !== 'string' || b.invoice.length < 20 || b.invoice.length > 4000 || typeof b.settlement_id !== 'string' || !UUID.test(b.settlement_id)) throw new HostingError(400, 'invalid_refund');
-  if (!hasFundingReserves()) throw new HostingError(503, 'refund_reserves_unregistered');
+  if (missingFundingReserves().length) throw new HostingError(503, 'refund_reserves_unregistered');
   const payouts = p.payouts;
   if (!payouts) throw new HostingError(503, 'lightning_refund_unavailable');
   const [peek] = await db`SELECT * FROM hosting_funding_settlements WHERE id=${b.settlement_id}`;
   if (!peek || peek.method !== 'lightning') throw new HostingError(404, 'settlement_not_found');
   const decoded = await payouts.decodeInvoice(b.invoice);
-  const ceiling = await payouts.quoteSats(b.amount_cents);
-  if (!decoded || !HASH.test(decoded.paymentHash) || !Number.isSafeInteger(decoded.amountSats) || (decoded.amountSats as number) < 1 || new Date(decoded.expiresAt).getTime() <= Date.now()
-    || (decoded.amountSats as number) > ceiling.sats || decoded.paymentHash === peek.provider_ref) throw new HostingError(409, 'refund_invoice_invalid');
+  if (!invoiceIsWellFormed(decoded, p) || decoded.paymentHash === peek.provider_ref) throw new HostingError(409, 'refund_invoice_invalid');
+  // A replay of an already-held request resolves that hold (its invoice may legitimately have expired since); only a new hold needs a live invoice and rate.
+  const [replay] = await db`SELECT 1 FROM hosting_funding_adjustments WHERE account_id=${peek.account_id} AND request_key=${b.idempotency_key}`;
+  let ceiling: PayoutQuote | null = null;
+  if (!replay) {
+    ceiling = await payouts.quoteSats(b.amount_cents);
+    if (!payoutQuoteIsCurrent(ceiling, now())) throw new HostingError(502, 'refund_quote_invalid');
+    if (new Date(decoded.expiresAt).getTime() <= now().getTime() || (decoded.amountSats as number) > ceiling.sats) throw new HostingError(409, 'refund_invoice_invalid');
+  }
   const held = await db.begin(async transaction => {
     const tx = transaction as unknown as Db;
     await tx`SELECT id FROM hosting_accounts WHERE id=${peek.account_id} FOR UPDATE`;
@@ -187,11 +213,17 @@ export async function requestLightningRefund(body: unknown, actorNpub: string, d
       if (existing.settlement_id !== peek.id || existing.amount_cents !== b.amount_cents || existing.reason !== b.reason || existing.evidence?.payment_hash !== decoded.paymentHash) throw new HostingError(409, 'idempotency_conflict');
       return existing;
     }
-    const [reused] = await tx`SELECT 1 FROM hosting_funding_adjustments WHERE provider_ref=${`ln:${decoded.paymentHash}`}`;
+    if (!ceiling) throw new HostingError(409, 'idempotency_conflict');
+    const [reused] = await tx`SELECT 1 FROM hosting_funding_adjustments WHERE provider_ref=${`ln:${decoded.paymentHash}`}
+      UNION ALL SELECT 1 FROM hosting_lightning_quotes WHERE payment_hash=${decoded.paymentHash}`;
     if (reused) throw new HostingError(409, 'refund_invoice_invalid');
     const limit = Math.min(await refundableCents(tx, peek), Number((await availableRefundableUnits(tx, peek.account_id)) / UNITS_PER_CENT));
     if (b.amount_cents > limit) throw new HostingError(409, 'refund_exceeds_available');
     const requestId = crypto.randomUUID();
+    // The unique payment-hash claim serialises concurrent requests across accounts and settlements: the loser waits for this
+    // transaction, then conflicts here (and rolls back its own hold) without ever reaching the provider.
+    const [claim] = await tx`INSERT INTO hosting_lightning_payout_claims(payment_hash,settlement_id,account_id,request_id) VALUES(${decoded.paymentHash},${peek.id},${peek.account_id},${requestId}) ON CONFLICT(payment_hash) DO NOTHING RETURNING payment_hash`;
+    if (!claim) throw new HostingError(409, 'refund_invoice_invalid');
     return (await applyAdjustment(tx, peek, { kind: 'refund', providerRef: `req:${requestId}`, requestId, requestKey: b.idempotency_key, state: 'requested', amountCents: b.amount_cents, effectiveCents: b.amount_cents,
       reason: b.reason, actorNpub, evidence: { payment_hash: decoded.paymentHash, amount_sats: decoded.amountSats, rate_source: ceiling.rate.source, rate_quoted_at: ceiling.rate.quotedAt, customer_verified: true } })).adjustment;
   });

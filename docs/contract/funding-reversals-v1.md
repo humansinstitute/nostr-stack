@@ -92,11 +92,39 @@ payout capability (`503 lightning_refund_unavailable`), `customer_verified: true
 not exceed the provider's current conversion of the refunded USD, one-time use of each invoice, and a payment
 preimage hashing to the invoice's payment hash before success is recorded.
 
+Customer invoice claim. The invoice's payment hash is inserted into `hosting_lightning_payout_claims`
+(primary key `payment_hash`, append-only) in the same transaction as the refund hold and strictly before any
+provider payout call. Concurrent requests for one invoice, from any account, settlement or idempotency key,
+serialise on that key: the loser rolls back its own hold and gets `409 refund_invoice_invalid` without reaching
+the provider or debiting anything. The claim is never released: it survives pending, unknown, failed and
+succeeded outcomes, so reuse after an ambiguous payout is refused rather than guessed (a definite failure needs
+a fresh customer invoice). Only the original request (same idempotency key) can replay and resolve the hold.
+Our own receiving invoices and the paid settlement's own payment hash are never valid payout targets.
+
+Fail-closed quote validation (before any hold, so nothing is withheld on rejection):
+
+- decoded invoice: valid payment hash, safe integer `amountSats >= 1` (amountless invoices refused), parseable
+  future `expiresAt`, a payee that is present and is not our own node; otherwise `409 refund_invoice_invalid`;
+- provider payout quote: safe integer `sats >= 1`, non-empty `rate.source` (rate identity), string `rate.ref` if
+  present, parseable `rate.quotedAt` that is not in the future and not older than `REFUND_RATE_MAX_AGE_MS`
+  (5 minutes); otherwise `502 refund_quote_invalid`. The invoice's sats may not exceed the quoted sats.
+
+A replay of an already-held request skips the live-expiry and rate checks (its invoice may have lapsed while the
+payout outcome was unknown) but still must decode to the same payment hash.
+
 ## Release gates still closed
 
-- **Refund routes are gated** (`503 refund_reserves_unregistered`) until at least one real reserve source
-  (storage runway, agent holds) is registered through `registerFundingReserve`. An empty registry is not proof
-  that funds are unreserved. No source registers one yet.
+- **Refund routes are gated** (`503 refund_reserves_unregistered`) until EVERY named required reserve source
+  is registered through `registerFundingReserve(name, source)`; any single source is not enough. An empty or
+  partial registry is not proof that funds are unreserved. No production source registers yet and there is no
+  no-op registration: the later slices must supply real ones.
+  - `storage_protection`: units that must stay funded so stored data is not endangered by a refund (storage slice).
+  - `agent_holds`: units held for agent work already admitted but not yet metered (agent runtime slice).
+  - Contract for each source: `async (sql, accountId) => bigint`, evaluated inside the refund transaction under the
+    account lock, returning a non-negative bigint (`0n` when nothing is reserved). A negative or non-bigint value,
+    or a throwing source, fails the refund closed (`503 refund_reserve_invalid`, or the source's error) and withholds
+    nothing. Names are a closed set (`REQUIRED_RESERVE_SOURCES`); registering an unknown or duplicate name throws.
+    Tests use bounded synthetic providers for both names.
 - Live Stripe (`stripe_live_rollout_blocked`); real Stripe test-mode round trip with authorized credentials,
   including refund and dispute behaviour, has not been performed.
 - No real Lightning provider, FX source, periodic settlement runner or provider-authenticated notification

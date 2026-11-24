@@ -78,6 +78,18 @@ CREATE TABLE IF NOT EXISTS hosting_lightning_quotes (
  CHECK(state='issuing' OR (invoice IS NOT NULL AND payment_hash IS NOT NULL AND amount_sats IS NOT NULL AND expires_at IS NOT NULL AND payee_ref IS NOT NULL AND rate_source IS NOT NULL AND rate_quoted_at IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS hosting_lightning_quotes_intent ON hosting_lightning_quotes(intent_id);
+-- Customer payout invoices are claimed globally, once, by payment hash BEFORE any provider payout is attempted. The claim is made in the
+-- same transaction as the refund hold, survives every outcome (pending, unknown, failed, succeeded) and is never released or guessed:
+-- a second request, settlement or account for the same invoice conflicts on the primary key instead of reaching the provider.
+CREATE TABLE IF NOT EXISTS hosting_lightning_payout_claims (
+ payment_hash TEXT PRIMARY KEY CHECK(payment_hash ~ '^[0-9a-f]{64}$'),
+ settlement_id UUID NOT NULL REFERENCES hosting_funding_settlements(id),
+ account_id UUID NOT NULL REFERENCES hosting_accounts(id),
+ request_id UUID NOT NULL UNIQUE,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+DROP TRIGGER IF EXISTS hosting_lightning_payout_claims_immutable ON hosting_lightning_payout_claims;
+CREATE TRIGGER hosting_lightning_payout_claims_immutable BEFORE UPDATE OR DELETE ON hosting_lightning_payout_claims FOR EACH ROW EXECUTE FUNCTION hosting_funding_append_only();
 ALTER TABLE onboarding_intents ADD COLUMN IF NOT EXISTS funded_settlement_id UUID REFERENCES hosting_funding_settlements(id);
 ALTER TABLE hosting_checkout_orders ADD COLUMN IF NOT EXISTS terminal_at TIMESTAMPTZ;
 ALTER TABLE hosting_checkout_orders ADD COLUMN IF NOT EXISTS terminal_reason TEXT CHECK(terminal_reason IS NULL OR terminal_reason IN ('expired'));

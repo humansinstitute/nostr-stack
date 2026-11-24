@@ -2,7 +2,7 @@ import Stripe from 'stripe';
 import { config } from '../config';
 import { getDb } from '../db';
 import { HostingError } from './hosting-billing';
-import { applyAdjustment, availableRefundableUnits, hasFundingReserves, recordFundingEvent, recordSettlement, refundableCents, UNITS_PER_CENT } from './hosting-funding';
+import { applyAdjustment, availableRefundableUnits, missingFundingReserves, recordFundingEvent, recordSettlement, refundableCents, UNITS_PER_CENT } from './hosting-funding';
 import { markOnboardingFunded, ONBOARDING_MIN_FUNDING_CENTS } from './onboarding';
 type Db=ReturnType<typeof getDb>;
 export function hostingStripeClient() {
@@ -176,8 +176,8 @@ export async function requestStripeRefund(body:unknown,actorNpub:string,db:Db=ge
   if(!b||Object.keys(b).sort().join(',')!=='amount_cents,idempotency_key,reason,settlement_id'||!Number.isSafeInteger(b.amount_cents)||b.amount_cents<1
     ||typeof b.idempotency_key!=='string'||!/^[a-zA-Z0-9_-]{8,100}$/.test(b.idempotency_key)||typeof b.reason!=='string'||!b.reason.trim()||b.reason.length>500
     ||typeof b.settlement_id!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(b.settlement_id))throw new HostingError(400,'invalid_refund');
-  // Release gate: an empty reserve registry is not proof that funds are unreserved. Refunds open only once storage/agent reserves participate.
-  if(!hasFundingReserves())throw new HostingError(503,'refund_reserves_unregistered');
+  // Release gate: an empty reserve registry is not proof that funds are unreserved. Refunds open only once both storage-protection and agent-hold reserves participate.
+  if(missingFundingReserves().length)throw new HostingError(503,'refund_reserves_unregistered');
   const [peek]=await db`SELECT * FROM hosting_funding_settlements WHERE id=${b.settlement_id}`;
   if(!peek||peek.method!=='stripe')throw new HostingError(404,'settlement_not_found');
   const held=await db.begin(async transaction=>{
