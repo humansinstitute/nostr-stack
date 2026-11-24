@@ -11,6 +11,9 @@ export const ONBOARDING_MAX_FUNDING_CENTS = 1_000_000;
 /** Included introductory storage period: 720 hours from successful paid provisioning. */
 export const ONBOARDING_INTRO_HOURS = 720;
 const MAX_OPEN_INTENTS = 10;
+/** Release gate: intent/checkout/provision stay disabled until the manager's reviewed activation sets ONBOARDING_ENABLED=true. */
+export const onboardingEnabled = () => process.env.ONBOARDING_ENABLED === 'true';
+export function requireOnboardingEnabled() { if (!onboardingEnabled()) throw new HostingError(503, 'onboarding_rollout_disabled'); }
 const KEY = /^[a-zA-Z0-9_-]{8,100}$/;
 const RETURN_STATE = /^[A-Za-z0-9._~:@\/=+-]{1,256}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -29,7 +32,7 @@ const exact = (body: any, required: string[], optional: string[] = []) => {
  * (including legacy accounts that received the old welcome grant) is returned untouched. */
 export async function ensureOwnerAccount(ownerNpub: string, db: Db = getDb()) {
   const owner = await resolveOrCreateFlightDeckPgActor(ownerNpub, 'human', { sql: db as any });
-  const [account] = await db`INSERT INTO hosting_accounts(owner_actor_id,promo_units,promo_expires_at) VALUES(${owner.id},0,now())
+  const [account] = await db`INSERT INTO hosting_accounts(owner_actor_id,promo_units,promo_expires_at,opened_by) VALUES(${owner.id},0,now(),'onboarding')
     ON CONFLICT(owner_actor_id) DO UPDATE SET owner_actor_id=EXCLUDED.owner_actor_id RETURNING *`;
   return { owner, account: account! };
 }
@@ -84,8 +87,10 @@ export async function releaseInviteSeat(inviteId: string, ownerNpub: string, act
     const [seat] = await sql`SELECT s.* FROM onboarding_invite_seats s JOIN flightdeck_pg_actors a ON a.id=s.owner_actor_id WHERE s.invite_id=${inviteId} AND a.npub=${ownerNpub} FOR UPDATE OF s`;
     if (!seat) throw new HostingError(404, 'seat_not_found');
     if (seat.status === 'redeemed') throw new HostingError(409, 'seat_redeemed');
-    const [funded] = await sql`SELECT 1 FROM onboarding_intents WHERE invite_id=${inviteId} AND owner_actor_id=${seat.owner_actor_id} AND status IN ('funded','provisioning')`;
-    if (funded) throw new HostingError(409, 'seat_has_funded_intent');
+    // Intents are locked after invite and seat (same order as cancel/claim) and re-read, so funding cannot interleave.
+    const intents = await sql`SELECT id,status FROM onboarding_intents WHERE invite_id=${inviteId} AND owner_actor_id=${seat.owner_actor_id} FOR UPDATE`;
+    if (intents.some(i => ['funded', 'provisioning', 'provisioned'].includes(i.status))) throw new HostingError(409, 'seat_has_funded_intent');
+    if (await hasOutstandingCheckout(intents.map(i => i.id as string), sql)) throw new HostingError(409, 'checkout_outstanding');
     await sql`UPDATE onboarding_invite_seats SET status='released',released_at=COALESCE(released_at,now()),released_reason='admin_release' WHERE invite_id=${inviteId} AND owner_actor_id=${seat.owner_actor_id}`;
     return { invite_id: inviteId, status: 'released' as const };
   });
@@ -130,6 +135,14 @@ export async function listAgentOffers(db: Db = getDb()) {
 }
 const offerView = (o: any) => ({ id: o.id as string, template: o.template as string, model_ref: o.model_ref as string, rate_version: o.rate_version as string, default_daily_cap_cents: o.default_daily_cap_cents as number, max_daily_cap_cents: o.max_daily_cap_cents as number });
 
+/** Stage 1 cannot verify a provider session's terminal state, so any unfulfilled attached order is treated as outstanding:
+ * its seat may not be released or reused because a late verified payment must still find its guaranteed seat. */
+async function hasOutstandingCheckout(intentIds: string[], sql: Db) {
+  if (!intentIds.length) return false;
+  const [row] = await sql`SELECT 1 FROM hosting_checkout_orders WHERE intent_id=ANY(${intentIds}::uuid[]) AND fulfilled_at IS NULL LIMIT 1`;
+  return Boolean(row);
+}
+
 // ---- Intents -----------------------------------------------------------------------------------------------------
 
 function validateName(name: unknown) {
@@ -171,7 +184,10 @@ async function view(row: any, sql: Db) {
   }
   return {
     version: 1 as const, id: row.id as string, account_id: row.account_id as string, status: row.status as string, revision: row.revision as number,
-    workspace_name: row.workspace_name as string, agent, funding_cents: row.funding_cents as number, return_state: row.return_state as string | null,
+    workspace_name: row.workspace_name as string, agent,
+    // Selecting an agent does not provision one: a later stage adds an 'agent' step. Workspace readiness never implies an agent exists.
+    agent_state: (row.agent_offer_id ? (row.steps.agent ? 'provisioned' : 'selected_not_provisioned') : 'none') as 'none' | 'selected_not_provisioned' | 'provisioned',
+    funding_cents: row.funding_cents as number, return_state: row.return_state as string | null,
     funded: row.funded_at !== null, funded_at: row.funded_at as string | null,
     steps: Object.fromEntries(Object.entries(row.steps as Record<string, any>).map(([k, v]) => [k, { completed_at: v.completed_at as string }])),
     last_error: row.last_error as string | null, workspace_id: row.workspace_id as string | null,
@@ -182,6 +198,7 @@ async function view(row: any, sql: Db) {
 export type OnboardingIntentView = Awaited<ReturnType<typeof view>>;
 
 export async function createIntent(ownerNpub: string, body: any, db: Db = getDb()) {
+  requireOnboardingEnabled();
   exact(body, ['client_request_key', 'invite_code', 'workspace_name', 'funding_cents'], ['agent_offer_id', 'agent_daily_cap_cents', 'return_state']);
   if (typeof body.client_request_key !== 'string' || !KEY.test(body.client_request_key)) throw bad('invalid_client_request_key');
   const workspaceName = validateName(body.workspace_name), funding = validateFunding(body.funding_cents), returnState = validateReturnState(body.return_state);
@@ -220,6 +237,7 @@ export async function listIntents(ownerNpub: string, db: Db = getDb()) {
   return Promise.all(rows.map(r => view(r, db)));
 }
 export async function updateIntent(id: string, ownerNpub: string, body: any, db: Db = getDb()) {
+  requireOnboardingEnabled();
   exact(body, ['expected_revision'], ['workspace_name', 'funding_cents', 'agent_offer_id', 'agent_daily_cap_cents', 'return_state']);
   if (!Number.isSafeInteger(body.expected_revision)) throw bad('invalid_expected_revision');
   return db.begin(async tx => {
@@ -245,9 +263,15 @@ export async function updateIntent(id: string, ownerNpub: string, body: any, db:
 export async function cancelIntent(id: string, ownerNpub: string, db: Db = getDb()) {
   return db.begin(async tx => {
     const sql = tx as unknown as Db;
+    const peek = await ownedIntent(id, ownerNpub, sql);
+    // Lock order invite -> seat -> intent matches claim and administrative release.
+    await sql`SELECT id FROM onboarding_invites WHERE id=${peek.invite_id} FOR UPDATE`;
+    await sql`SELECT 1 FROM onboarding_invite_seats WHERE invite_id=${peek.invite_id} AND owner_actor_id=${peek.owner_actor_id} FOR UPDATE`;
     const row = await ownedIntent(id, ownerNpub, sql, true);
     if (row.status === 'cancelled') return view(row, sql);
     if (row.status !== 'open') throw new HostingError(409, 'intent_not_cancellable');
+    // A checkout may already exist and still be paid later; keep the intent and its seat until stage 2 can verify terminal state.
+    if (await hasOutstandingCheckout([row.id], sql)) throw new HostingError(409, 'checkout_outstanding');
     const [updated] = await sql`UPDATE onboarding_intents SET status='cancelled',revision=revision+1,updated_at=now() WHERE id=${row.id} RETURNING *`;
     const [still] = await sql`SELECT 1 FROM onboarding_intents WHERE invite_id=${row.invite_id} AND owner_actor_id=${row.owner_actor_id} AND status IN ('open','funded','provisioning','provisioned')`;
     if (!still) await sql`UPDATE onboarding_invite_seats SET status='released',released_at=now(),released_reason='intent_cancelled' WHERE invite_id=${row.invite_id} AND owner_actor_id=${row.owner_actor_id} AND status='reserved'`;
@@ -263,6 +287,7 @@ export async function markOnboardingFunded(order: { id: string; intent_id: strin
   return true;
 }
 export async function intentForCheckout(id: string, ownerNpub: string, db: Db = getDb()) {
+  requireOnboardingEnabled();
   const row = await ownedIntent(id, ownerNpub, db);
   if (row.status !== 'open') throw new HostingError(409, 'intent_not_open');
   return { accountId: row.account_id as string, amountCents: row.funding_cents as number, intentId: row.id as string };
@@ -304,6 +329,7 @@ async function assertFundedEvidence(intent: any, sql: Db) {
   if (!order || order.amount_units === null || BigInt(order.amount_units) < BigInt(intent.funding_cents) * 1_440_000_000n) throw new HostingError(402, 'funding_required');
 }
 export async function provisionIntent(id: string, ownerNpub: string, db: Db = getDb(), hooks: { beforeStep?: (name: string) => Promise<void> | void } = {}) {
+  requireOnboardingEnabled();
   const head = await db.begin(async tx => {
     const sql = tx as unknown as Db;
     const row = await ownedIntent(id, ownerNpub, sql, true);

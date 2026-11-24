@@ -23,6 +23,12 @@ export async function createHostingCheckout(accountId:string,body:unknown,db:Db=
   const order=await db.begin(async transaction=>{
     const tx=transaction as unknown as Db;
     await tx`SELECT id FROM hosting_accounts WHERE id=${accountId} FOR UPDATE`;
+    if(opts.intentId){
+      // Serializes with cancel/release: an order is attached only to a still-open intent of this account.
+      const [i]=await tx`SELECT status,account_id FROM onboarding_intents WHERE id=${opts.intentId} FOR UPDATE`;
+      if(!i||i.account_id!==accountId)throw new HostingError(404,'intent_not_found');
+      if(i.status!=='open')throw new HostingError(409,'intent_not_open');
+    }
     // Legacy checkout never references onboarding columns; only intent-bound orders carry intent_id.
     const [o]=opts.intentId
       ?await tx`INSERT INTO hosting_checkout_orders(account_id,idempotency_key,amount_cents,return_url,mode,intent_id)

@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS onboarding_intents (
  UNIQUE(owner_actor_id,client_request_key),
  CHECK((agent_offer_id IS NULL)=(agent_daily_cap_cents IS NULL))
 );
+-- Accounts opened by onboarding never receive the legacy welcome credit, including via later legacy workspace links.
+ALTER TABLE hosting_accounts ADD COLUMN IF NOT EXISTS opened_by TEXT NOT NULL DEFAULT 'legacy' CHECK(opened_by IN ('legacy','onboarding'));
 CREATE INDEX IF NOT EXISTS onboarding_intents_owner ON onboarding_intents(owner_actor_id,created_at DESC);
 ALTER TABLE hosting_checkout_orders ADD COLUMN IF NOT EXISTS intent_id UUID REFERENCES onboarding_intents(id);
 -- Onboarding funding is a custom amount (US$21 minimum) validated in code; legacy checkout keeps its code allowlist.

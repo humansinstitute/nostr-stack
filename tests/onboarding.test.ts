@@ -11,15 +11,16 @@ import { ensureRuntimeSchema } from '../src/schema/ensure-runtime-schema';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { createHostingCheckout, fulfillHostingCheckout } from '../src/services/hosting-stripe';
 import { createInvite, createIntent, provisionIntent, readIntent, openOwnerAccount, createAgentOffer, listIntents, updateIntent, cancelIntent, revokeInvite, releaseInviteSeat } from '../src/services/onboarding';
-import { USD_UNITS } from '../src/services/hosting-billing';
+import { USD_UNITS, linkHostedAccount } from '../src/services/hosting-billing';
 import { buildOpenApiDocument } from '../src/openapi';
 
 // Runs only against a dedicated disposable PostgreSQL: ONBOARDING_TEST_PORT=<free port>.
 const port = Number(process.env.ONBOARDING_TEST_PORT);
 const keys = Array.from({ length: 8 }, (_, i) => new Uint8Array(32).fill(120 + i));
 const npubs = keys.map(k => nip19.npubEncode(getPublicKey(k)));
-const [adminKey, aliceKey, bobKey, carolKey, daveKey] = keys as [Uint8Array, Uint8Array, Uint8Array, Uint8Array, Uint8Array];
-const [admin, alice, bob, carol, dave] = npubs as [string, string, string, string, string];
+const [adminKey, aliceKey, bobKey, carolKey, daveKey, eveKey, frankKey] = keys as Uint8Array[] as [Uint8Array, Uint8Array, Uint8Array, Uint8Array, Uint8Array, Uint8Array, Uint8Array];
+const [admin, alice, bob, carol, dave, eve, frank] = npubs as [string, string, string, string, string, string, string];
+void [adminKey, carolKey, daveKey, eveKey, frankKey];
 const app = createApp();
 const returnUrl = 'https://example.test/billing';
 
@@ -49,6 +50,7 @@ describe.skipIf(!port || port === 5432)('invited onboarding on disposable Postgr
     ({ id, mode: 'payment', livemode: false, payment_status: 'paid', currency: 'usd', amount_total: amount, payment_intent: intent, client_reference_id: orderId, metadata: { hosting_order_id: orderId, hosting_account_id: accountId } }) as unknown as Stripe.Checkout.Session;
   /** Test Stripe client double: only the HTTP edge is faked; order binding and fulfilment are production code. */
   const stripeDouble = (id = `cs_test_${randomUUID()}`) => ({ checkout: { sessions: { create: async () => ({ id, url: 'https://checkout.stripe.com/test', livemode: false }), retrieve: async () => ({ id, url: 'https://checkout.stripe.com/test', livemode: false }) } } }) as any;
+  async function listIntentsOffer() { return (await db`SELECT id FROM onboarding_agent_offers WHERE active LIMIT 1`)[0]?.id as string | undefined; }
   async function fund(intentId: string, ownerNpub: string, cents?: number) {
     const intent = await readIntent(intentId, ownerNpub, db as any);
     const double = stripeDouble();
@@ -60,6 +62,7 @@ describe.skipIf(!port || port === 5432)('invited onboarding on disposable Postgr
 
   beforeAll(async () => {
     process.env.HOSTING_STRIPE_RETURN_URLS = returnUrl;
+    process.env.ONBOARDING_ENABLED = 'true';
     const root = postgres({ ...conn, database: 'postgres' });
     await root.unsafe(`CREATE DATABASE ${name}`); await root.end();
     db = postgres({ ...conn, database: name }); setDb(db);
@@ -69,7 +72,7 @@ describe.skipIf(!port || port === 5432)('invited onboarding on disposable Postgr
     config.service.npub = nip19.npubEncode(getPublicKey(new Uint8Array(32).fill(85)));
     invite = await createInvite({ max_admissions: 3, label: 'cap fixture' }, admin, db as any);
   });
-  afterAll(async () => { config.adminNpub = saved.admin; config.service.npub = saved.service; await closeDb(); });
+  afterAll(async () => { delete process.env.ONBOARDING_ENABLED; config.adminNpub = saved.admin; config.service.npub = saved.service; await closeDb(); });
 
   test('an authenticated owner account exists before any workspace, with no welcome credit; legacy accounts are untouched', async () => {
     const results = await Promise.all(Array.from({ length: 8 }, () => openOwnerAccount(alice, db as any)));
@@ -230,6 +233,69 @@ describe.skipIf(!port || port === 5432)('invited onboarding on disposable Postgr
     expect(resumed.every(r => r.status === 'provisioned' && r.last_error === null)).toBe(true);
     expect((await db`SELECT * FROM flightdeck_pg_workspaces WHERE workspace_owner_npub=${bob} AND name='Resume Bob'`).length).toBe(1);
     expect((await db`SELECT * FROM hosting_ledger WHERE account_id=${partial.account_id}`).length).toBe(1);
+  });
+
+  test('rollout gate: intent, checkout and provisioning fail closed until ONBOARDING_ENABLED', async () => {
+    process.env.ONBOARDING_ENABLED = 'false';
+    try {
+      expect((await call('POST', '/intents', aliceKey, body('Gated'))).status).toBe(503);
+      expect((await call('POST', `/intents/${randomUUID()}/provision`, aliceKey)).json.code).toBe('onboarding_rollout_disabled');
+      expect((await call('POST', `/intents/${randomUUID()}/checkout`, aliceKey, { idempotency_key: key(), return_url: returnUrl })).status).toBe(503);
+    } finally { process.env.ONBOARDING_ENABLED = 'true'; }
+  });
+
+  test('pending checkout holds the seat: no cancel or admin release, no reuse, and a late verified payment still provisions', async () => {
+    const one = await createInvite({ max_admissions: 1 }, admin, db as any);
+    const claimant = await createIntent(eve, { client_request_key: key(), invite_code: one.code, workspace_name: 'Late Payer', funding_cents: 2100 }, db as any);
+    const double = stripeDouble(`cs_test_${randomUUID()}`);
+    const checkout = await createHostingCheckout(claimant.intent.account_id, { amount_cents: 2100, idempotency_key: key(), return_url: returnUrl }, db as any, double, { intentId: claimant.intent.id });
+    await expect(cancelIntent(claimant.intent.id, eve, db as any)).rejects.toMatchObject({ code: 'checkout_outstanding' });
+    await expect(releaseInviteSeat(one.id, eve, admin, db as any)).rejects.toMatchObject({ code: 'checkout_outstanding' });
+    // Racing cancel / release / another claimant never frees the paid claimant's place.
+    const race = await Promise.allSettled([
+      cancelIntent(claimant.intent.id, eve, db as any), releaseInviteSeat(one.id, eve, admin, db as any),
+      createIntent(frank, { client_request_key: key(), invite_code: one.code, workspace_name: 'Seat Thief', funding_cents: 2100 }, db as any),
+    ]);
+    expect(race.every(r => r.status === 'rejected')).toBe(true);
+    expect((race[2] as PromiseRejectedResult).reason.code).toBe('invite_full');
+    const [order] = await db`SELECT * FROM hosting_checkout_orders WHERE id=${checkout.order_id}`;
+    const session = paid(order!.id, order!.account_id, 2100, (await double.checkout.sessions.retrieve()).id);
+    // Payment racing a release attempt serializes: whichever order, the payer ends funded with the seat intact.
+    const [, fulfilled] = await Promise.allSettled([releaseInviteSeat(one.id, eve, admin, db as any), fulfillHostingCheckout(session, db as any)]);
+    expect(fulfilled.status).toBe('fulfilled');
+    expect((await readIntent(claimant.intent.id, eve, db as any)).status).toBe('funded');
+    const [seat] = await db`SELECT status FROM onboarding_invite_seats WHERE invite_id=${one.id}`;
+    expect(seat!.status).toBe('reserved');
+    await expect(releaseInviteSeat(one.id, eve, admin, db as any)).rejects.toMatchObject({ code: 'seat_has_funded_intent' });
+    const provisioned = await provisionIntent(claimant.intent.id, eve, db as any);
+    expect(provisioned.status).toBe('provisioned');
+    // A checkout cannot be attached to a cancelled intent.
+    const cancelled = await createIntent(frank, { client_request_key: key(), invite_code: (await createInvite({ max_admissions: 50 }, admin, db as any)).code, workspace_name: 'Cancelled Frank', funding_cents: 2100 }, db as any);
+    await cancelIntent(cancelled.intent.id, frank, db as any);
+    await expect(createHostingCheckout(cancelled.intent.account_id, { amount_cents: 2100, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble(), { intentId: cancelled.intent.id })).rejects.toMatchObject({ code: 'intent_not_open' });
+  });
+
+  test('selected agents are explicitly not provisioned; onboarded accounts never gain legacy welcome credit', async () => {
+    const offer = (await listIntentsOffer())!;
+    const roomy = await createInvite({ max_admissions: 50 }, admin, db as any);
+    const { intent } = await createIntent(carol, body('Agent Pending Carol', { agent_offer_id: offer, invite_code: roomy.code }), db as any);
+    expect(intent.agent_state).toBe('selected_not_provisioned');
+    const { session } = await fund(intent.id, carol);
+    await fulfillHostingCheckout(session, db as any);
+    const done = await provisionIntent(intent.id, carol, db as any);
+    expect(done).toMatchObject({ status: 'provisioned', agent_state: 'selected_not_provisioned' });
+    expect(done.steps.agent).toBeUndefined();
+    expect((await createIntent(dave, body('No Agent Dave', { invite_code: roomy.code }), db as any)).intent.agent_state).toBe('none');
+    // Zero-promo semantics survive workspace linking and a later legacy hosted link for the same owner.
+    const extra = randomUUID();
+    const [owner] = await db`SELECT id FROM flightdeck_pg_actors WHERE npub=${carol}`;
+    await db`INSERT INTO flightdeck_pg_workspaces(id,tower_service_npub,workspace_service_npub,workspace_owner_npub,app_npub,name) VALUES(${extra},'tower',${extra},${carol},'hosting-fixture','Legacy Link')`;
+    await db.begin(tx => linkHostedAccount(extra, owner!.id, tx as any));
+    const [account] = await db`SELECT * FROM hosting_accounts WHERE id=${done.account_id}`;
+    expect(account!.promo_units).toBe('0'); expect(account!.opened_by).toBe('onboarding');
+    const entries = await db`SELECT kind FROM hosting_ledger WHERE account_id=${done.account_id}`;
+    expect(entries.length).toBeGreaterThan(0); expect(entries.every(e => e.kind === 'stripe')).toBe(true);
+    expect((await db`SELECT 1 FROM hosting_workspace_accounts WHERE account_id=${done.account_id}`).length).toBe(2);
   });
 
   test('contract: OpenAPI publishes every onboarding route and keeps the live Stripe gate', async () => {

@@ -48,6 +48,12 @@ automatic expiry. Capacity is counted in per-identity **seats**:
 - **Redeemed** at successful provisioning.
 - **Released** only when the owner cancels their last unfunded intent, or an
   administrator releases an unredeemed seat that has no funded/provisioning intent.
+  Stage 1 cannot verify a provider session's terminal state, so **either release is
+  refused (`checkout_outstanding`) while any unfulfilled checkout is attached** to
+  the identity's intents; a late verified payment must still find its seat. Checkout
+  creation locks the intent and requires `open`; cancel, release and claim lock
+  invite → seat → intent in that order, and fulfilment locks the intent when it funds
+  it, so funding and release cannot interleave.
 - Revocation stops new admissions only; existing seats remain valid.
 
 `GET /invites/{code}` is public and returns only `{available}`.
@@ -86,6 +92,23 @@ Interim storage boundary: `billing_link` sets the legacy hourly meter start to
 introductory period. Hourly peak accounting, the 1 GB waiver and the US$5/720h
 minimum replace this in the storage slice; until then excess above 1 GB in the
 introductory period is not charged.
+
+## Release gates (stage 1 is NOT production-ready)
+
+- `ONBOARDING_ENABLED=true` is required for intent create/update, checkout and
+  provision (`503 onboarding_rollout_disabled` otherwise). Account, invite
+  administration and reads are unaffected. Only a reviewed activation sets it.
+- `agent_state` is `none`, `selected_not_provisioned` or `provisioned`; a
+  `provisioned` workspace never implies an agent, General or DM exists beyond what
+  workspace setup creates. Agent resources are a later step.
+- The 720-hour `enabled_at` skip is an interim gap, not the approved base-only
+  waiver: excess above 1 GB in the introductory period is not charged. Must be
+  replaced by the storage slice before launch.
+- Accounts opened here carry `opened_by='onboarding'`; the legacy
+  `linkHostedAccount` no longer writes a welcome ledger entry for them (it would
+  be an unbacked snapshot of a zero promotional balance).
+- Stripe live mode, Lightning, refunds, disputes and provider-state checkout expiry
+  remain the payments slice.
 
 ## Validation
 

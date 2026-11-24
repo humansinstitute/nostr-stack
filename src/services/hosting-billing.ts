@@ -16,7 +16,8 @@ export async function linkHostedAccount(workspaceId: string, ownerActorId: strin
   await db`SELECT pg_advisory_xact_lock(hashtext(${`hosting-owner:${ownerActorId}`}))`;
   const [account] = await db`INSERT INTO hosting_accounts(owner_actor_id) VALUES(${ownerActorId})
     ON CONFLICT(owner_actor_id) DO UPDATE SET owner_actor_id=EXCLUDED.owner_actor_id RETURNING *`;
-  await db`INSERT INTO hosting_ledger(account_id,kind,amount_units,paid_after_units,promo_after_units,idempotency_key,reason)
+  // Onboarding-opened accounts have zero promotional balance by design; a welcome entry would be an unbacked ledger snapshot.
+  if(account!.opened_by!=='onboarding')await db`INSERT INTO hosting_ledger(account_id,kind,amount_units,paid_after_units,promo_after_units,idempotency_key,reason)
     VALUES(${account!.id},'welcome',720000000000,0,720000000000,'welcome:v1','One customer welcome credit; expires after 30 days')
     ON CONFLICT(account_id,idempotency_key) DO NOTHING`;
   await db`INSERT INTO hosting_workspace_accounts(workspace_id,account_id) VALUES(${workspaceId},${account!.id}) ON CONFLICT(workspace_id) DO NOTHING`;
