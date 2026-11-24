@@ -32,18 +32,21 @@ export const isIntroHour = (hour: Date, introEndsAt: Date) => hour.getTime() < i
 
 // ---- Coverage policy -----------------------------------------------------------------------------------------------
 
-const metered = new Set<string>(['postgres', 'objects']);
-export const missingStorageCategories = () => REQUIRED_STORAGE_CATEGORIES.filter(id => !metered.has(id));
-/** Trusted startup hook for a category whose bytes a real provider can attribute to a workspace (the Git slice). Returns unregister. */
-export function registerMeteredStorageCategory(id: (typeof REQUIRED_STORAGE_CATEGORIES)[number]) {
-  if (!(REQUIRED_STORAGE_CATEGORIES as readonly string[]).includes(id)) throw new HostingError(500, 'storage_category_invalid');
-  metered.add(id);
-  return () => { if (id !== 'postgres' && id !== 'objects') metered.delete(id); };
+/** A category counts as metered only through a real provider. Registering a name alone proves nothing, so the hook demands a byte
+ * provider (added to every anchor) and a declaration that the provider's own write path journals changes via
+ * `hosting_storage_record(workspace,'external',delta)`. Absent a provider the category stays missing and everything fails closed. */
+export type ExternalStorageProvider = { id: 'git'; journal: 'write_path'; bytes: (workspaceId: string, db: Db) => Promise<bigint> };
+const providers = new Map<string, ExternalStorageProvider>();
+export const missingStorageCategories = () => REQUIRED_STORAGE_CATEGORIES.filter(id => id !== 'postgres' && id !== 'objects' && !providers.has(id));
+export function registerMeteredStorageCategory(provider: ExternalStorageProvider) {
+  if (!provider || provider.id !== 'git' || provider.journal !== 'write_path' || typeof provider.bytes !== 'function' || providers.has(provider.id)) throw new HostingError(500, 'storage_category_invalid');
+  providers.set(provider.id, provider);
+  return () => { if (providers.get(provider.id) === provider) providers.delete(provider.id); };
 }
 
 // ---- Measurement ---------------------------------------------------------------------------------------------------
 
-export type StorageMeasurement = { postgres_bytes: bigint; object_bytes: bigint; reference_only_bytes: bigint; snapshot: string; taken_at: Date; evidence: Record<string, unknown> };
+export type StorageMeasurement = { postgres_bytes: bigint; object_bytes: bigint; external_bytes: bigint; reference_only_bytes: bigint; snapshot: string; taken_at: Date; evidence: Record<string, unknown> };
 
 /** Absolute billable bytes inside one REPEATABLE READ snapshot. Fails (never zero) when a bound is exceeded. */
 export async function measureStorage(workspaceId: string, db: Db): Promise<StorageMeasurement> {
@@ -83,9 +86,11 @@ export async function measureStorage(workspaceId: string, db: Db): Promise<Stora
       const [m] = await sql`SELECT COALESCE(sum(size_bytes),0)::text AS bytes FROM managed_app_storage_objects WHERE workspace_id=${workspaceId} AND state='complete' AND NOT physical_absent`;
       managed = BigInt(m!.bytes);
     }
+    let external = 0n;
+    for (const provider of providers.values()) external += await provider.bytes(workspaceId, sql);
     const attributed = BigInt(objects!.attributed_bytes), referenceOnly = BigInt(objects!.reference_only_bytes);
     return {
-      postgres_bytes, object_bytes: attributed + referenceOnly + managed, reference_only_bytes: referenceOnly,
+      postgres_bytes, object_bytes: attributed + referenceOnly + managed, external_bytes: external, reference_only_bytes: referenceOnly,
       snapshot: clock!.snapshot as string, taken_at: clock!.taken_at as Date,
       evidence: {
         basis: STORAGE_BASIS_VERSION, tables_measured: tables.size, object_paths: Number(objects!.paths), object_size_conflicts: Number(objects!.conflicts),
@@ -99,9 +104,9 @@ export async function measureStorage(workspaceId: string, db: Db): Promise<Stora
 /** Records an absolute level with its MVCC snapshot. Idempotent per (workspace, instant). */
 export async function takeStorageAnchor(workspaceId: string, db: Db = getDb(), measure: typeof measureStorage = measureStorage) {
   const m = await measure(workspaceId, db);
-  const total = m.postgres_bytes + m.object_bytes;
-  const [row] = await db`INSERT INTO hosting_storage_anchors(workspace_id,taken_at,snapshot,watermark_xid,postgres_bytes,object_bytes,total_bytes,reference_only_bytes,evidence)
-    VALUES(${workspaceId},${m.taken_at},${m.snapshot}::pg_snapshot,pg_current_xact_id(),${m.postgres_bytes.toString()},${m.object_bytes.toString()},${total.toString()},${m.reference_only_bytes.toString()},${db.json(JSON.parse(JSON.stringify(m.evidence)))})
+  const total = m.postgres_bytes + m.object_bytes + m.external_bytes;
+  const [row] = await db`INSERT INTO hosting_storage_anchors(workspace_id,taken_at,snapshot,watermark_xid,postgres_bytes,object_bytes,external_bytes,total_bytes,reference_only_bytes,evidence)
+    VALUES(${workspaceId},${m.taken_at},${m.snapshot}::pg_snapshot,pg_current_xact_id(),${m.postgres_bytes.toString()},${m.object_bytes.toString()},${m.external_bytes.toString()},${total.toString()},${m.reference_only_bytes.toString()},${db.json(JSON.parse(JSON.stringify(m.evidence)))})
     ON CONFLICT(workspace_id,taken_at) DO NOTHING RETURNING *`;
   return row ?? null;
 }
@@ -189,9 +194,13 @@ export async function hourEvidence(sql: Db, workspaceId: string, hour: Date): Pr
   const rows = Number(replay!.n);
   if (rows > 0 && start.total + low < 0n) return { state: 'unavailable', reason: 'negative_running_total', evidence: { start: start.total.toString(), lowest_running_delta: low.toString() } };
   const intrahour = rows > 0 && high > 0n ? start.total + high : start.total;
+  // The journal must explain the measured change exactly. Any difference (a write path the journal missed, a classification or
+  // TOAST-size disagreement, an unjournaled category) is not billed from a guess: the hour is unavailable.
+  const drift = end.total - (start.total + net);
+  if (drift !== 0n) return { state: 'unavailable', reason: 'journal_drift', evidence: { start: start.total.toString(), end: end.total.toString(), journaled_net: net.toString(), drift_bytes: drift.toString(), journal_rows: rows } };
   let peak = intrahour;
   if (end.total > peak) peak = end.total;
-  return { state: 'ready', start: start.total, end: end.total, intrahour, peak, drift: end.total - (start.total + net), evidence: { journal_rows: rows } };
+  return { state: 'ready', start: start.total, end: end.total, intrahour, peak, drift, evidence: { journal_rows: rows } };
 }
 
 /** Settles one closed hour atomically: peak, ledger debit, balances and evidence commit together or not at all. */
@@ -397,7 +406,7 @@ export async function accountStorageSummary(db: Db, accountId: string, now = new
     },
     admission: { agent_spend_allowed: agentAvailable > 0n, reason },
     coverage: {
-      complete, required: [...REQUIRED_STORAGE_CATEGORIES], metered: ['postgres', 'objects', ...[...metered].filter(c => c !== 'postgres' && c !== 'objects')], missing,
+      complete, required: [...REQUIRED_STORAGE_CATEGORIES], metered: ['postgres', 'objects', ...providers.keys()], missing,
       unmetered: [...UNMETERED_STORAGE_CATEGORIES], workspaces_unmeasured: unmeasured, workspaces_with_reference_only_objects: referenceOnly,
     },
     workspaces: rows.map(r => {

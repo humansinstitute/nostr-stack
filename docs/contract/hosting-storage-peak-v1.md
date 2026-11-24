@@ -36,7 +36,9 @@ Every public table with a UUID `workspace_id` must be classified exactly once; a
 a new table is added unclassified, so the meter cannot silently grow or shrink.
 
 **Git is required billable customer storage and is not yet metered.** Until a real provider is
-registered (`registerMeteredStorageCategory('git')`) the policy is **incomplete**: the
+registered (`registerMeteredStorageCategory({id:'git', journal:'write_path', bytes})`: a name alone is rejected; the provider's bytes
+enter every anchor as `external_bytes` and its write path must journal via `hosting_storage_record(ws,'external',delta)`; no provider
+exists yet) the policy is **incomplete**: the
 `storage_protection` source throws `503 storage_coverage_incomplete` (refunds fail closed), the owner
 summary reports `coverage.complete=false`, `protected_is_lower_bound`, `runway.upper_bound`, and
 `agent_available_units` is `0` with `admission.reason=storage_coverage_incomplete`. Graph and legacy
@@ -73,8 +75,9 @@ of the customer write itself, in the same transaction:
 4. **Peak.** The hour is replayed from the committed journal in statement-time order, starting at the
    start boundary, over all categories and all transactions together: `peak = max(start, end, start +
    every running total)`. This is the simultaneous maximum, never a sum of separately peaked categories.
-   A negative running total or a committed in-hour row the closing anchor did not see makes the hour
-   `unavailable` (`negative_running_total` / `journal_incomplete`); the end-vs-replay `drift_bytes` is recorded.
+   A negative running total, a committed in-hour row the closing anchor did not see, or **any nonzero drift** between the
+   measured end total and start + journaled net makes the hour `unavailable` (`negative_running_total` / `journal_incomplete` /
+   `journal_drift`): a missed write path, classification gap, TOAST-size disagreement or unjournaled category is never billed from a guess.
    There is no estimate taken at write time, so a REPEATABLE READ or concurrent writer cannot under-record.
 5. **Settlement.** One transaction per hour: lock the account row, recompute from the immutable
    evidence, insert the unique `storage_peak` ledger entry (`storage-peak:<workspace>:<hour>`), update

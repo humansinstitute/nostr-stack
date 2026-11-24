@@ -78,6 +78,7 @@ describe('exact hourly charge', () => {
 });
 
 const port = Number(process.env.STORAGE_TEST_PORT);
+const gitStandIn = (bytes = 0n) => ({ id: 'git' as const, journal: 'write_path' as const, bytes: async () => bytes });
 describe.skipIf(!port || port === 5432)('peak storage meter on disposable PostgreSQL', () => {
   const conn = { host: '127.0.0.1', port, username: 'postgres', password: 'postgres', onnotice: () => {} };
   const name = `tower_storage_${process.pid}_${Date.now()}`;
@@ -384,7 +385,7 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     expect(Date.parse(block.grace_ends_at) - Date.parse(a!.depleted_at)).toBe(30 * 86400000);
     // Reversal debt (negative purchased balance) is explicit and non-spendable.
     await db`UPDATE hosting_accounts SET paid_units=-5 WHERE id=${acct}`;
-    const unregisterGit = registerMeteredStorageCategory('git');
+    const unregisterGit = registerMeteredStorageCategory(gitStandIn());
     const summary = await accountStorageSummary(db as any, acct);
     unregisterGit();
     expect(summary.balances).toMatchObject({ purchased_units: '0', reversal_debt_units: '5', spendable_units: '0', agent_available_units: '0' });
@@ -460,9 +461,9 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     const other = postgres({ ...conn, database: name });
     let release!: () => void; const gate = new Promise<void>(r => { release = r; });
     let started!: () => void; const open = new Promise<void>(r => { started = r; });
-    // Journal row stamped INSIDE the hour, written by a transaction that commits only after the closing anchor was taken.
+    // Journal row written inside the hour by a transaction that commits only after the closing anchor was taken.
     const straddler = other.begin(async t => {
-      await t`INSERT INTO hosting_storage_deltas(workspace_id,category,delta_bytes,at) VALUES(${id},'objects',5000000000,${new Date(h + HOUR - 1000)})`;
+      await t`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,content_type,size_bytes,storage_path,pg_workspace_id,completed_at) VALUES(${owner},${owner},'x',5000000000,${`straddle/${randomUUID()}`},${id},now())`;
       started(); await gate;
     });
     try {
@@ -563,6 +564,35 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     expect((await db`SELECT 1 FROM hosting_storage_deltas WHERE workspace_id=${id}`).length).toBe(0);
   });
 
+  test('nonzero journal drift fails closed: an unjournaled change makes the hour unavailable, never a billed guess', async () => {
+    const { id, h } = await workspace();
+    await real(id);
+    await db.unsafe('ALTER TABLE v4_storage_objects DISABLE TRIGGER hosting_storage_track_i'); // simulates a write path the journal missed
+    try { await objectRow(id, 2_000_000_000); } finally { await db.unsafe('ALTER TABLE v4_storage_objects ENABLE TRIGGER hosting_storage_track_i'); }
+    await anchorAt(id, h + HOUR + 30_000);
+    const before = await balance();
+    await settleStorageHours(id, db as any, () => new Date(h + 3 * HOUR));
+    const [row] = await hours(id);
+    expect(row).toMatchObject({ status: 'unavailable', reason: 'journal_drift', ledger_id: null, peak_bytes: null, charged_units: '0' });
+    expect(await balance()).toEqual(before);
+  });
+
+  test('a category name alone never counts as metered: only a provider-backed, write-path-journaled registration, and its bytes enter every anchor', async () => {
+    expect(missingStorageCategories()).toEqual(['git']);
+    expect(() => registerMeteredStorageCategory('git' as any)).toThrow();
+    expect(() => registerMeteredStorageCategory({ id: 'git', journal: 'sampled' as any, bytes: async () => 0n })).toThrow();
+    expect(missingStorageCategories()).toEqual(['git']);
+    const unregister = registerMeteredStorageCategory(gitStandIn(777n));
+    try {
+      expect(missingStorageCategories()).toEqual([]);
+      const { id } = await workspace();
+      const a = await real(id);
+      expect(a!.external_bytes).toBe('777');
+      expect(BigInt(a!.total_bytes)).toBe(BigInt(a!.postgres_bytes) + BigInt(a!.object_bytes) + 777n);
+    } finally { unregister(); }
+    expect(missingStorageCategories()).toEqual(['git']);
+  });
+
   test('failed setup consumes nothing: a pre-activation enrollment journals bytes but never charges', async () => {
     const { id, h } = await workspace({ activate: false });
     await real(id);
@@ -616,7 +646,7 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
   });
 
   test('storage_protection aggregates every linked workspace, protects refunds, and fails closed when unmeasured (Git metered)', async () => {
-    const unregisterGit = registerMeteredStorageCategory('git'); // stand-in for the Git slice, this test only
+    const unregisterGit = registerMeteredStorageCategory(gitStandIn()); // stand-in for the Git slice, this test only
     try {
       const acct = (await db`INSERT INTO hosting_accounts(owner_actor_id,opened_by,promo_units) VALUES(${(await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${'npub1' + 'q'.repeat(58)},'human') RETURNING id`)[0]!.id},'onboarding',0) RETURNING id`)[0]!.id as string;
       const now = new Date();

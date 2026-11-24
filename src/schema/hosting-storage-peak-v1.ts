@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS hosting_storage_enrollments (
 CREATE TABLE IF NOT EXISTS hosting_storage_deltas (
  id BIGSERIAL PRIMARY KEY,
  workspace_id UUID NOT NULL,
- category TEXT NOT NULL CHECK(category IN ('postgres','objects')),
+ category TEXT NOT NULL CHECK(category IN ('postgres','objects','external')),
  delta_bytes BIGINT NOT NULL CHECK(delta_bytes<>0),
  xid XID8 NOT NULL DEFAULT pg_current_xact_id(),
  at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS hosting_storage_anchors (
  watermark_xid XID8 NOT NULL, -- next xid at/after the snapshot: every transaction that wrote before the snapshot has xid < watermark_xid
  postgres_bytes NUMERIC(40,0) NOT NULL CHECK(postgres_bytes>=0),
  object_bytes NUMERIC(40,0) NOT NULL CHECK(object_bytes>=0),
- total_bytes NUMERIC(40,0) NOT NULL CHECK(total_bytes=postgres_bytes+object_bytes),
+ external_bytes NUMERIC(40,0) NOT NULL DEFAULT 0 CHECK(external_bytes>=0), -- provider-measured categories (Git); 0 while none is registered
+ total_bytes NUMERIC(40,0) NOT NULL CHECK(total_bytes=postgres_bytes+object_bytes+external_bytes),
  reference_only_bytes NUMERIC(40,0) NOT NULL DEFAULT 0 CHECK(reference_only_bytes>=0 AND reference_only_bytes<=object_bytes),
  evidence JSONB NOT NULL,
  UNIQUE(workspace_id,taken_at)
