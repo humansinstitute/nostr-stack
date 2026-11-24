@@ -25,7 +25,10 @@ export interface ReceiverClientOptions {
   caPem: string;
   /** Tower's service secret key (nsec). Held in memory only for signing. */
   serviceNsec: string;
+  /** Absolute wall-clock deadline per request, covering connect, TLS, headers and the whole body. */
   timeoutMs?: number; maxBytes?: number; now?: () => number;
+  /** Concurrent requests to the receiver, and how many more may wait for a slot; beyond that is an immediate `receiver_busy`. */
+  maxInFlight?: number; maxWaiting?: number;
 }
 const ORDER_REF = /^[A-Za-z0-9_\-:.]{1,64}$/;
 const fail = (code: string, status = 502) => new HostingError(status, code);
@@ -46,15 +49,37 @@ export function createReceiverClient(o: ReceiverClientOptions): ReceiverTranspor
   const timeoutMs = o.timeoutMs ?? 10_000, maxBytes = o.maxBytes ?? 256 * 1024, clock = o.now ?? (() => Date.now());
   const servername = /^[\d.]+$|:/.test(base.hostname) ? undefined : base.hostname; // IP literals take no SNI; the pinned certificate must still match the address
 
+  const maxInFlight = o.maxInFlight ?? 8, maxWaiting = o.maxWaiting ?? 32;
+  let inFlight = 0; const waiters: { go: () => void; drop: () => void }[] = [];
+  /** Bounded in-flight and waiting work: a stalled receiver cannot accumulate unbounded pending calls inside Tower. */
+  async function limited<T>(run: () => Promise<T>): Promise<T> {
+    if (inFlight >= maxInFlight) {
+      if (waiters.length >= maxWaiting) throw fail('receiver_busy', 503);
+      await new Promise<void>((resolve, reject) => {
+        const w = { go: resolve, drop: () => reject(fail('receiver_unavailable')) };
+        waiters.push(w);
+        const t = setTimeout(() => { const i = waiters.indexOf(w); if (i >= 0) { waiters.splice(i, 1); w.drop(); } }, timeoutMs);
+        const go = w.go; w.go = () => { clearTimeout(t); go(); };
+      });
+    } else inFlight++;
+    try { return await run(); } finally { const next = waiters.shift(); if (next) next.go(); else inFlight--; }
+  }
+
   function send(method: string, target: string, bodyText: string | null): Promise<unknown> {
     const url = `${o.origin}${target}`;
-    const tags: string[][] = [['u', url], ['method', method]];
-    if (bodyText !== null) tags.push(['payload', createHash('sha256').update(bodyText, 'utf8').digest('hex')]);
-    const event = finalizeEvent({ kind: 27235, created_at: Math.floor(clock() / 1000), content: randomBytes(16).toString('hex'), tags }, secret);
-    const headers: Record<string, string> = { accept: 'application/json', authorization: `Nostr ${Buffer.from(JSON.stringify(event)).toString('base64')}` };
-    if (bodyText !== null) { headers['content-type'] = 'application/json'; headers['content-length'] = String(Buffer.byteLength(bodyText)); }
-    return new Promise((resolve, reject) => {
-      const req = httpsRequest({
+    return limited(() => new Promise<unknown>((resolveRaw, rejectRaw) => {
+      // Signed only once a slot is held, so time spent waiting never ages the authorization.
+      const tags: string[][] = [['u', url], ['method', method]];
+      if (bodyText !== null) tags.push(['payload', createHash('sha256').update(bodyText, 'utf8').digest('hex')]);
+      const event = finalizeEvent({ kind: 27235, created_at: Math.floor(clock() / 1000), content: randomBytes(16).toString('hex'), tags }, secret);
+      const headers: Record<string, string> = { accept: 'application/json', authorization: `Nostr ${Buffer.from(JSON.stringify(event)).toString('base64')}` };
+      if (bodyText !== null) { headers['content-type'] = 'application/json'; headers['content-length'] = String(Buffer.byteLength(bodyText)); }
+      // One absolute deadline, armed before DNS/connect and cleared on every terminal path. Socket inactivity alone would let a slow-drip body live forever.
+      let finished = false; let req: ReturnType<typeof httpsRequest>;
+      const deadline = setTimeout(() => { if (!finished) { finished = true; req?.destroy(); rejectRaw(fail('receiver_unavailable')); } }, timeoutMs);
+      const resolve = (v: unknown) => { if (!finished) { finished = true; clearTimeout(deadline); resolveRaw(v); } };
+      const reject = (e: unknown) => { if (!finished) { finished = true; clearTimeout(deadline); req?.destroy(); rejectRaw(e); } };
+      req = httpsRequest({
         protocol: 'https:', hostname: base.hostname, port: base.port || 443, method, path: target, headers, agent: false,
         ca: o.caPem, rejectUnauthorized: true, servername, timeout: timeoutMs, minVersion: 'TLSv1.2',
       }, res => {
@@ -74,7 +99,7 @@ export function createReceiverClient(o: ReceiverClientOptions): ReceiverTranspor
       req.on('error', () => reject(fail('receiver_unavailable')));
       if (bodyText !== null) req.write(bodyText);
       req.end();
-    });
+    }));
   }
   const order = (ref: string) => { if (typeof ref !== 'string' || !ORDER_REF.test(ref)) throw fail('receiver_request_invalid', 400); return encodeURIComponent(ref); };
   return {

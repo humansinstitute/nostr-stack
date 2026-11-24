@@ -20,6 +20,8 @@ The receiver signs nothing it returns, so authenticity is the channel's job. The
 - one operator-configured `https://host[:port]` origin (no userinfo, path, query or fragment); never a caller-supplied URL;
 - the server certificate must verify against the **pinned PEM** (certificate or private CA) only; the system trust store is not used,
   `rejectUnauthorized` is always true, TLS ≥ 1.2, no agent/proxy reuse;
+- one **absolute wall-clock deadline** (default 10 s) covers connect, TLS, headers and the whole body and is cleared on every terminal path, so a
+  slow-drip response cannot outlive it; in-flight (8) and waiting (32) requests are bounded, excess is an immediate `receiver_busy`;
 - redirects are never followed (a 3xx is a failure), non-JSON, oversize (256 KiB) and slow (10 s) responses are failures, 5xx/429 are
   `receiver_unavailable`, other non-2xx `receiver_rejected`; no response text is surfaced;
 - every request is NIP-98 signed with Tower's own service key: exact `u` (origin + path + query), `method`, `payload` = sha256 of the exact

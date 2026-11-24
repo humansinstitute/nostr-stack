@@ -22,7 +22,7 @@ describe('receiver private transport (real TLS)', () => {
   const secret = generateSecretKey(), nsec = nip19.nsecEncode(secret), serviceHex = getPublicKey(secret);
   let good: ReturnType<typeof selfSigned>, evil: ReturnType<typeof selfSigned>;
   let server: Server, port = 0, rx: FakeMintReceiver;
-  const seen = new Set<string>(); let mode: 'ok' | 'redirect' | 'html' | 'huge' | 'slow' | 'error500' = 'ok'; const log: { method: string; url: string }[] = [];
+  const seen = new Set<string>(); let mode: 'ok' | 'redirect' | 'html' | 'huge' | 'slow' | 'error500' | 'drip' | 'hang' = 'ok'; const log: { method: string; url: string }[] = [];
   const allowed = new Set<string>();
 
   function authorize(req: any, body: Buffer, origin: string) {
@@ -52,6 +52,13 @@ describe('receiver private transport (real TLS)', () => {
         if (mode === 'huge') return send(200, JSON.stringify({ pad: 'x'.repeat(2_000_000) }));
         if (mode === 'slow') return void setTimeout(() => send(200, {}), 2000);
         if (mode === 'error500') return send(500, { error: 'internal' });
+        if (mode === 'hang') return; // never answers
+        if (mode === 'drip') {
+          // Slow-drip: a byte every 100 ms keeps the socket 'active' forever from an inactivity timer's point of view.
+          res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"pad":"');
+          let i = 0; const t = setInterval(() => { if (res.destroyed || ++i > 60) { clearInterval(t); if (!res.destroyed) res.end('"}'); } else res.write('x'); }, 100);
+          return;
+        }
         authorize(req, body, `https://127.0.0.1:${port}`);
         const url = new URL(req.url!, 'http://x'); const m = url.pathname.match(/^\/v1\/orders\/([^/]+)(\/settle|\/evidence)?$/);
         if (m && req.method === 'PUT' && !m[2]) return send(200, await rx.put(decodeURIComponent(m[1]!), JSON.parse(body.toString())));
@@ -109,6 +116,30 @@ describe('receiver private transport (real TLS)', () => {
     mode = 'slow'; await expect(client({ timeoutMs: 300 }).evidence('o')).rejects.toMatchObject({ code: 'receiver_unavailable' });
     mode = 'error500'; await expect(client().evidence('o')).rejects.toMatchObject({ code: 'receiver_unavailable' });
     mode = 'ok';
+  });
+
+  test('one absolute deadline: a slow-drip body below the inactivity timeout is still cut off, and later requests proceed', async () => {
+    mode = 'drip';
+    const c = client({ timeoutMs: 600 });
+    const t0 = Date.now();
+    await expect(c.evidence('o')).rejects.toMatchObject({ code: 'receiver_unavailable' });
+    expect(Date.now() - t0).toBeLessThan(2000); // the body would have taken ~6 s
+    mode = 'ok';
+    expect(await c.evidence('order-1')).toMatchObject({ status: 'settled' }); // the slot and timer were released
+  });
+
+  test('in-flight and waiting work are bounded; excess fails fast and slots are always returned', async () => {
+    mode = 'hang';
+    const c = client({ timeoutMs: 700, maxInFlight: 1, maxWaiting: 1 });
+    const first = c.evidence('a').catch(e => e), second = c.evidence('b').catch(e => e);
+    await new Promise(r => setTimeout(r, 50));
+    await expect(c.evidence('c')).rejects.toMatchObject({ code: 'receiver_busy', status: 503 });
+    const t0 = Date.now();
+    expect(await first).toMatchObject({ code: 'receiver_unavailable' });
+    expect(await second).toMatchObject({ code: 'receiver_unavailable' });
+    expect(Date.now() - t0).toBeLessThan(2500);
+    mode = 'ok';
+    expect(await c.evidence('order-1')).toMatchObject({ status: 'settled' });
   });
 
   test('no caller-chosen destination: origin shape and order references are validated, no plain http', async () => {
