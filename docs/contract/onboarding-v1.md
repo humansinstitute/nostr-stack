@@ -91,11 +91,16 @@ again. Only then the status becomes `provisioned`, `provisioned_at` is set and t
 seat is redeemed. General and each selected agent's DM/resources are later steps of
 this same registry; they are not yet implemented.
 
-Interim storage boundary: `billing_link` sets the legacy hourly meter start to
-`provisioned + 720 hours` (`intro_ends_at`), so no storage is charged during the
-introductory period. Hourly peak accounting, the 1 GB waiver and the US$5/720h
-minimum replace this in the storage slice; until then excess above 1 GB in the
-introductory period is not charged.
+Storage boundary: `billing_link` links the workspace to the account and creates a
+**pre-activation** peak-storage enrollment (write-path journal only; nothing is charged
+and no introduction has started). The final transaction that marks the intent
+`provisioned` also activates the enrollment: `provisioned_at` and the start of the 720
+introductory hours are the same instant, and `intro_ends_at` is exactly
+`provisioned_at + 720 hours`. A failed or incomplete setup therefore consumes nothing
+and bills nothing. Billing is [hosting-storage-peak-v1.md](hosting-storage-peak-v1.md):
+hourly peak, US$5/720h minimum for 1 decimal GB, base-only introductory waiver.
+Provisioning fails closed (`503 storage_tracking_unavailable`) unless the write-path
+triggers are installed; they install at start-up when `ONBOARDING_ENABLED=true`.
 
 ## Release gates (stage 1 is NOT production-ready)
 
@@ -105,14 +110,11 @@ introductory period is not charged.
 - `agent_state` is `none`, `selected_not_provisioned` or `provisioned`; a
   `provisioned` workspace never implies an agent, General or DM exists beyond what
   workspace setup creates. Agent resources are a later step.
-- The 720-hour `enabled_at` skip is an interim gap, not the approved base-only
-  waiver: excess above 1 GB in the introductory period is not charged. Must be
-  replaced by the storage slice before launch.
 - Accounts opened here carry `opened_by='onboarding'`; the legacy
   `linkHostedAccount` no longer writes a welcome ledger entry for them (it would
   be an unbacked snapshot of a zero promotional balance).
-- Stripe live mode, a real Lightning provider adapter, runtime reserve registration
-  (storage runway, agent holds) and live refund acceptance remain release gates; see
+- Stripe live mode, a real Lightning provider adapter, the `agent_holds` reserve
+  (the `storage_protection` source is registered) and live refund acceptance remain release gates; see
   [funding-reversals-v1.md](funding-reversals-v1.md).
 
 ## Validation

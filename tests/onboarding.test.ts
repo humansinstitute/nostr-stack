@@ -207,8 +207,13 @@ describe.skipIf(!port || port === 5432)('invited onboarding on disposable Postgr
     expect(workspaces.length).toBe(1); expect(done.workspace_id).toBe(workspaces[0]!.id);
     const [link] = await db`SELECT * FROM hosting_workspace_accounts WHERE workspace_id=${done.workspace_id}`;
     expect(link!.account_id).toBe(done.account_id);
+    // The introduction starts at the provisioned instant and is exactly 720 hours; the legacy hourly meter never sees this workspace.
     const intro = new Date(done.intro_ends_at!).getTime() - new Date(done.provisioned_at!).getTime();
-    expect(Math.abs(intro - 720 * 3_600_000)).toBeLessThan(60_000);
+    expect(intro).toBe(720 * 3_600_000);
+    const [enrollment] = await db`SELECT * FROM hosting_storage_enrollments WHERE workspace_id=${done.workspace_id}`;
+    expect(new Date(enrollment!.activated_at).getTime()).toBe(new Date(done.provisioned_at!).getTime());
+    expect(enrollment!.origin_intent_id).toBe(intent.id);
+    expect((await db`SELECT 1 FROM hosting_storage_anchors WHERE workspace_id=${done.workspace_id}`).length).toBe(1);
     const [seat] = await db`SELECT status FROM onboarding_invite_seats WHERE invite_id=${invite.id} AND owner_actor_id=(SELECT id FROM flightdeck_pg_actors WHERE npub=${alice})`;
     expect(seat!.status).toBe('redeemed');
     // No further credit, workspace or account change on replay.
@@ -227,6 +232,8 @@ describe.skipIf(!port || port === 5432)('invited onboarding on disposable Postgr
     expect(partial.status).toBe('provisioning'); expect(partial.last_error).toBe('billing_link:provisioning_step_failed');
     expect(Object.keys(partial.steps)).toEqual(['workspace']);
     expect((await db`SELECT * FROM hosting_workspace_accounts WHERE workspace_id=${partial.workspace_id}`).length).toBe(0);
+    // Failed setup consumes nothing: no enrollment, therefore no introduction started and nothing to charge.
+    expect((await db`SELECT * FROM hosting_storage_enrollments WHERE workspace_id=${partial.workspace_id}`).length).toBe(0);
     const [account] = await db`SELECT paid_units FROM hosting_accounts WHERE id=${partial.account_id}`;
     expect(account!.paid_units).toBe((21n * USD_UNITS).toString());
     const resumed = await Promise.all([provisionIntent(intent.id, bob, db as any), provisionIntent(intent.id, bob, db as any)]);

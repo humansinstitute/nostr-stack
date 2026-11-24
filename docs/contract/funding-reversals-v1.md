@@ -116,9 +116,12 @@ payout outcome was unknown) but still must decode to the same payment hash.
 
 - **Refund routes are gated** (`503 refund_reserves_unregistered`) until EVERY named required reserve source
   is registered through `registerFundingReserve(name, source)`; any single source is not enough. An empty or
-  partial registry is not proof that funds are unreserved. No production source registers yet and there is no
-  no-op registration: the later slices must supply real ones.
-  - `storage_protection`: units that must stay funded so stored data is not endangered by a refund (storage slice).
+  partial registry is not proof that funds are unreserved. `storage_protection` is registered at start-up from
+  [hosting-storage-peak-v1.md](hosting-storage-peak-v1.md); `agent_holds` is not, so refunds stay gated. There is no
+  no-op registration: the agent slice must supply a real one.
+  - `storage_protection` (registered): the exact next-720-hour storage charge of every activated peak-metered workspace linked to the
+    account (remaining introductory waiver honoured), from the write-path journal. Throws `503 storage_reserve_unavailable` (refund fails
+    closed) when an activated workspace has no measurement; it is never silently zero.
   - `agent_holds`: units held for agent work already admitted but not yet metered (agent runtime slice).
   - Contract for each source: `async (sql, accountId) => bigint`, evaluated inside the refund transaction under the
     account lock, returning a non-negative bigint (`0n` when nothing is reserved). A negative or non-bigint value,

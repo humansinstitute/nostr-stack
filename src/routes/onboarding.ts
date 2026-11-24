@@ -5,6 +5,7 @@ import { createHostingCheckout, requestStripeRefund } from '../services/hosting-
 import { fundingReversalSummary } from '../services/hosting-funding';
 import { issueLightningQuote, readLightningQuote, reconcileOpenLightningQuotes, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
 import { getDb } from '../db';
+import { accountStorageSummary } from '../services/hosting-storage';
 import {
   cancelIntent, createAgentOffer, createIntent, createInvite, intentForCheckout, inviteAvailability, listAgentOffers, listIntents, listInvites,
   openOwnerAccount, provisionIntent, readIntent, readOwnerAccount, releaseInviteSeat, revokeInvite, updateIntent,
@@ -36,7 +37,7 @@ const guard = (handler: (c: any) => Promise<Response>) => async (c: any) => {
 onboardingRouter.get('/invites/:code', guard(async c => c.json(await inviteAvailability(c.req.param('code')))));
 onboardingRouter.get('/account', guard(async c => {
   const account = await readOwnerAccount(await reader(c));
-  return c.json({ account, funding: account ? await fundingReversalSummary(getDb(), account.account_id) : null });
+  return c.json({ account, funding: account ? await fundingReversalSummary(getDb(), account.account_id) : null, storage: account ? await accountStorageSummary(getDb(), account.account_id) : null });
 }));
 onboardingRouter.post('/account', guard(async c => { const { actor } = await mutation(c); return c.json({ account: await openOwnerAccount(actor) }); }));
 onboardingRouter.get('/agent-offers', guard(async c => { await reader(c); return c.json({ offers: await listAgentOffers() }); }));

@@ -30,6 +30,10 @@ try {
 startHostingBillingRunner();
 const { startWorkspaceBillingRunner } = await import('./services/hosting-workspace-billing');
 startWorkspaceBillingRunner();
+// Peak-storage meter for the approved onboarding policy; a no-op until a workspace is enrolled and activated.
+const { startStoragePeakRunner, registerStorageProtectionReserve } = await import('./services/hosting-storage');
+registerStorageProtectionReserve();
+startStoragePeakRunner();
 // Durable notification projection runs in this process (NOTIF_PROJECTOR=off disables it).
 startNotificationWorker();
 // Strict agent notification inbox projection (AGENT_NOTIF_PROJECTOR=off disables only this path).

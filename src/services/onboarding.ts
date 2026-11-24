@@ -5,6 +5,7 @@ import { resolveOrCreateFlightDeckPgActor } from './flightdeck-pg-authorization'
 import { generatedFlightDeckPgWorkspaceServiceNpub, setupFlightDeckPgDevWorkspace } from './flightdeck-pg-setup';
 import { HostingError, unitsUsd } from './hosting-billing';
 import { netFundedCents } from './hosting-funding';
+import { activatePeakStorage, enrollPeakStorage, takeStorageAnchor } from './hosting-storage';
 import { resolveCheckoutOrders } from './hosting-stripe';
 import { resolveIntentLightningQuotes } from './hosting-lightning';
 
@@ -332,13 +333,11 @@ const STEPS: { name: string; run: (ctx: StepContext) => Promise<Record<string, u
   } },
   { name: 'billing_link', run: async ({ intent, sql }) => {
     const [row] = await sql`SELECT workspace_id FROM onboarding_intents WHERE id=${intent.id}`;
-    // The introductory 720 hours are included; the legacy hourly meter therefore starts only after them.
-    // Hourly peak / 1 GB waiver accounting replaces this interim boundary in the storage slice.
-    const starts = new Date(Date.now() + ONBOARDING_INTRO_HOURS * 3_600_000);
-    await sql`INSERT INTO hosting_workspace_accounts(workspace_id,account_id,enabled_at) VALUES(${row!.workspace_id},${intent.account_id},${starts}) ON CONFLICT(workspace_id) DO NOTHING`;
-    const [link] = await sql`SELECT account_id,enabled_at FROM hosting_workspace_accounts WHERE workspace_id=${row!.workspace_id}`;
+    // Link only. The introduction and storage charging start when provisioning completes (activatePeakStorage), so a failed setup consumes nothing.
+    await sql`INSERT INTO hosting_workspace_accounts(workspace_id,account_id) VALUES(${row!.workspace_id},${intent.account_id}) ON CONFLICT(workspace_id) DO NOTHING`;
+    const [link] = await sql`SELECT account_id FROM hosting_workspace_accounts WHERE workspace_id=${row!.workspace_id}`;
     if (link!.account_id !== intent.account_id) throw new HostingError(409, 'billing_owner_conflict');
-    return { intro_ends_at: new Date(link!.enabled_at).toISOString() };
+    await enrollPeakStorage(sql, row!.workspace_id, intent.account_id, intent.id);
   } },
 ];
 export const ONBOARDING_STEP_NAMES = STEPS.map(s => s.name);
@@ -383,12 +382,17 @@ export async function provisionIntent(id: string, ownerNpub: string, db: Db = ge
       throw new HostingError(502, 'provisioning_step_failed');
     }
   }
-  return db.begin(async tx => {
+  const finished = await db.begin(async tx => {
     const sql = tx as unknown as Db;
     const intent = await ownedIntent(id, ownerNpub, sql, true);
-    if (intent.status === 'provisioned') return view(intent, sql);
-    const [u] = await sql`UPDATE onboarding_intents SET status='provisioned',provisioned_at=now(),revision=revision+1,last_error=NULL,updated_at=now() WHERE id=${id} RETURNING *`;
+    if (intent.status === 'provisioned') return { workspaceId: null as string | null, intent: await view(intent, sql) };
+    // One transaction: the intent is provisioned and the 720 introductory hours start at the same instant.
+    const enrollment = await activatePeakStorage(sql, intent.workspace_id);
+    const [u] = await sql`UPDATE onboarding_intents SET status='provisioned',provisioned_at=now(),intro_ends_at=${enrollment.intro_ends_at},revision=revision+1,last_error=NULL,updated_at=now() WHERE id=${id} RETURNING *`;
     await sql`UPDATE onboarding_invite_seats SET status='redeemed',redeemed_at=COALESCE(redeemed_at,now()) WHERE invite_id=${intent.invite_id} AND owner_actor_id=${intent.owner_actor_id}`;
-    return view(u, sql);
+    return { workspaceId: intent.workspace_id as string, intent: await view(u, sql) };
   });
+  // First absolute level of the meter. A failure here is harmless: the hourly tick takes the anchor and nothing bills before it exists.
+  if (finished.workspaceId) await takeStorageAnchor(finished.workspaceId, db).catch(() => null);
+  return finished.intent;
 }
