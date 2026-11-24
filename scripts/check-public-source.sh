@@ -61,6 +61,6 @@ fi
 
 # Keep deployment credential and host-binding safety part of the public-source
 # release gate without rendering the operator's resolved Compose environment.
-bun test tests/deployment-security.test.ts >/dev/null
+bun test ./tests/deployment-security.test.ts >/dev/null
 
 echo 'public-source check passed'
