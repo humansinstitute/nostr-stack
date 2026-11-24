@@ -7,6 +7,7 @@ import { issueLightningQuote, readLightningQuote, reconcileOpenLightningQuotes, 
 import { getDb } from '../db';
 import { createTopupCheckout, issueTopupQuote, listTopups, refreshTopupQuote } from '../services/hosting-topup';
 import { accountStorageSummary } from '../services/hosting-storage';
+import { accountLifecycle, acknowledgeLifecycleNotice, evaluateLifecycleNotices, listLifecycleNotices } from '../services/hosting-lifecycle';
 import {
   cancelIntent, createAgentOffer, createIntent, createInvite, intentForCheckout, inviteAvailability, listAgentOffers, listIntents, listInvites,
   openOwnerAccount, provisionIntent, readIntent, readOwnerAccount, releaseInviteSeat, revokeInvite, updateIntent,
@@ -38,7 +39,8 @@ const guard = (handler: (c: any) => Promise<Response>) => async (c: any) => {
 onboardingRouter.get('/invites/:code', guard(async c => c.json(await inviteAvailability(c.req.param('code')))));
 onboardingRouter.get('/account', guard(async c => {
   const account = await readOwnerAccount(await reader(c));
-  return c.json({ account, funding: account ? await fundingReversalSummary(getDb(), account.account_id) : null, storage: account ? await accountStorageSummary(getDb(), account.account_id) : null });
+  return c.json({ account, funding: account ? await fundingReversalSummary(getDb(), account.account_id) : null, storage: account ? await accountStorageSummary(getDb(), account.account_id) : null,
+    lifecycle: account ? await accountLifecycle(getDb(), account.account_id) : null });
 }));
 onboardingRouter.post('/account', guard(async c => { const { actor } = await mutation(c); return c.json({ account: await openOwnerAccount(actor) }); }));
 onboardingRouter.get('/agent-offers', guard(async c => { await reader(c); return c.json({ offers: await listAgentOffers() }); }));
@@ -78,6 +80,20 @@ onboardingRouter.post('/intents/:id/lightning/quotes/:quoteId/refresh', guard(as
 onboardingRouter.post('/intents/:id/provision', guard(async c => {
   const { actor } = await mutation(c);
   return c.json({ intent: await provisionIntent(c.req.param('id'), actor) });
+}));
+
+// Read-only recovery state and durable runway/read-only notices (owner only). Informational: nothing here deletes or restores anything.
+onboardingRouter.get('/lifecycle', guard(async c => {
+  const account = await readOwnerAccount(await reader(c));
+  if (!account) throw new HostingError(404, 'account_not_found');
+  await evaluateLifecycleNotices(getDb(), account.account_id);
+  return c.json({ lifecycle: await accountLifecycle(getDb(), account.account_id), notices: await listLifecycleNotices(getDb(), account.account_id) });
+}));
+onboardingRouter.post('/lifecycle/notices/:id/acknowledge', guard(async c => {
+  const { actor } = await mutation(c);
+  const account = await readOwnerAccount(actor);
+  if (!account) throw new HostingError(404, 'account_not_found');
+  return c.json({ notice: await acknowledgeLifecycleNotice(getDb(), account.account_id, c.req.param('id')) });
 }));
 
 // Repeat account top-ups after provisioning. Account-level credit only: no intent, workspace, seat or introduction is created.

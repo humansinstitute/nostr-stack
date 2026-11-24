@@ -141,3 +141,19 @@ ONBOARDING_TEST_PORT=<free-disposable-port> bun test ./tests/onboarding.test.ts
 Use a fresh throwaway PostgreSQL on a free port. Source tests prove code behavior
 only; local NStack must be rebuilt (`./rebuild_deploy_docker.sh`, a live deploy) by
 the manager before any runtime or live validation.
+
+## Read-only recovery state and notices
+
+`GET /api/v4/onboarding/lifecycle` (owner; also `lifecycle` on `GET /account`) projects the account's lifecycle:
+`active`, `warning` (30/7/1-day runway), `read_only` (funds exhausted: 30 free days from `depleted_at`, writes blocked by
+the existing 402 boundary, export available, no debt, exit fee or back-charge, a top-up resumes charging prospectively),
+`removal_due` (the 30 days ended), `no_billed_workspace` or `unknown`. It always reports `automatic_deletion:false`,
+`live_removal_performed:false` and `offline_recovery:{available:false,verified:false,promised:false}`: no isolated encrypted
+offline copy, support restore or expiry exists, so nothing may be described as recoverable. `export_complete` stays false while
+the [migration export](workspace-migration-export-v1.md) manifest is incomplete.
+
+Durable notices (`hosting_lifecycle_notices`) are recorded once per account, kind and cycle by the periodic runner
+(`startLifecycleNoticeRunner`, idempotent, every 5 minutes) and on read: `runway_30d|7d|1d` (most urgent threshold only, new
+cycle after each credit), `read_only_entered` (per depletion) and `removal_due`. They are polled by clients and
+acknowledged with `POST /lifecycle/notices/{id}/acknowledge` (direct signature, owner only). Push or e-mail delivery of these
+notices and the explicit agent-resume confirmation are not wired in this slice.

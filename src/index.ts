@@ -34,6 +34,9 @@ startWorkspaceBillingRunner();
 const { startStoragePeakRunner, registerStorageProtectionReserve } = await import('./services/hosting-storage');
 registerStorageProtectionReserve();
 startStoragePeakRunner();
+// Durable 30/7/1-day runway and read-only notices (deduplicated per funding cycle; no deletion capability).
+const { startLifecycleNoticeRunner } = await import('./services/hosting-lifecycle');
+startLifecycleNoticeRunner();
 // Durable notification projection runs in this process (NOTIF_PROJECTOR=off disables it).
 startNotificationWorker();
 // Strict agent notification inbox projection (AGENT_NOTIF_PROJECTOR=off disables only this path).

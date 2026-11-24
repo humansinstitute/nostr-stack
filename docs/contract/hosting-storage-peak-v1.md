@@ -35,6 +35,23 @@ workspace UUID.
 Every public table with a UUID `workspace_id` must be classified exactly once; a test fails when
 a new table is added unclassified, so the meter cannot silently grow or shrink.
 
+**Git provider seam (inspected 2026-11-25; no provider can be implemented in Tower today).** Stock Forgejo owns accounts,
+organizations, repositories and Git transport natively (see `docs/forgejo-native-auth-migration.md`); the legacy `git_*` tables are
+retained read-only and stale, the old Tower webhook receiver and reconcilers are retired, and Tower sees no push. Three facts are
+missing, and any provider needs all three before `registerMeteredStorageCategory` may be called:
+1. **Attribution.** No authoritative repository-to-workspace mapping exists in Tower (`workspace-storage-usage` reports exactly this
+   as unavailable). A mapping must be an explicit, owner-authorized binding written by whatever provisions Forgejo organizations, not
+   an inference from a name or the stale legacy bindings.
+2. **Write-path journal.** Peak billing needs every byte change inside the hour. Forgejo does not call Tower on push, so there is
+   nothing to journal into `hosting_storage_record(ws,'external',delta)`. Forgejo's repository `size` (KiB) is an asynchronously
+   refreshed estimate: sampling it once per hour would be exactly the current-bytes sampling the policy rejects (a push and a
+   force-push/gc inside one hour would vanish).
+3. **Authoritative byte reader.** The size source (Forgejo API, or the repository store) must be read with a service credential this
+   deployment does not hold in Tower, and its accuracy relative to physical bytes (packs, LFS, forks, archives) is unproven.
+A provider would be a Forgejo system webhook (HMAC-verified, idempotent by delivery id) that triggers a size read and journals the
+signed delta against the bound workspace, plus an hourly reconciling read recorded in each anchor. Until then Git stays required,
+unmetered and fail closed (reserve, refunds and agent spend closed); registering a name or sampling a size does not change that.
+
 **Git is required billable customer storage and is not yet metered.** Until a real provider is
 registered (`registerMeteredStorageCategory({id:'git', journal:'write_path', bytes})`: a name alone is rejected; the provider's bytes
 enter every anchor as `external_bytes` and its write path must journal via `hosting_storage_record(ws,'external',delta)`; no provider
