@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { requireNip98AuthResolved, verifyStrictNip98Mutation } from '../auth';
 import { HostingError } from '../services/hosting-billing';
+import { readBoundedText } from '../http-body';
 import { approvedCheckoutReturnUrls, createHostingCheckout, requestStripeRefund } from '../services/hosting-stripe';
 import { fundingReversalSummary } from '../services/hosting-funding';
 import { lightningAvailable, issueLightningQuote, readLightningQuote, reconcileOpenLightningQuotes, reconcileReceiverBindingFeed, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
@@ -19,8 +20,7 @@ import {
 /** Invited onboarding. Human, direct-signature routes only; none are reachable by agent bindings. */
 export const onboardingRouter = new Hono();
 async function mutation(c: any, maxBytes = 4096) {
-  const raw = await c.req.text();
-  if (Buffer.byteLength(raw) > maxBytes) throw new HostingError(400, 'body_too_large');
+  const raw = await readBoundedText(c.req.raw, maxBytes);
   const proof = await verifyStrictNip98Mutation(c.req.header('authorization') ?? null, c.req.raw, raw);
   if (!proof.ok) throw new HostingError(401, proof.reasonCode);
   if (proof.userNpub !== proof.signerNpub) throw new HostingError(403, 'direct_user_signature_required');

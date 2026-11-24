@@ -95,8 +95,9 @@ const grantView = (g: any, used?: bigint) => ({
   revoked_at: g.revoked_at ? new Date(g.revoked_at).toISOString() : null, created_at: new Date(g.created_at).toISOString(),
   ...(used === undefined ? {} : { day_used_units: used.toString() }),
 });
-async function dayUsed(sql: Db, grantId: string, d: string): Promise<bigint> {
-  const [r] = await sql`SELECT COALESCE(sum(CASE state WHEN 'settled' THEN settled_units WHEN 'released' THEN 0 ELSE reserved_units END),0)::text AS used FROM hosting_agent_holds WHERE grant_id=${grantId} AND reserve_day=${d}`;
+/** Held + settled units for one agent in one workspace on a UTC day, across EVERY grant it has had: re-granting cannot reset the day's spend. */
+async function dayUsed(sql: Db, accountId: string, workspaceId: string, agentNpub: string, d: string): Promise<bigint> {
+  const [r] = await sql`SELECT COALESCE(sum(CASE state WHEN 'settled' THEN settled_units WHEN 'released' THEN 0 ELSE reserved_units END),0)::text AS used FROM hosting_agent_holds WHERE account_id=${accountId} AND workspace_id=${workspaceId} AND agent_npub=${agentNpub} AND reserve_day=${d}`;
   return BigInt(r!.used as string);
 }
 async function payerAccount(sql: Db, payerNpub: string) {
@@ -129,28 +130,36 @@ export async function createAgentGrant(payerNpub: string, body: any, clock: () =
     if (!member) throw new HostingError(422, 'agent_not_in_workspace');
     const [priced] = await sql`SELECT 1 FROM hosting_agent_tariff_models WHERE version=${tariff} AND model=${model}`;
     if (!priced) throw new HostingError(422, 'model_not_priced');
+    // One current grant per agent/service/model: a replacement supersedes the old one under the account lock (old holds and the day's usage are kept).
+    await sql`UPDATE hosting_agent_grants SET revoked_at=${now} WHERE account_id=${account.id} AND workspace_id=${body.workspace_id} AND agent_npub=${agent} AND service_npub=${service} AND model=${model} AND revoked_at IS NULL`;
     const [row] = await sql`INSERT INTO hosting_agent_grants(account_id,workspace_id,payer_npub,agent_npub,service_npub,model,tariff_version,daily_cap_units,expires_at,idempotency_key,request_sha256)
       VALUES(${account.id},${body.workspace_id},${payerNpub},${agent},${service},${model},${tariff},${cap.toString()},${expires},${key},${digest}) RETURNING *`;
     return { grant: grantView(row!), replayed: false };
   });
 }
+/** Always available (a payer can stop spend even with the feature off). Takes the same account lock as reserve, so a reserve either commits before
+ * the revoke or sees it: no admission can slip through after a revoke was acknowledged. */
 export async function revokeAgentGrant(payerNpub: string, grantId: string, db: Db = getDb()) {
-  requireEnabled();
   if (!UUID.test(grantId)) throw new HostingError(404, 'grant_not_found');
-  const [row] = await db`UPDATE hosting_agent_grants SET revoked_at=COALESCE(revoked_at,now()) WHERE id=${grantId} AND payer_npub=${payerNpub} RETURNING *`;
-  if (!row) throw new HostingError(404, 'grant_not_found');
-  return { grant: grantView(row) };
+  return db.begin(async tx => {
+    const sql = tx as unknown as Db;
+    const [peek] = await sql`SELECT account_id FROM hosting_agent_grants WHERE id=${grantId} AND payer_npub=${payerNpub}`;
+    if (!peek) throw new HostingError(404, 'grant_not_found');
+    await lockedAccount(peek.account_id as string, sql);
+    const [row] = await sql`UPDATE hosting_agent_grants SET revoked_at=COALESCE(revoked_at,now()) WHERE id=${grantId} RETURNING *`;
+    return { grant: grantView(row!) };
+  });
 }
 export async function listAgentGrants(payerNpub: string, clock: () => Date = () => new Date(), db: Db = getDb()) {
-  requireEnabled();
   const rows = await db`SELECT * FROM hosting_agent_grants WHERE payer_npub=${payerNpub} ORDER BY created_at DESC LIMIT 100`;
   const d = day(clock());
-  return Promise.all(rows.map(async g => grantView(g, await dayUsed(db, g.id as string, d))));
+  return Promise.all(rows.map(async g => grantView(g, await dayUsed(db, g.account_id as string, g.workspace_id as string, g.agent_npub as string, d))));
 }
 
 /* ------------------------------------------------------------------ holds (runtime service) */
+/** Settlement, release, dispatch, pending and reads stay available to an allowlisted service while NEW admission is disabled, so turning the feature
+ * off never traps funds already held. Only `reserve` (and creating grants/tariffs) needs the flag. */
 function requireService(signer: string) {
-  requireEnabled();
   if (!agentHoldServices().has(signer)) throw new HostingError(403, 'agent_service_not_allowed');
 }
 const holdView = (h: any) => ({
@@ -179,6 +188,7 @@ const identity = ['account_id', 'call_id'];
 const accountOf = (body: any) => { if (typeof body.account_id !== 'string' || !UUID.test(body.account_id)) throw bad('invalid_account'); return body.account_id as string; };
 
 export async function reserveAgentHold(signer: string, body: any, clock: () => Date = () => new Date(), db: Db = getDb()) {
+  requireEnabled();
   requireService(signer);
   exact(body, ['account_id', 'call_id', 'grant_id', 'workspace_id', 'agent_npub', 'model', 'tariff_version', 'max_input_tokens', 'max_output_tokens'], ['max_cached_input_tokens', 'run_id']);
   if (typeof body.account_id !== 'string' || !UUID.test(body.account_id)) throw bad('invalid_account');
@@ -199,13 +209,16 @@ export async function reserveAgentHold(signer: string, body: any, clock: () => D
       if (prior.request_sha256 !== digest || prior.service_npub !== signer) throw new HostingError(409, 'idempotency_conflict');
       return { hold: holdView(prior), replayed: true };
     }
-    const [grant] = await sql`SELECT * FROM hosting_agent_grants WHERE id=${body.grant_id}`;
+    const [grant] = await sql`SELECT * FROM hosting_agent_grants WHERE id=${body.grant_id} FOR SHARE`;
     if (!grant || grant.account_id !== body.account_id || grant.service_npub !== signer || grant.revoked_at || new Date(grant.expires_at) <= now
       || grant.workspace_id !== body.workspace_id || grant.agent_npub !== agent || grant.model !== model || grant.tariff_version !== tariff) throw new HostingError(403, 'agent_grant_required');
     if (!agentHoldServices().has(grant.service_npub as string)) throw new HostingError(403, 'agent_service_not_allowed');
     // Authority is re-derived from current ownership: a transferred or deactivated workspace stops spending immediately.
     const [ws] = await sql`SELECT w.workspace_owner_npub FROM hosting_storage_enrollments e JOIN flightdeck_pg_workspaces w ON w.id=e.workspace_id WHERE e.workspace_id=${grant.workspace_id} AND e.account_id=${body.account_id} AND e.activated_at IS NOT NULL`;
     if (!ws || ws.workspace_owner_npub !== grant.payer_npub) throw new HostingError(403, 'agent_grant_required');
+    // The agent must still be a current agent member of the workspace; a removed or demoted agent cannot spend on an old grant.
+    const [member] = await sql`SELECT 1 FROM flightdeck_pg_actors a JOIN flightdeck_pg_workspace_memberships m ON m.actor_id=a.id WHERE a.npub=${grant.agent_npub} AND a.kind='agent' AND m.workspace_id=${grant.workspace_id}`;
+    if (!member) throw new HostingError(403, 'agent_grant_required');
     const [block] = await sql`SELECT 1 FROM hosting_agent_spend_blocks WHERE account_id=${body.account_id} AND cleared_at IS NULL LIMIT 1`;
     if (block) throw new HostingError(409, 'agent_spend_blocked');
     const [rate] = await sql`SELECT * FROM hosting_agent_tariff_models WHERE version=${tariff} AND model=${model}`;
@@ -221,15 +234,13 @@ export async function reserveAgentHold(signer: string, body: any, clock: () => D
     if (!summary.admission.agent_spend_allowed) {
       const r = summary.admission.reason;
       throw r === 'storage_coverage_incomplete' ? new HostingError(503, 'storage_coverage_incomplete')
+        : r === 'agent_holds_unavailable' ? new HostingError(503, 'agent_holds_unavailable')
         : r === 'storage_measurement_unavailable' ? new HostingError(503, 'storage_reserve_unavailable') : new HostingError(402, 'agent_funds_insufficient');
     }
-    // Admission must not depend on the reserve source being registered: when it is not, open holds are subtracted here.
-    const held = await agentHoldUnits(sql, body.account_id);
-    const available = BigInt(summary.balances.agent_available_units);
-    const net = summary.balances.agent_holds.registered ? available : available > held ? available - held : 0n;
-    if (net < reserve) throw new HostingError(402, 'agent_funds_insufficient');
+    // The summary already nets registered open holds off agent_available_units, and refuses outright while that source is unregistered.
+    if (BigInt(summary.balances.agent_available_units) < reserve) throw new HostingError(402, 'agent_funds_insufficient');
     const d = day(now);
-    if (await dayUsed(sql, grant.id as string, d) + reserve > BigInt(grant.daily_cap_units)) throw new HostingError(409, 'daily_cap_exceeded');
+    if (await dayUsed(sql, body.account_id, grant.workspace_id as string, grant.agent_npub as string, d) + reserve > BigInt(grant.daily_cap_units)) throw new HostingError(409, 'daily_cap_exceeded');
     const reconcileBy = new Date(now.getTime() + reconcileDays() * 86_400_000);
     const [row] = await sql`INSERT INTO hosting_agent_holds(account_id,call_id,grant_id,workspace_id,agent_npub,service_npub,model,tariff_version,run_id,request_sha256,state,reserved_units,reserve_day,reserved_at,reconcile_by)
       VALUES(${body.account_id},${callId},${grant.id},${grant.workspace_id},${agent},${signer},${model},${tariff},${runId},${digest},'held',${reserve.toString()},${d},${now},${reconcileBy}) RETURNING *`;

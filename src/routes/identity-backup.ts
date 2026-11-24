@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { requireNip98AuthResolved, verifyStrictNip98Mutation } from '../auth';
 import { HostingError } from '../services/hosting-billing';
+import { readBoundedText } from '../http-body';
 import { backupThrottles, clientKey, getOwnIdentityBackup, getPublicIdentityBackup, putIdentityBackup } from '../services/hosted-identity-backup';
 
 /** Hosted identity backup: opaque ncryptsec only. Public read returns ciphertext and revision, never an npub. */
@@ -19,7 +20,21 @@ function throttle(c: any, ...buckets: [{ take(key: string): number }, string][])
     if (wait) { c.header('Retry-After', String(wait)); throw new HostingError(429, 'rate_limited'); }
   }
 }
-const ip = (c: any) => clientKey(c.req.header('x-forwarded-for') ?? c.req.header('x-real-ip'));
+/** Client identity for throttling. Forwarded headers are client-controlled, so by default only the transport peer counts (behind a proxy that is the
+ * proxy, i.e. one conservative shared bucket). `NSTACK_TRUSTED_PROXY_HOPS=n` is the operator's explicit assertion that exactly n trusted proxies append
+ * to X-Forwarded-For; then the entry n from the right (written by the first trusted proxy, never by the client) is used. */
+export function throttleIdentity(c: any): string {
+  const hops = Number(process.env.NSTACK_TRUSTED_PROXY_HOPS);
+  if (Number.isInteger(hops) && hops > 0 && hops <= 5) {
+    const parts = String(c.req.header('x-forwarded-for') ?? '').split(',').map((s: string) => s.trim()).filter(Boolean);
+    const picked = parts[parts.length - hops];
+    if (picked) return clientKey(picked);
+  }
+  let peer: string | undefined;
+  try { peer = c.env?.requestIP?.(c.req.raw)?.address; } catch { peer = undefined; }
+  return clientKey(peer ?? 'unknown');
+}
+const ip = throttleIdentity;
 
 identityBackupRouter.get('/me', guard(async c => {
   throttle(c, [backupThrottles.readIp, `me:${ip(c)}`]);
@@ -34,8 +49,7 @@ identityBackupRouter.get('/:username', guard(async c => {
 }));
 identityBackupRouter.put('/:username', guard(async c => {
   throttle(c, [backupThrottles.writeIp, `put:${ip(c)}`], [backupThrottles.writeGlobal, 'global']);
-  const raw = await c.req.text();
-  if (Buffer.byteLength(raw) > 1024) throw new HostingError(400, 'body_too_large');
+  const raw = await readBoundedText(c.req.raw, 1024);
   const proof = await verifyStrictNip98Mutation(c.req.header('authorization') ?? null, c.req.raw, raw);
   if (!proof.ok) throw new HostingError(401, proof.reasonCode);
   // The key that signs is the owner; no workspace-key delegation.

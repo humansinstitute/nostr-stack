@@ -386,8 +386,9 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     // Reversal debt (negative purchased balance) is explicit and non-spendable.
     await db`UPDATE hosting_accounts SET paid_units=-5 WHERE id=${acct}`;
     const unregisterGit = registerMeteredStorageCategory(gitStandIn());
+    const unregisterHolds = registerFundingReserve('agent_holds', async () => 0n); // stand-in for the agent slice, this test only
     const summary = await accountStorageSummary(db as any, acct);
-    unregisterGit();
+    unregisterHolds(); unregisterGit();
     expect(summary.balances).toMatchObject({ purchased_units: '0', reversal_debt_units: '5', spendable_units: '0', agent_available_units: '0' });
     expect(summary.admission).toMatchObject({ agent_spend_allowed: false, reason: 'reversal_debt' });
     await db`UPDATE hosting_accounts SET paid_units=10000000000,depleted_at=NULL WHERE id=${acct}`; // top-up
@@ -673,17 +674,24 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
       await db`UPDATE hosting_accounts SET paid_units=${(expected * 2n).toString()} WHERE id=${acct}`;
       await objectRow(second.id, 1_000_000_000);
       expect(await storageProtectedUnits(db as any, acct, now)).toBe(expected + 720n * 1_000_000_000n);
+      // Without a registered agent_holds source the held amount is unknown, never zero: agent spend stays closed with an explicit reason.
+      const unknown = await accountStorageSummary(db as any, acct, now);
+      expect(unknown.balances.agent_holds).toEqual({ registered: false, units: null });
+      expect(unknown.balances.agent_available_units).toBe('0');
+      expect(unknown.admission).toEqual({ agent_spend_allowed: false, reason: 'agent_holds_unavailable' });
+      const offHolds = registerFundingReserve('agent_holds', async () => 0n); // stand-in for the agent slice, this test only
       const summary = await accountStorageSummary(db as any, acct, now);
       expect(summary.coverage.complete).toBe(true);
       expect(summary.balances.protected_storage_units).toBe((expected + 720n * 1_000_000_000n).toString());
       expect(BigInt(summary.balances.agent_available_units)).toBe(expected * 2n - BigInt(summary.balances.protected_storage_units));
-      expect(summary.balances.agent_holds).toEqual({ registered: false, units: null });
+      expect(summary.balances.agent_holds).toEqual({ registered: true, units: '0' });
       expect(summary.runway.upper_bound).toBe(false);
       // Funded growth may reduce runway and stop agent admission; the storage write itself was never blocked.
       await db`UPDATE hosting_accounts SET paid_units=${(expected / 2n).toString()} WHERE id=${acct}`;
       const tight = await accountStorageSummary(db as any, acct, now);
       expect(tight.admission).toMatchObject({ agent_spend_allowed: false, reason: 'storage_reserve_not_covered' });
       expect(tight.balances.agent_available_units).toBe('0');
+      offHolds();
       // Reference-only objects are measured but not journaled: the policy is flagged incomplete instead of pretending to agree.
       const linked = await workspace({ accountId: acct });
       const loose = await db`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,content_type,size_bytes,storage_path,completed_at) VALUES(${owner},${owner},'x',640,${`ref/${randomUUID()}`},now()) RETURNING id`;

@@ -150,11 +150,22 @@ describe.skipIf(!port || port === 5432)('hosted identity backup on disposable Po
     const missing = await call('GET', '/nobody-here'), bad = await call('GET', '/%00%00');
     expect(missing.status).toBe(404); expect(bad.status).toBe(404);
     expect(missing.json).toEqual(bad.json);
+    // Forwarded headers are client-controlled and ignored by default: rotating them never escapes the (shared, conservative) transport-peer bucket.
     let limited = 0, last: any;
-    for (let i = 0; i < 40; i++) { last = await call('GET', '/nobody-here', undefined, undefined, '198.51.100.9'); if (last.status === 429) limited++; }
+    for (let i = 0; i < 40; i++) { last = await call('GET', '/nobody-here', undefined, undefined, `198.51.100.${i + 1}`); if (last.status === 429) limited++; }
     expect(limited).toBeGreaterThan(0); expect(last.headers.get('retry-after')).toBeTruthy(); expect(last.json.code).toBe('rate_limited');
-    // Another client address is not starved by the first (per-address bucket), while the global bucket still bounds the total.
-    expect((await call('GET', '/nobody-here', undefined, undefined, '198.51.100.10')).status).toBe(404);
+    expect((await call('GET', '/nobody-here', undefined, undefined, '203.0.113.200')).status).toBe(429);
+    for (const t of Object.values(backupThrottles)) t.reset();
+    // Behind an explicitly trusted proxy only the entry that proxy wrote counts: forged leftmost entries are noise, a different peer has its own bucket.
+    process.env.NSTACK_TRUSTED_PROXY_HOPS = '1';
+    try {
+      let proxied = 0;
+      for (let i = 0; i < 40; i++) { const r = await call('GET', '/nobody-here', undefined, undefined, `10.0.0.${i}, 192.0.2.77`); if (r.status === 429) proxied++; }
+      expect(proxied).toBeGreaterThan(0);
+      expect((await call('GET', '/nobody-here', undefined, undefined, '10.9.9.9, 192.0.2.78')).status).toBe(404);
+      expect((await call('GET', '/nobody-here', undefined, undefined, '10.9.9.9, 192.0.2.77')).status).toBe(429);
+    } finally { delete process.env.NSTACK_TRUSTED_PROXY_HOPS; }
+    for (const t of Object.values(backupThrottles)) t.reset();
     const key = sk(); let writes429 = 0;
     for (let i = 0; i < 14; i++) { const r = await call('PUT', `/${uniq()}`, key, { ncryptsec: 'x', expected_revision: '0' }, '192.0.2.5'); if (r.status === 429) writes429++; }
     expect(writes429).toBeGreaterThan(0);

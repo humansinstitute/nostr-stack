@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { requireNip98AuthResolved, verifyStrictNip98Mutation } from '../auth';
 import { config } from '../config';
 import { HostingError } from '../services/hosting-billing';
+import { readBoundedText } from '../http-body';
 import {
   appendAgentTariff, clearAgentSpendBlock, createAgentGrant, dispatchAgentHold, listAgentGrants, listAgentTariffs, markAgentHoldPending,
   readAgentHold, releaseAgentHold, reserveAgentHold, revokeAgentGrant, settleAgentHold,
@@ -10,8 +11,7 @@ import {
 /** Paid agent holds. Runtime-service routes accept only an allowlisted service key signing directly; payer routes the account owner directly. */
 export const agentHoldsRouter = new Hono();
 async function mutation(c: any, maxBytes = 8192) {
-  const raw = await c.req.text();
-  if (Buffer.byteLength(raw) > maxBytes) throw new HostingError(400, 'body_too_large');
+  const raw = await readBoundedText(c.req.raw, maxBytes);
   const proof = await verifyStrictNip98Mutation(c.req.header('authorization') ?? null, c.req.raw, raw);
   if (!proof.ok) throw new HostingError(401, proof.reasonCode);
   // No workspace-key delegation: the signing key itself is the identity that is authorized.

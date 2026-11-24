@@ -63,6 +63,14 @@ is refused with `409 identity_backup_required` until `GET …/me` would succeed 
 cannot attest where a key came from; `identity_origin` is a client-declared guardrail, not proof. `existing`
 intents are never gated by this.
 
+## Throttle identity and body bounds
+
+The PUT body ceiling is 1 KiB, enforced while streaming (`413 body_too_large` for a larger `Content-Length` or an overlong/chunked stream).
+Throttle buckets key on the transport peer address, never on a client header. Forwarded headers are honoured only when the operator sets
+`NSTACK_TRUSTED_PROXY_HOPS=n` (1–5), asserting exactly `n` trusted proxies append to `X-Forwarded-For`; then the entry `n` from the right is used
+(client-supplied leftmost entries are ignored). Without it, requests behind a proxy share one conservative bucket (the global and owner buckets
+still apply).
+
 ## Residual risk (explicit)
 
 - **Username enumeration** is possible: `GET` distinguishes existing from unknown names (bounded by throttles

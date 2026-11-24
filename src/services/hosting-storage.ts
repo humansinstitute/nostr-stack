@@ -387,12 +387,13 @@ export async function accountStorageSummary(db: Db, accountId: string, now = new
   const days = hours === null ? null : Number(hours) / 24;
   const warning = days === null ? null : days <= 1 ? 1 : days <= 7 ? 7 : days <= 30 ? 30 : null;
   // Incomplete coverage never unlocks agent spend: the reserve would understate what storage needs.
-  // Open agent holds are already promised to admitted calls, so they come off what is spendable; unregistered means unknown, never zero.
+  // Open agent holds are already promised to admitted calls, so they come off what is spendable. An unregistered source means the amount is UNKNOWN,
+  // which is never treated as zero: agent spend stays closed until a real source participates.
   const holdsSource = fundingReserveSource('agent_holds');
   const heldUnits = holdsSource ? await holdsSource(db, accountId) : null;
-  const agentAvailable = complete && debt === 0n && spendable > protectedUnits + (heldUnits ?? 0n) ? spendable - protectedUnits - (heldUnits ?? 0n) : 0n;
+  const agentAvailable = heldUnits !== null && complete && debt === 0n && spendable > protectedUnits + heldUnits ? spendable - protectedUnits - heldUnits : 0n;
   const asUnits = (v: bigint) => v.toString();
-  const reason = missing.length ? 'storage_coverage_incomplete' : !measurable ? 'storage_measurement_unavailable' : referenceOnly.length ? 'storage_coverage_incomplete' : debt > 0n ? 'reversal_debt' : agentAvailable > 0n ? null : 'storage_reserve_not_covered';
+  const reason = missing.length ? 'storage_coverage_incomplete' : !measurable ? 'storage_measurement_unavailable' : referenceOnly.length ? 'storage_coverage_incomplete' : heldUnits === null ? 'agent_holds_unavailable' : debt > 0n ? 'reversal_debt' : agentAvailable > 0n ? null : 'storage_reserve_not_covered';
   return {
     version: 1 as const, account_id: accountId, currency: 'USD' as const, units_per_usd: USD_UNITS.toString(), as_of: now.toISOString(), basis: STORAGE_BASIS_VERSION,
     balances: {

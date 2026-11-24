@@ -19,6 +19,23 @@ by this software; with no operator-appended tariff every reserve is refused.
   above the next-720-hour storage protection, minus every open hold). Incomplete storage coverage (today: Git)
   means every reserve is refused (`storage_coverage_incomplete`). Nothing fakes coverage.
 
+## Review-hardened rules
+
+- **Bounded bodies.** Every request body is read as a stream with a hard ceiling (8 KiB; tariffs 64 KiB; hosted-backup PUT 1 KiB). A larger
+  `Content-Length`, or a stream (including chunked) that crosses the ceiling, is `413 body_too_large` without buffering the rest.
+- **Disabling is not trapping.** With `HOSTING_AGENT_HOLDS_ENABLED` off, `reserve`, grant creation and tariff append are refused
+  (`503 agent_holds_disabled`). `dispatch`, `pending`, `release`, `settle`, `GET /holds`, `GET /grants`, grant revoke and block clear keep
+  working for allowlisted services/payers/admins, so funds already held can always be reconciled. Removing a service from
+  `HOSTING_AGENT_HOLD_SERVICES` does stop that service entirely (re-add it to reconcile).
+- **Revoke serialises with reserve.** `revoke` takes the same account lock as `reserve`; a reserve either commits before the revoke or sees it.
+- **One current grant per agent/service/model.** Creating a replacement revokes the previous active one under the account lock. The daily cap
+  counts held + settled units **per account/workspace/agent across every grant** that agent has had that UTC day, so re-granting or changing a
+  rate never resets the day's spend; the cap compared is the grant used for the reserve.
+- **Authority is re-derived at reserve.** The payer must still own the workspace and its activated enrollment, and the agent must still be an
+  `agent` member of the workspace; a removed agent cannot spend on an old grant.
+- **Unknown holds fail closed.** `agent_available_units` is 0 and admission reason is `agent_holds_unavailable` (`503`) while no real
+  `agent_holds` source is registered; zero is never assumed. The startup registration is a real query over open holds.
+
 ## Units
 
 - 1 USD = `144_000_000_000` units (NStack ledger) = `10^12` pico-USD (runtime). Conversion is exact rational:

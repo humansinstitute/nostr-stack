@@ -14,7 +14,7 @@ import { grantHostingCredit } from '../src/services/hosting-billing';
 import { accountStorageSummary, enrollPeakStorage, registerMeteredStorageCategory, registerStorageProtectionReserve, takeStorageAnchor } from '../src/services/hosting-storage';
 import { openOwnerAccount } from '../src/services/onboarding';
 import {
-  appendAgentTariff, clearAgentSpendBlock, createAgentGrant, dispatchAgentHold, markAgentHoldPending, picoToUnits, readAgentHold, registerAgentHoldsReserve,
+  appendAgentTariff, clearAgentSpendBlock, createAgentGrant, dispatchAgentHold, listAgentGrants, markAgentHoldPending, picoToUnits, readAgentHold, registerAgentHoldsReserve,
   releaseAgentHold, reserveAgentHold, revokeAgentGrant, settleAgentHold,
 } from '../src/services/hosting-agent-holds';
 
@@ -23,8 +23,8 @@ const port = Number(process.env.HOLDS_TEST_PORT);
 const HOUR = 3_600_000;
 const key = (n: number) => new Uint8Array(32).fill(n);
 const npub = (k: Uint8Array) => nip19.npubEncode(getPublicKey(k));
-const [ownerKey, otherKey, agentKey, serviceAKey, serviceBKey, rogueKey, adminKey] = [201, 202, 203, 204, 205, 206, 207].map(key) as Uint8Array[];
-const [owner, other, agent, serviceA, serviceB, rogue, admin] = [ownerKey, otherKey, agentKey, serviceAKey, serviceBKey, rogueKey, adminKey].map(npub) as string[];
+const [ownerKey, otherKey, agentKey, serviceAKey, serviceBKey, rogueKey, adminKey, agent2Key] = [201, 202, 203, 204, 205, 206, 207, 208].map(key) as Uint8Array[];
+const [owner, other, agent, serviceA, serviceB, rogue, admin, agent2] = [ownerKey, otherKey, agentKey, serviceAKey, serviceBKey, rogueKey, adminKey, agent2Key].map(npub) as string[];
 const app = createApp();
 const gitStandIn = () => ({ id: 'git' as const, journal: 'write_path' as const, bytes: async () => 0n });
 
@@ -87,11 +87,12 @@ describe.skipIf(!port || port === 5432)('paid agent holds on disposable PostgreS
     await ensureRuntimeSchema(db);
     [{ id: ownerActor }] = await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${owner},'human') RETURNING id` as any;
     const [{ id: agentActor }] = await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${agent},'agent') RETURNING id` as any;
+    const [{ id: agent2Actor }] = await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${agent2},'agent') RETURNING id` as any;
     account = (await openOwnerAccount(owner, db as any)).account_id;
     await grantHostingCredit(account, 10_000, 'holds-fixture', 'Holds fixture credit', owner, db as any); // $100
     workspace = randomUUID();
     await db`INSERT INTO flightdeck_pg_workspaces(id,tower_service_npub,workspace_service_npub,workspace_owner_npub,app_npub,name) VALUES(${workspace},'tower',${workspace},${owner},'holds-fixture','Holds')`;
-    await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspace},${ownerActor},'owner'),(${workspace},${agentActor},'agent')`;
+    await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspace},${ownerActor},'owner'),(${workspace},${agentActor},'agent'),(${workspace},${agent2Actor},'agent')`;
     await db`INSERT INTO hosting_workspace_accounts(workspace_id,account_id) VALUES(${workspace},${account})`;
     await enrollPeakStorage(db as any, workspace, account, null);
     const h = Math.floor(Date.now() / HOUR) * HOUR;
@@ -184,6 +185,10 @@ describe.skipIf(!port || port === 5432)('paid agent holds on disposable PostgreS
     try { await expect(reserve(serviceA, { grant_id: t.grant.id })).rejects.toMatchObject({ code: 'agent_grant_required' }); }
     finally { await db`UPDATE flightdeck_pg_workspaces SET workspace_owner_npub=${owner} WHERE id=${workspace}`; }
     await reserve(serviceA, { grant_id: t.grant.id });
+    // A replacement grant for the same agent/service/model supersedes the old one under the account lock.
+    expect((await db`SELECT revoked_at FROM hosting_agent_grants WHERE id=${g.grant.id}`)[0]!.revoked_at).not.toBeNull();
+    expect((await db`SELECT revoked_at FROM hosting_agent_grants WHERE id=${e.grant.id}`)[0]!.revoked_at).not.toBeNull();
+    grantId = t.grant.id;
   });
 
   test('settlement is computed from the tariff once, ledger-backed and replay-safe; settle needs a recorded dispatch', async () => {
@@ -258,7 +263,7 @@ describe.skipIf(!port || port === 5432)('paid agent holds on disposable PostgreS
   });
 
   test('true-cost overrun settles in full, flags it, and blocks later admission until an admin clears it', async () => {
-    const g = await grant();
+    const g = await grant(); grantId = g.grant.id;
     const h = await dispatched({ grant_id: g.grant.id, max_input_tokens: '10', max_output_tokens: '10' });
     const r = await settle(h, obs({ input_tokens: '1000', output_tokens: '500' }));
     expect(r.hold.settled_units).toBe('57600000');
@@ -270,8 +275,8 @@ describe.skipIf(!port || port === 5432)('paid agent holds on disposable PostgreS
   });
 
   test('daily cap counts held plus settled per UTC day and resets on the next day', async () => {
-    const g = await grant({ daily_cap_units: '100000000' }); // two reserves of 57.6M do not fit
-    const mine = (o: Record<string, unknown> = {}) => reserve(serviceA, { grant_id: g.grant.id, ...o });
+    const g = await grant({ agent_npub: agent2, daily_cap_units: '100000000' }); // two reserves of 57.6M do not fit
+    const mine = (o: Record<string, unknown> = {}) => reserve(serviceA, { grant_id: g.grant.id, agent_npub: agent2, ...o });
     const a = (await mine()).hold;
     await expect(mine()).rejects.toMatchObject({ code: 'daily_cap_exceeded', status: 409 });
     await dispatchAgentHold(serviceA, { account_id: account, call_id: a.call_id }, clock, db as any);
@@ -300,9 +305,7 @@ describe.skipIf(!port || port === 5432)('paid agent holds on disposable PostgreS
     const R = 57_600_000n;
     await db`UPDATE hosting_accounts SET paid_units=${(protectedUnits + R * 5n / 2n).toString()} WHERE id=${acct2!.id}`; // room for exactly two holds
     const g2 = await createAgentGrant(other, { idempotency_key: 'g-conc-0001', workspace_id: ws2, agent_npub: agent, service_npub: serviceA, model: 'm/plain', tariff_version: 't1', daily_cap_units: '100000000000', expires_at: new Date(base.getTime() + 86_400_000).toISOString() }, clock, db as any);
-    offHolds(); // admission must not depend on the reserve source being registered
     const tries = await Promise.allSettled(Array.from({ length: 6 }, (_, i) => reserveAgentHold(serviceA, { ...reserveBody({ account_id: acct2!.id, workspace_id: ws2, grant_id: g2.grant.id, call_id: `conc-${i}` }) }, clock, db as any)));
-    offHolds = registerAgentHoldsReserve();
     expect(tries.filter(t => t.status === 'fulfilled').length).toBe(2);
     expect(tries.filter(t => t.status === 'rejected').every(t => (t as PromiseRejectedResult).reason.code === 'agent_funds_insufficient')).toBe(true);
     const s = await accountStorageSummary(db as any, acct2!.id, now);
@@ -330,6 +333,89 @@ describe.skipIf(!port || port === 5432)('paid agent holds on disposable PostgreS
     try { await expect(reserve(serviceA)).rejects.toMatchObject({ code: 'agent_funds_insufficient', status: 402 }); }
     finally { await grantHostingCredit(account, 10_000, `top-${randomUUID().slice(0, 8)}`, 'Holds fixture top-up', owner, db as any); }
     expect((await db`SELECT count(*)::int AS n FROM hosting_agent_holds`)[0]!.n).toBe(before);
+  });
+
+  test('re-granting cannot reset the day: usage is summed per agent across grants; removed agents cannot spend', async () => {
+    const before = await grant({ agent_npub: agent2, daily_cap_units: '100000000' });
+    const used = BigInt((await listAgentGrants(owner, clock, db as any)).find(x => x.id === before.grant.id)!.day_used_units);
+    expect(used).toBeGreaterThan(0n); // earlier holds of the same agent count toward the new grant
+    await expect(reserve(serviceA, { grant_id: before.grant.id, agent_npub: agent2 })).rejects.toMatchObject({ code: 'daily_cap_exceeded' });
+    // A larger replacement cap is the payer's explicit choice; usage still carries over rather than restarting from zero.
+    const bigger = await grant({ agent_npub: agent2, daily_cap_units: String(used + 60_000_000n) });
+    expect((await reserve(serviceA, { grant_id: bigger.grant.id, agent_npub: agent2 })).hold.state).toBe('held');
+    await expect(reserve(serviceA, { grant_id: bigger.grant.id, agent_npub: agent2 })).rejects.toMatchObject({ code: 'daily_cap_exceeded' });
+    // Authority is re-derived from current membership at reserve time.
+    const actor = (await db`SELECT id FROM flightdeck_pg_actors WHERE npub=${agent2}`)[0]!.id;
+    await db`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspace} AND actor_id=${actor}`;
+    try { await expect(reserve(serviceA, { grant_id: bigger.grant.id, agent_npub: agent2 })).rejects.toMatchObject({ code: 'agent_grant_required', status: 403 }); }
+    finally { await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspace},${actor},'agent')`; }
+  });
+
+  test('revoke takes the account lock: it serialises with reserve and nothing is admitted after it', async () => {
+    const g = await grant({ agent_npub: agent });
+    grantId = g.grant.id;
+    let release!: () => void, locked!: () => void;
+    const lockHeld = new Promise<void>(r => { locked = r; });
+    const holder = db.begin(async tx => { await tx`SELECT id FROM hosting_accounts WHERE id=${account} FOR UPDATE`; locked(); await new Promise<void>(r => { release = r; }); });
+    await lockHeld;
+    let revoked = false, reserved: 'pending' | 'ok' | 'refused' = 'pending';
+    const rev = revokeAgentGrant(owner, g.grant.id, db as any).then(() => { revoked = true; });
+    await new Promise(r => setTimeout(r, 150));
+    const res = reserve(serviceA, { grant_id: g.grant.id }).then(() => { reserved = 'ok'; }, () => { reserved = 'refused'; });
+    await new Promise(r => setTimeout(r, 300));
+    expect(revoked).toBe(false); expect(reserved).toBe('pending'); // both are waiting on the account lock the holder owns
+    release(); await holder; await rev; await res;
+    expect(revoked).toBe(true); expect(reserved).toBe('refused'); // queued behind the revoke, the reserve saw it
+    // And a burst of reserves racing a revoke never admits one after the revoke row is committed.
+    const g2 = await grant({ agent_npub: agent }); grantId = g2.grant.id;
+    const burst = Array.from({ length: 6 }, () => reserve(serviceA, { grant_id: g2.grant.id }).then(() => 'ok', () => 'no'));
+    await revokeAgentGrant(owner, g2.grant.id, db as any);
+    await Promise.all(burst);
+    await expect(reserve(serviceA, { grant_id: g2.grant.id })).rejects.toMatchObject({ code: 'agent_grant_required' });
+    grantId = (await grant({ agent_npub: agent })).grant.id;
+  });
+
+  test('disabling the feature closes admission but never traps held funds; an unknown holds source fails closed', async () => {
+    const h = await dispatched();
+    const pendingOne = (await reserve(serviceA)).hold;
+    process.env.HOSTING_AGENT_HOLDS_ENABLED = 'false';
+    try {
+      await expect(reserve(serviceA)).rejects.toMatchObject({ code: 'agent_holds_disabled', status: 503 });
+      await expect(grant()).rejects.toMatchObject({ code: 'agent_holds_disabled' });
+      expect((await readAgentHold(serviceA, { account_id: account, call_id: h.call_id }, db as any)).hold.state).toBe('dispatched');
+      expect((await settle(h)).hold.state).toBe('settled');
+      expect((await releaseAgentHold(serviceA, { account_id: account, call_id: pendingOne.call_id, basis: 'never_dispatched' }, clock, db as any)).hold.state).toBe('released');
+      await expect(settle(h, obs(), rogue)).rejects.toMatchObject({ code: 'agent_service_not_allowed' }); // still allowlist-gated
+      expect((await call('GET', '/grants', ownerKey)).status).toBe(200);
+      await revokeAgentGrant(owner, grantId, db as any); // a payer can always stop spend
+      grantId = '00000000-0000-4000-8000-000000000000';
+    } finally { process.env.HOSTING_AGENT_HOLDS_ENABLED = 'true'; }
+    grantId = (await grant()).grant.id;
+    // Without a registered agent_holds source the held amount is unknown: no admission, explicit reason, no hold written.
+    offHolds();
+    try {
+      const n = (await db`SELECT count(*)::int AS n FROM hosting_agent_holds`)[0]!.n;
+      await expect(reserve(serviceA)).rejects.toMatchObject({ code: 'agent_holds_unavailable', status: 503 });
+      expect((await accountStorageSummary(db as any, account, now)).admission).toEqual({ agent_spend_allowed: false, reason: 'agent_holds_unavailable' });
+      expect((await db`SELECT count(*)::int AS n FROM hosting_agent_holds`)[0]!.n).toBe(n);
+    } finally { offHolds = registerAgentHoldsReserve(); }
+    await reserve(serviceA);
+  });
+
+  test('request bodies are bounded while streaming: oversized, endless and chunked bodies are cut off, not buffered', async () => {
+    const url = 'http://localhost/api/v4/agent-holds/holds/reserve';
+    let pulled = 0;
+    const endless = new ReadableStream<Uint8Array>({ pull(c) { pulled++; c.enqueue(new Uint8Array(1024).fill(97)); if (pulled > 5000) c.close(); } });
+    const r = await app.request(url, { method: 'POST', body: endless, duplex: 'half' } as any);
+    expect(r.status).toBe(413); expect((await r.json()).code).toBe('body_too_large');
+    expect(pulled).toBeLessThan(40); // ~8 KiB ceiling, never the whole 5 MB
+    const declared = await app.request(url, { method: 'POST', headers: { 'content-length': '999999' }, body: '{}' });
+    expect(declared.status).toBe(413);
+    // The tariff route has its own, larger ceiling; hosted-backup PUT is 1 KiB.
+    pulled = 0;
+    const big = new ReadableStream<Uint8Array>({ pull(c) { pulled++; c.enqueue(new Uint8Array(4096).fill(97)); if (pulled > 5000) c.close(); } });
+    expect((await app.request('http://localhost/api/v4/identity-backup/someone', { method: 'PUT', body: big, duplex: 'half' } as any)).status).toBe(413);
+    expect(pulled).toBeLessThan(10);
   });
 
   test('HTTP: strict direct signatures, closed by default, exact bodies and OpenAPI', async () => {
