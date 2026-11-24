@@ -2,6 +2,7 @@ import { getDb } from '../db';
 import { authorizeFlightDeckPgOperation, getEffectiveFlightDeckPgGroupIds } from './flightdeck-pg-authorization';
 import { listVisibleFlightDeckPgCanvases } from './flightdeck-pg-canvases';
 import type { RecordEntry } from './flightdeck-record-visibility';
+import { OrgDataError, orgOperation } from './org-data';
 
 type Db = ReturnType<typeof getDb>;
 export type ExportViewer = { workspaceId: string; actorId: string; npub: string; appNpub: string };
@@ -15,9 +16,11 @@ type Ctx = { viewer: ExportViewer; visible: Visible; sql: Db; canvasIds: () => P
  * not delivered (the record projection does not deliver tombstones either). */
 export type Adapter = {
   table: string;
-  /** Joined FROM clause; the adapter's own table is always aliased `t`. */
+  /** Joined FROM clause; the adapter's own table is always aliased `t`. Ignored when `fetch` is set. */
   from: string;
   key: string;
+  /** For tables whose read rule lives in a service rather than SQL: returns already-authorized rows after `last`, at most `limit`. */
+  fetch?: (ctx: Ctx, last: string, limit: number) => Promise<{ k: string; row: any }[]>;
   where?: string;
   /** SQL expression for the channel whose ACL governs the row (when the rule is channel based). */
   channel?: string;
@@ -65,6 +68,42 @@ export const EXPORT_ADAPTERS: Adapter[] = [
   { table: 'flightdeck_pg_canvas_orders', from: 'flightdeck_pg_canvas_orders t', key: "t.viewer_actor_id::text||':'||t.canvas_id::text", rule: 'custom',
     allow: async (row, ctx) => row.viewer_actor_id === ctx.viewer.actorId && (await ctx.canvasIds()).has(row.canvas_id), refs: r => [{ f: CANVAS, i: String(r.canvas_id) }] },
 ];
+const ZERO = '00000000-0000-0000-0000-000000000000';
+/** Org data is read through its own service, so type access (members/admins), permission grants and reference redaction are exactly
+ * those of the org-data routes. A member without org_data.read receives nothing. */
+async function orgCtx(ctx: Ctx) {
+  const [m] = await ctx.sql`SELECT role FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${ctx.viewer.workspaceId} AND actor_id=${ctx.viewer.actorId}`;
+  return { workspaceId: ctx.viewer.workspaceId, actorId: ctx.viewer.actorId, actorNpub: ctx.viewer.npub, appNpub: ctx.viewer.appNpub, role: String(m?.role ?? '') };
+}
+async function orgReadable<T>(ctx: Ctx, run: () => Promise<T>, empty: T): Promise<T> {
+  try { return await run(); } catch (e) { if (e instanceof OrgDataError && [403, 404].includes(e.status)) return empty; throw e; }
+}
+EXPORT_ADAPTERS.push(
+  { table: 'flightdeck_pg_org_data_types', from: '', key: '', rule: 'custom', refs: () => [],
+    fetch: async (ctx, last, limit) => {
+      const catalogue: any = await orgReadable(ctx, async () => orgOperation(await orgCtx(ctx), 'catalogue'), { types: [] });
+      return (catalogue.types as any[]).map(t => ({ k: String(t.key), row: { key: t.key, label: t.label, fields: t.fields, access: t.access, revision: t.revision } }))
+        .filter(r => r.k > last).sort((a, b) => (a.k < b.k ? -1 : 1)).slice(0, limit);
+    } },
+  { table: 'flightdeck_pg_org_data_records', from: '', key: '', rule: 'custom', refs: r => [{ f: 'table:flightdeck_pg_org_data_types', i: String(r.type_key) }],
+    fetch: async (ctx, last, limit) => {
+      const base = await orgCtx(ctx);
+      const catalogue: any = await orgReadable(ctx, () => orgOperation(base, 'catalogue'), { types: [] });
+      const [lastType, lastId] = last ? last.split('\u0001') as [string, string] : ['', ZERO];
+      const out: { k: string; row: any }[] = [];
+      for (const type of (catalogue.types as any[]).map(t => String(t.key)).sort().filter(k => k >= lastType)) {
+        let cursor = type === lastType ? lastId! : ZERO;
+        while (out.length < limit) {
+          const page: any = await orgReadable(ctx, () => orgOperation(base, 'list', type, undefined, { cursor, limit: Math.min(500, limit - out.length) }), { records: [], has_more: false });
+          for (const r of page.records as any[]) out.push({ k: `${type}\u0001${r.id}`, row: { ...r, type_key: type } });
+          if (!page.has_more) break;
+          cursor = page.next_cursor;
+        }
+        if (out.length >= limit) break;
+      }
+      return out;
+    } },
+);
 export const EXPORT_ADAPTER_TABLES: string[] = EXPORT_ADAPTERS.map(a => a.table);
 export const keyFamily = (table: string) => `table:${table}`;
 

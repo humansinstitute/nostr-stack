@@ -130,14 +130,16 @@ async function contentPage(workspaceId: string, viewer: Awaited<ReturnType<typeo
   const ctx = adapterContext({ workspaceId, actorId: viewer.actorId, npub: viewer.npub, appNpub: viewer.workspace.app_npub }, visible, sql);
   for (; t < EXPORT_ADAPTERS.length; t++, last = '') {
     const a = EXPORT_ADAPTERS[t]!;
-    const rows = await sql.unsafe(`SELECT ${a.key} AS k, to_jsonb(t) AS row, ${a.channel ?? 'NULL::uuid'} AS channel, octet_length(to_jsonb(t)::text) AS bytes FROM ${a.from}
+    const rows = a.fetch
+      ? (await a.fetch(ctx, last, limit + 1)).map(r => ({ ...r, channel: null as string | null, bytes: Buffer.byteLength(JSON.stringify(r.row)) }))
+      : await sql.unsafe(`SELECT ${a.key} AS k, to_jsonb(t) AS row, ${a.channel ?? 'NULL::uuid'} AS channel, octet_length(to_jsonb(t)::text) AS bytes FROM ${a.from}
       WHERE t.workspace_id=$1 AND ${a.where ?? 'TRUE'} AND ${a.key} > $2 ORDER BY ${a.key} LIMIT ${limit + 1}`, [workspaceId, last]) as { k: string; row: any; channel: string | null; bytes: number }[];
     if (!rows.length) continue;
     const page: Page = { items: [], identities: [], bytes: 0, next: null, keys: [], assets: [], tables: {} };
     const window = rows.slice(0, limit);
     let processed = 0, lastKey = '';
     for (const r of window) {
-      if (await adapterAllows(a, { ...r.row, _channel: r.channel }, ctx)) {
+      if (a.fetch || await adapterAllows(a, { ...r.row, _channel: r.channel }, ctx)) {
         if (Number(r.bytes) > EXPORT_ITEM_MAX_BYTES) throw new HostingError(413, 'export_item_too_large');
         if (page.items.length && page.bytes + Number(r.bytes) > EXPORT_PAGE_BYTES) break;
         const refs = a.refs(r.row);

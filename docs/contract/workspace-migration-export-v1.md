@@ -35,7 +35,8 @@ Billing-account ownership confers nothing here: an owner exports what the owner 
    workspace.manage), `invocations` (channel.read, or the creator, or a named recipient), `agent_activities` (lease internals
    omitted) and their commentary (channel.read), and `canvases`, `canvas_elements`, `canvas_naplets` (the canvas visibility rule:
    workspace mode, listed principals, creator or workspace.manage, exactly as `GET /canvases`) plus the member's own
-   `canvas_orders`. Soft-deleted rows are not delivered. Each row's parent references are recorded so a child whose parent was not
+   `canvas_orders`, and `org_data_types`/`org_data_records` read through the org-data service itself (permission grants, the type's
+   members/admins access and reference redaction; a member without `org_data.read` receives nothing). Soft-deleted rows are not delivered. Each row's parent references are recorded so a child whose parent was not
    delivered is reported as a broken relationship.
 3. `history` — `doc_version`, `doc_recovery_version`, `file_version`, `daily_note_version` rows of every exported parent
    (`{kind, row}`); parents deleted or not delivered contribute nothing, matching the existing ACL for retained versions.
@@ -73,9 +74,9 @@ chain over what it received and matches `manifest.sections.*.chain` and `items` 
 - `status` is `complete` only when no reason applies; `incomplete_reasons` ⊆ `writes_during_export`, `dangling_relationships`,
   `asset_issues`, `uncovered_content`. `integrity.exported_scope_complete` is true when the only reason is `uncovered_content`.
 
-**Known gap:** org data (`org_data_*`: per-type access policy), the napplet registry, drive share descriptors, registered-app and
+**Known gap:** the napplet registry (capability model of the org-data napplet routes), drive share descriptors, registered-app and
 managed storage (app delegation, not member ACL) and Git repositories are still not exported, so every manifest is currently
-`incomplete` with `uncovered_content`; each is listed in `coverage.uncovered_required` with its reason. Closing the first three needs
+`incomplete` with `uncovered_content`; each is listed in `coverage.uncovered_required` with its reason. Closing the first two needs
 per-family authorization adapters; app storage needs the app-delegation contract; Git needs a Forgejo byte/archive provider and
 workspace attribution (see `hosting-storage-peak-v1.md`). `response_activities` (transient status), `channel_move_receipts` and
 `agent_work_receipts` (receipts) are classified `operational`, not content: a reclassification is a one-line change. Until the

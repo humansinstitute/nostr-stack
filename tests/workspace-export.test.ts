@@ -147,6 +147,11 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     for (const c of [ids.canvasOpen, ids.canvasPrivate]) await db`INSERT INTO flightdeck_pg_canvas_elements(workspace_id,canvas_id,kind,layout,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${c},'text',${db.json({ x: 1 })},${ownerId},${ownerId})`;
     await db`INSERT INTO flightdeck_pg_canvas_naplets(workspace_id,canvas_id,source_type,source_id,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${ids.canvasOpen},'document',${ids.doc},${ownerId},${ownerId})`;
     for (const viewer of [ownerId, readerId]) await db`INSERT INTO flightdeck_pg_canvas_orders(workspace_id,viewer_actor_id,canvas_id,position) VALUES(${ws},${viewer},${ids.canvasOpen},3)`;
+    // Org data: permission grants decide who may read at all; the type's access decides members vs admins.
+    for (const actor of [ownerId, readerId]) for (const permission of ['workspace.read', 'org_data.read']) await grant(actor, null, permission);
+    await grant(ownerId, null, 'org_data.schema');
+    await db`INSERT INTO flightdeck_pg_org_data_types(workspace_id,key,label,fields,access) VALUES(${ws},'projects','Projects',${db.json([{ key: 'name', label: 'Name', type: 'text' }])},${db.json({ read: 'members', write: 'admins' })}),(${ws},'salaries','Salaries',${db.json([{ key: 'name', label: 'Name', type: 'text' }])},${db.json({ read: 'admins', write: 'admins' })})`;
+    for (const [type, name] of [['projects', 'Alpha'], ['projects', 'Beta'], ['salaries', 'Secret']] as const) await db`INSERT INTO flightdeck_pg_org_data_records(workspace_id,type_key,values) VALUES(${ws},${type},${db.json({ name })})`;
   });
   afterAll(async () => { resetInMemoryStorageForTest(); await closeDb(); const root = postgres({ ...conn, database: 'postgres' }); await root.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`); await root.end(); });
 
@@ -297,7 +302,9 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
 
   test('content adapters: each table follows its own route rule; the owner sees all, the member only what the rule allows', async () => {
     await db`DELETE FROM workspace_exports WHERE workspace_id=${ws}`;
-    // Removing a membership (earlier test) removes that member's private ordering.
+    // Removing a membership (earlier test) removed that member's workspace grants and private ordering.
+    await db`DELETE FROM flightdeck_pg_permission_grants WHERE workspace_id=${ws} AND principal_actor_id=${readerId} AND resource_type='workspace'`;
+    for (const permission of ['workspace.read', 'org_data.read']) await grant(readerId, null, permission);
     await db`INSERT INTO flightdeck_pg_canvas_orders(workspace_id,viewer_actor_id,canvas_id,position) VALUES(${ws},${readerId},${ids.canvasOpen},3) ON CONFLICT DO NOTHING`;
     const owned = await run(owner);
     const mine = await run(reader);
@@ -324,13 +331,24 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     expect(mine.seen.content.filter((i: any) => i.table === 'flightdeck_pg_canvas_elements').length).toBe(1);
     expect(owned.seen.content.filter((i: any) => i.table === 'flightdeck_pg_canvas_elements').length).toBe(2);
     expect(mine.seen.content.filter((i: any) => i.table === 'flightdeck_pg_canvas_orders').map((i: any) => i.row.viewer_actor_id)).toEqual([readerId]);
+    // Org data: members read 'members' types; 'admins' types need org_data.schema. A member without org_data.read gets nothing.
+    expect(owned.seen.content.filter((i: any) => i.table === 'flightdeck_pg_org_data_types').map((i: any) => i.row.key)).toEqual(['projects', 'salaries']);
+    expect(owned.seen.content.filter((i: any) => i.table === 'flightdeck_pg_org_data_records').map((i: any) => i.row.values.name).sort()).toEqual(['Alpha', 'Beta', 'Secret']);
+    expect(mine.seen.content.filter((i: any) => i.table === 'flightdeck_pg_org_data_types').map((i: any) => i.row.key)).toEqual(['projects']);
+    expect(mine.seen.content.filter((i: any) => i.table === 'flightdeck_pg_org_data_records').map((i: any) => i.row.values.name).sort()).toEqual(['Alpha', 'Beta']);
+    expect(JSON.stringify(mine.seen)).not.toContain('Secret');
+    await db`UPDATE flightdeck_pg_permission_grants SET revoked_at=now() WHERE workspace_id=${ws} AND principal_actor_id=${readerId} AND permission='org_data.read'`;
+    const noOrg = await run(reader);
+    expect(noOrg.seen.content.filter((i: any) => i.table.startsWith('flightdeck_pg_org_data'))).toEqual([]);
+    await db`UPDATE flightdeck_pg_permission_grants SET revoked_at=NULL WHERE workspace_id=${ws} AND principal_actor_id=${readerId} AND permission='org_data.read'`;
     expect(JSON.stringify(mine.seen)).not.toContain(ids.closedWorkroom!);
     expect(mine.manifest.content_tables).toMatchObject({ flightdeck_pg_canvases: 1, flightdeck_pg_workrooms: 1 });
     // Relationships hold (every parent was delivered) and what remains unexported is named per table with a reason.
     expect(owned.manifest.integrity.dangling_relationships).toEqual([]);
     expect(mine.manifest.integrity.dangling_relationships).toEqual([]);
     const required = owned.manifest.coverage.uncovered_required.map((u: any) => u.table);
-    expect(required).toEqual(expect.arrayContaining(['flightdeck_pg_org_data_records', 'flightdeck_pg_napplet_bundles', 'flightdeck_pg_drive_shares', 'managed_storage_sets', 'git_repositories']));
+    expect(required).not.toContain('flightdeck_pg_org_data_records');
+    expect(required).toEqual(expect.arrayContaining(['flightdeck_pg_napplet_bundles', 'flightdeck_pg_drive_shares', 'managed_storage_sets', 'git_repositories']));
     expect(required).not.toContain('flightdeck_pg_canvases');
     expect(owned.manifest.coverage.uncovered.find((u: any) => u.table === 'git_repositories').reason).toContain('Forgejo');
     expect(owned.manifest.coverage.uncovered.find((u: any) => u.table === 'flightdeck_pg_response_activities').category).toBe('operational');

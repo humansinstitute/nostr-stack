@@ -20,7 +20,7 @@ export const EXPORT_REQUIRED_CATEGORIES: ReadonlySet<UncoveredCategory> = new Se
 
 const list = (category: UncoveredCategory, ...tables: string[]) => tables.map(t => [`flightdeck_pg_${t}`, category] as const);
 export const EXPORT_UNCOVERED: Record<string, UncoveredCategory> = Object.fromEntries([
-  ...list('content', 'org_data_records', 'org_data_types', 'drive_shares', 'napplets', 'napplet_bundles', 'napplet_collections', 'napplet_releases'),
+  ...list('content', 'drive_shares', 'napplets', 'napplet_bundles', 'napplet_collections', 'napplet_releases'),
   ...list('operational', 'response_activities', 'channel_move_receipts', 'agent_work_receipts'),
   ...list('app_data', 'app_storage_objects'),
   ['managed_app_storage_objects', 'app_data'], ['managed_storage_graph', 'app_data'], ['managed_storage_refs', 'app_data'], ['managed_storage_set_pages', 'app_data'], ['managed_storage_sets', 'app_data'],
@@ -34,8 +34,6 @@ export const EXPORT_UNCOVERED: Record<string, UncoveredCategory> = Object.fromEn
 ]);
 /** Why a table is not delivered yet, for tables where the reason is not obvious from the category. */
 export const UNCOVERED_REASON: Record<string, string> = {
-  flightdeck_pg_org_data_records: 'Needs an adapter for the per-type org-data access policy (src/services/org-data.ts); no generic rule applies.',
-  flightdeck_pg_org_data_types: 'Needs an adapter for the per-type org-data access policy (src/services/org-data.ts).',
   flightdeck_pg_napplet_bundles: 'Needs the napplet registry capability model (org-data napplet routes).', flightdeck_pg_napplets: 'Needs the napplet registry capability model.',
   flightdeck_pg_napplet_collections: 'Needs the napplet registry capability model.', flightdeck_pg_napplet_releases: 'Needs the napplet registry capability model.',
   flightdeck_pg_drive_shares: 'Owner-private share descriptors with host endpoints; needs an owner-only adapter and a decision on exporting endpoints.',
