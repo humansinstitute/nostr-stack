@@ -4,7 +4,11 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { setDb } from '../src/db';
+import { ensureRuntimeSchema } from '../src/schema/ensure-runtime-schema';
 import { createApp } from '../src/server';
+import { BILLABLE_STORAGE_TABLES } from '../src/services/hosting-storage-classification';
+import { EXPORT_ADAPTERS } from '../src/services/workspace-export-adapters';
+import { exportCoverage } from '../src/services/workspace-export-coverage';
 import { unclassifiedFixtureCeiling } from '../src/services/agent-notifications';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { enableInMemoryStorageForTest, resetInMemoryStorageForTest, writeStorageObject } from '../src/services/storage';
@@ -15,7 +19,7 @@ const encoder = new TextEncoder();
 
 describe.skipIf(!port || port === 5432)('HTML artefact file comments and versioned review API', () => {
   const database = `file_comments_${process.pid}_${Date.now()}`;
-  const connection = { host: '127.0.0.1', port, username: 'postgres', password: 'postgres', onnotice: () => {} };
+  const connection = { host: '127.0.0.1', port, username: process.env.RECORD_TEST_USER || 'postgres', password: process.env.RECORD_TEST_PASSWORD ?? 'postgres', onnotice: () => {} };
   // 0 = owner/editor (file.read + file.write)
   // 1 = commenter A (file.read + comment.create ONLY — no file.write!)
   // 2 = commenter B (file.read + comment.create ONLY — no file.write!)
@@ -76,7 +80,7 @@ describe.skipIf(!port || port === 5432)('HTML artefact file comments and version
     await admin.end();
     db = postgres({ ...connection, database });
     for (const stmt of splitSqlStatements(readFileSync(new URL('../src/schema/001_init.sql', import.meta.url), 'utf8'))) await db.unsafe(stmt);
-    for (const stmt of splitSqlStatements(readFileSync(new URL('../src/schema/file-comments-v1.sql', import.meta.url), 'utf8'))) await db.unsafe(stmt);
+    await ensureRuntimeSchema(db);
     actors = [];
     for (const npub of npubs) {
       const [actor] = await db`INSERT INTO flightdeck_pg_actors(npub, kind) VALUES(${npub}, 'human') RETURNING id`;
@@ -165,16 +169,38 @@ describe.skipIf(!port || port === 5432)('HTML artefact file comments and version
     expect(rootRes.body.comment.file_version_number).toBe(1);
     expect(rootRes.body.comment.anchor.element_id).toBe('hero');
 
-    // Idempotent retry with same client_request_id returns same comment, no duplicate.
-    const replayRes = await request(ws(`/files/${f1.fileId}/comments`), 'POST', 1, {
-      body: 'Tighten hero headline spacing',
+    // Idempotent retry (including simultaneous race) with same client_request_id returns same comment, no duplicate, no 500.
+    const [replayA, replayB] = await Promise.all([
+      request(ws(`/files/${f1.fileId}/comments`), 'POST', 1, {
+        body: 'Tighten hero headline spacing',
+        file_version_id: f1.versionId,
+        anchor: anchorV1,
+        client_request_id: 'req-root-1',
+      }),
+      request(ws(`/files/${f1.fileId}/comments`), 'POST', 1, {
+        body: 'Tighten hero headline spacing',
+        file_version_id: f1.versionId,
+        anchor: anchorV1,
+        client_request_id: 'req-root-1',
+      }),
+    ]);
+    expect(replayA.status).toBe(200);
+    expect(replayB.status).toBe(200);
+    expect(replayA.body.comment.id).toBe(rootId);
+    expect(replayB.body.comment.id).toBe(rootId);
+
+    // Reusing same client_request_id with different payload is rejected with 409.
+    const replayConflict = await request(ws(`/files/${f1.fileId}/comments`), 'POST', 1, {
+      body: 'Completely different body',
       file_version_id: f1.versionId,
       anchor: anchorV1,
       client_request_id: 'req-root-1',
     });
-    expect(replayRes.status).toBe(200);
-    expect(replayRes.body.replayed).toBe(true);
-    expect(replayRes.body.comment.id).toBe(rootId);
+    expect(replayConflict.status).toBe(409);
+
+    // Cross-file version_id rejected on both GET and POST.
+    expect((await request(ws(`/files/${f1.fileId}/comments?version_id=${f2.versionId}`), 'GET', 1)).status).toBe(404);
+    expect((await request(ws(`/files/${f1.fileId}/comments`), 'POST', 1, { body: 'Wrong file version', file_version_id: f2.versionId })).status).toBe(404);
 
     // Cross-file parent rejected (404).
     const crossFile = await request(ws(`/files/${f2.fileId}/comments`), 'POST', 2, {
@@ -222,6 +248,14 @@ describe.skipIf(!port || port === 5432)('HTML artefact file comments and version
     expect(resolved.body.comment.comment_status).toBe('resolved');
     expect(resolved.body.comment.row_version).toBe(3);
 
+    // Status filter filters by root thread status: resolved root hides its replies from ?status=open and includes them in ?status=resolved.
+    const openWhileResolved = await request(ws(`/files/${f1.fileId}/comments?status=open`), 'GET', 1);
+    expect(openWhileResolved.status).toBe(200);
+    expect(openWhileResolved.body.comments.length).toBe(0);
+    const resolvedThreads = await request(ws(`/files/${f1.fileId}/comments?status=resolved`), 'GET', 1);
+    expect(resolvedThreads.status).toBe(200);
+    expect(resolvedThreads.body.comments.length).toBe(3);
+
     const reopened = await request(ws(`/files/${f1.fileId}/comments/${rootId}`), 'PATCH', 1, { comment_status: 'open', row_version: 3 });
     expect(reopened.status).toBe(200);
     expect(reopened.body.comment.comment_status).toBe('open');
@@ -229,17 +263,79 @@ describe.skipIf(!port || port === 5432)('HTML artefact file comments and version
     // Reply cannot be resolved directly (400).
     expect((await request(ws(`/files/${f1.fileId}/comments/${replyA.body.comment.id}`), 'PATCH', 2, { comment_status: 'resolved', row_version: 1 })).status).toBe(400);
 
-    // Listing reflects shared state + accurate permissions for commenter A (can_comment=true, can_edit_source=false).
+    // Listing reflects shared state + accurate permissions for commenter A (can_comment=true, can_resolve_any=false, can_edit_source=false).
     const listA = await request(ws(`/files/${f1.fileId}/comments`), 'GET', 1);
     expect(listA.status).toBe(200);
     expect(listA.body.comments.length).toBe(3);
     expect(listA.body.permissions.can_comment).toBe(true);
+    expect(listA.body.permissions.can_resolve_any).toBe(false);
     expect(listA.body.permissions.can_edit_source).toBe(false);
+    expect(listA.body.comments.find((c: any) => c.id === rootId).can_resolve).toBe(true);
 
-    // Audit & outbox events recorded.
+    // DELETE requires positive row_version and cascades soft-delete to replies without stranding them.
+    expect((await request(ws(`/files/${f1.fileId}/comments/${rootId}`), 'DELETE', 1)).status).toBe(400);
+    expect((await request(ws(`/files/${f1.fileId}/comments/${rootId}?row_version=1`), 'DELETE', 1)).status).toBe(409);
+    const delRoot = await request(ws(`/files/${f1.fileId}/comments/${rootId}?row_version=4`), 'DELETE', 1);
+    expect(delRoot.status).toBe(200);
+    const afterDelete = await request(ws(`/files/${f1.fileId}/comments`), 'GET', 1);
+    expect(afterDelete.status).toBe(200);
+    expect(afterDelete.body.comments.length).toBe(0);
+
+    // Simultaneous FIRST creation race with a brand-new client_request_id: one 201, one 200 replay, same ID, zero 500s.
+    const [raceA, raceB] = await Promise.all([
+      request(ws(`/files/${f1.fileId}/comments`), 'POST', 1, {
+        body: 'Simultaneous first create',
+        file_version_id: v2.versionId,
+        client_request_id: 'req-first-race-1',
+      }),
+      request(ws(`/files/${f1.fileId}/comments`), 'POST', 1, {
+        body: 'Simultaneous first create',
+        file_version_id: v2.versionId,
+        client_request_id: 'req-first-race-1',
+      }),
+    ]);
+    expect([raceA.status, raceB.status].sort()).toEqual([200, 201]);
+    expect(raceA.body.comment.id).toBe(raceB.body.comment.id);
+
+    // Export adapter & billable storage classification verification against disposable DB.
+    expect(BILLABLE_STORAGE_TABLES.includes('flightdeck_pg_file_comments' as any)).toBe(true);
+    const cov = exportCoverage();
+    expect(cov.content_tables).toContain('flightdeck_pg_file_comments');
+    expect(cov.uncovered.some((u) => u.table === 'flightdeck_pg_file_comments')).toBe(false);
+    const adapter = EXPORT_ADAPTERS.find((a) => a.table === 'flightdeck_pg_file_comments')!;
+    expect(adapter).toBeDefined();
+    const exportedRows = await db.unsafe<any[]>(
+      `SELECT t.*, ${adapter.channel} AS _channel FROM ${adapter.from} WHERE t.workspace_id = $1 AND ${adapter.where} ORDER BY ${adapter.key}`,
+      [workspace],
+    );
+    expect(exportedRows.length).toBe(1);
+    expect(exportedRows[0].id).toBe(raceA.body.comment.id);
+    expect(adapter.refs(exportedRows[0])).toEqual([{ f: 'file', i: f1.fileId }]);
+    const allowedVisible = await adapter.allow!(exportedRows[0], {
+      viewer: { workspaceId: workspace, actorId: actors[1]!, npub: npubs[1]!, appNpub: 'app' },
+      visible: async () => true,
+      sql: db,
+      canvasIds: async () => new Set(),
+      canManage: async () => false,
+    });
+    const deniedVisible = await adapter.allow!(exportedRows[0], {
+      viewer: { workspaceId: workspace, actorId: actors[3]!, npub: npubs[3]!, appNpub: 'app' },
+      visible: async () => false,
+      sql: db,
+      canvasIds: async () => new Set(),
+      canManage: async () => false,
+    });
+    expect(allowedVisible).toBe(true);
+    expect(deniedVisible).toBe(false);
+
+    // Audit & outbox events recorded with entity_id = file.id (never nonexistent comment ID) and without mutating file row_version.
     const audits = await db`SELECT action FROM flightdeck_pg_audit_events WHERE workspace_id = ${workspace} AND resource_type = 'file_comment'`;
-    expect(audits.length).toBeGreaterThanOrEqual(4);
-    const outbox = await db`SELECT event_type FROM flightdeck_pg_outbox_events WHERE workspace_id = ${workspace} AND event_type LIKE 'flightdeck_pg.file_comment.%'`;
-    expect(outbox.length).toBeGreaterThanOrEqual(4);
+    expect(audits.length).toBeGreaterThanOrEqual(5);
+    const outbox = await db`SELECT entity_type, entity_id, event_type FROM flightdeck_pg_outbox_events WHERE workspace_id = ${workspace} AND event_type LIKE 'flightdeck_pg.file_comment.%'`;
+    expect(outbox.length).toBeGreaterThanOrEqual(5);
+    for (const row of outbox) {
+      expect(row.entity_type).toBe('file');
+      expect(row.entity_id).toBe(f1.fileId);
+    }
   });
 });

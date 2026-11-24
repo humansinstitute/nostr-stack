@@ -9556,6 +9556,7 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/files/:fileId/comments', async 
   if (!isUuid(fileId)) return jsonError(c, 404, 'file_not_found', 'Flight Deck PG file not found', identity);
   const file = await resolveFlightDeckPgFile(context.workspace.id, fileId);
   if (!file) return jsonError(c, 404, 'file_not_found', 'Flight Deck PG file not found', identity);
+  if (receiptAdmission(c.req.raw, 'file', file.id)) return c.json({ identity, ...ORIGIN_INVALID }, 403);
 
   const readAccess = await authorizeFlightDeckPgStorageRead({
     actorNpub: auth.userNpub,
@@ -9609,7 +9610,7 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/files/:fileId/comments', async 
     permissions: {
       can_read: true,
       can_comment: capabilities.canComment,
-      can_resolve: capabilities.canComment,
+      can_resolve_any: capabilities.canEditSource || capabilities.canModerate,
       can_edit_source: capabilities.canEditSource,
       can_moderate: capabilities.canModerate,
     },
@@ -9630,6 +9631,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/files/:fileId/comments', async
   if (!isUuid(fileId)) return jsonError(c, 404, 'file_not_found', 'Flight Deck PG file not found', identity);
   const file = await resolveFlightDeckPgFile(context.workspace.id, fileId);
   if (!file) return jsonError(c, 404, 'file_not_found', 'Flight Deck PG file not found', identity);
+  if (receiptAdmission(c.req.raw, 'file', file.id)) return c.json({ identity, ...ORIGIN_INVALID }, 403);
 
   const readAccess = await authorizeFlightDeckPgStorageRead({
     actorNpub: auth.userNpub,
@@ -9718,13 +9720,13 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/files/:fileId/comments', async
       }, sql);
       const outbox = await createFlightDeckPgFileOutboxEvent({
         workspaceId: context.workspace.id,
-        scopeId: created.comment.scope_id,
-        channelId: created.comment.channel_id,
+        scopeId: file.scope_id,
+        channelId: file.channel_id,
         actorId: context.actor.id,
         eventType: 'flightdeck_pg.file_comment.created',
-        entityId: created.comment.id,
-        operation: 'created',
-        entityRowVersion: created.comment.row_version,
+        entityId: file.id,
+        operation: 'updated',
+        entityRowVersion: file.row_version,
         payload: {
           file_id: file.id,
           file_version_id: created.comment.file_version_id,
@@ -9738,6 +9740,9 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/files/:fileId/comments', async
       return { ...created, auditId, outbox };
     });
 
+    if (payload.status === 'idempotency_conflict') {
+      return jsonError(c, 409, 'client_request_id_conflict', 'client_request_id was already used with a different comment payload', identity);
+    }
     if (payload.status === 'parent_not_found') {
       return jsonError(c, 404, 'parent_comment_not_found', 'Parent file comment was not found on this file', identity);
     }
@@ -9759,14 +9764,6 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/files/:fileId/comments', async
       ...(payload.outbox ? { outbox: payload.outbox } : {}),
     }, payload.replayed ? 200 : 201);
   } catch (error) {
-    const sqlCode = (error as { code?: string }).code;
-    if (sqlCode === '23505' && clientRequestId) {
-      const existing = await listFlightDeckPgFileComments({ workspaceId: context.workspace.id, fileId: file.id, limit: 200 });
-      const matched = existing.find((row) => row.client_request_id === clientRequestId && row.created_by_actor_id === context.actor.id);
-      if (matched) {
-        return c.json({ identity, comment: serializeFlightDeckPgFileComment(matched, capabilities), replayed: true }, 200);
-      }
-    }
     const message = error instanceof Error ? error.message : 'Flight Deck PG file comment could not be created';
     return jsonError(c, 400, 'validation_error', message, identity);
   }
@@ -9784,6 +9781,7 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/files/:fileId/comments/:comme
   if (!isUuid(fileId)) return jsonError(c, 404, 'file_not_found', 'Flight Deck PG file not found', identity);
   const file = await resolveFlightDeckPgFile(context.workspace.id, fileId);
   if (!file) return jsonError(c, 404, 'file_not_found', 'Flight Deck PG file not found', identity);
+  if (receiptAdmission(c.req.raw, 'file', file.id)) return c.json({ identity, ...ORIGIN_INVALID }, 403);
 
   const readAccess = await authorizeFlightDeckPgStorageRead({
     actorNpub: auth.userNpub,
@@ -9867,13 +9865,13 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/files/:fileId/comments/:comme
     }, sql);
     const outbox = await createFlightDeckPgFileOutboxEvent({
       workspaceId: context.workspace.id,
-      scopeId: comment.scope_id,
-      channelId: comment.channel_id,
+      scopeId: file.scope_id,
+      channelId: file.channel_id,
       actorId: context.actor.id,
       eventType: 'flightdeck_pg.file_comment.updated',
-      entityId: comment.id,
+      entityId: file.id,
       operation: 'updated',
-      entityRowVersion: comment.row_version,
+      entityRowVersion: file.row_version,
       payload: {
         file_id: file.id,
         file_version_id: comment.file_version_id,
@@ -9906,6 +9904,7 @@ flightDeckPgRouter.delete('/workspaces/:workspaceId/files/:fileId/comments/:comm
   if (!isUuid(fileId)) return jsonError(c, 404, 'file_not_found', 'Flight Deck PG file not found', identity);
   const file = await resolveFlightDeckPgFile(context.workspace.id, fileId);
   if (!file) return jsonError(c, 404, 'file_not_found', 'Flight Deck PG file not found', identity);
+  if (receiptAdmission(c.req.raw, 'file', file.id)) return c.json({ identity, ...ORIGIN_INVALID }, 403);
 
   const readAccess = await authorizeFlightDeckPgStorageRead({
     actorNpub: auth.userNpub,
@@ -9931,6 +9930,9 @@ flightDeckPgRouter.delete('/workspaces/:workspaceId/files/:fileId/comments/:comm
   const existing = await resolveFlightDeckPgFileComment(context.workspace.id, file.id, commentId);
   if (!existing) return jsonError(c, 404, 'file_comment_not_found', 'Flight Deck PG file comment not found', identity);
   const rowVersion = optionalRowVersion({ row_version: c.req.query('row_version') });
+  if (rowVersion === null) {
+    return validationError(c, identity, [{ path: 'row_version', code: 'required', message: 'row_version query parameter is required for file comment deletion' }]);
+  }
   if (Number.isNaN(rowVersion)) {
     return validationError(c, identity, [{ path: 'row_version', code: 'invalid', message: 'row_version must be a positive integer' }]);
   }
@@ -9942,14 +9944,15 @@ flightDeckPgRouter.delete('/workspaces/:workspaceId/files/:fileId/comments/:comm
 
   const payload = await getDb().begin(async (tx) => {
     const sql = asDbClient(tx);
-    const comment = await deleteFlightDeckPgFileComment({
+    const deleted = await deleteFlightDeckPgFileComment({
       workspaceId: context.workspace.id,
       fileId: file.id,
       commentId: existing.id,
       actorId: context.actor.id,
       rowVersion,
     }, sql);
-    if (!comment) return null;
+    if (!deleted) return null;
+    const { comment, cascadedReplyCount } = deleted;
     const auditId = await writeFlightDeckPgAudit({
       workspaceId: context.workspace.id,
       actorId: context.actor.id,
@@ -9960,23 +9963,25 @@ flightDeckPgRouter.delete('/workspaces/:workspaceId/files/:fileId/comments/:comm
         file_id: file.id,
         file_version_id: comment.file_version_id,
         parent_comment_id: comment.parent_comment_id,
+        cascaded_reply_count: cascadedReplyCount,
         row_version: comment.row_version,
       },
     }, sql);
     const outbox = await createFlightDeckPgFileOutboxEvent({
       workspaceId: context.workspace.id,
-      scopeId: comment.scope_id,
-      channelId: comment.channel_id,
+      scopeId: file.scope_id,
+      channelId: file.channel_id,
       actorId: context.actor.id,
       eventType: 'flightdeck_pg.file_comment.deleted',
-      entityId: comment.id,
-      operation: 'deleted',
-      entityRowVersion: comment.row_version,
+      entityId: file.id,
+      operation: 'updated',
+      entityRowVersion: file.row_version,
       payload: {
         file_id: file.id,
         file_version_id: comment.file_version_id,
         comment_id: comment.id,
         parent_comment_id: comment.parent_comment_id,
+        cascaded_reply_count: cascadedReplyCount,
       },
     }, sql);
     return { comment, auditId, outbox };

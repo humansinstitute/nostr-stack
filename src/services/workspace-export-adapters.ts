@@ -36,6 +36,15 @@ const targetFamily: Record<string, string> = { message: 'message', task: 'task',
 const onWorkroom = (child: string) => `${child} t JOIN flightdeck_pg_workrooms w ON w.workspace_id=t.workspace_id AND w.id=t.workroom_id`;
 
 export const EXPORT_ADAPTERS: Adapter[] = [
+  // File comments follow the same channel file.read / channel.read rule as GET /files/:fileId/comments.
+  { table: 'flightdeck_pg_file_comments',
+    from: 'flightdeck_pg_file_comments t JOIN flightdeck_pg_files f ON f.workspace_id=t.workspace_id AND f.id=t.file_id LEFT JOIN flightdeck_pg_file_comments root ON root.workspace_id=t.workspace_id AND root.file_id=t.file_id AND root.id=t.parent_comment_id',
+    key: 't.id::text',
+    where: 't.deleted_at IS NULL AND f.deleted_at IS NULL AND f.archived_at IS NULL AND (t.parent_comment_id IS NULL OR (root.id IS NOT NULL AND root.deleted_at IS NULL))',
+    channel: 'f.channel_id',
+    rule: 'custom',
+    allow: async (row, ctx) => ctx.visible({ family: 'file', id: String(row.file_id), operation: 'upsert', position: '0', bytes: 0, row: { channel_id: row._channel } }),
+    refs: r => [{ f: 'file', i: String(r.file_id) }, ...(r.parent_comment_id ? [{ f: 'table:flightdeck_pg_file_comments', i: String(r.parent_comment_id) }] : [])] },
   { table: 'flightdeck_pg_reactions', from: 'flightdeck_pg_reactions t', key: 't.id::text', where: 't.deleted_at IS NULL', channel: 't.channel_id', rule: 'channel',
     refs: r => (targetFamily[r.target_type] ? [{ f: targetFamily[r.target_type]!, i: String(r.target_id) }] : []) },
   { table: 'flightdeck_pg_task_watchers', from: 'flightdeck_pg_task_watchers t', key: "t.task_id::text||':'||t.actor_id::text", where: 't.deleted_at IS NULL', channel: 't.channel_id', rule: 'task',

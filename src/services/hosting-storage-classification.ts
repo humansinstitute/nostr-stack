@@ -18,7 +18,7 @@ export const BILLABLE_STORAGE_TABLES = [
   'flightdeck_pg_daily_note_versions', 'flightdeck_pg_daily_notes', 'flightdeck_pg_daily_scope_agent_access', 'flightdeck_pg_doc_comments',
   'flightdeck_pg_doc_recovery_versions', 'flightdeck_pg_doc_versions', 'flightdeck_pg_docs', 'flightdeck_pg_drive_shares',
   'flightdeck_pg_event_subscription_agents', 'flightdeck_pg_feed_item_states', 'flightdeck_pg_feed_subscriptions',
-  'flightdeck_pg_file_folders', 'flightdeck_pg_file_versions', 'flightdeck_pg_files', 'flightdeck_pg_group_edges',
+  'flightdeck_pg_file_comments', 'flightdeck_pg_file_folders', 'flightdeck_pg_file_versions', 'flightdeck_pg_files', 'flightdeck_pg_group_edges',
   'flightdeck_pg_group_memberships', 'flightdeck_pg_groups', 'flightdeck_pg_invocations', 'flightdeck_pg_messages',
   'flightdeck_pg_napplet_bundles', 'flightdeck_pg_napplet_collections', 'flightdeck_pg_napplet_installations',
   'flightdeck_pg_napplet_releases', 'flightdeck_pg_napplets', 'flightdeck_pg_notification_categories',

@@ -36,6 +36,7 @@ export type FileCommentAnchor = {
   text_quote?: string;
   text_prefix?: string;
   text_suffix?: string;
+  attr_fingerprint?: string;
   file_version_id?: string;
   file_version_number?: number;
   version_digest?: string;
@@ -141,6 +142,7 @@ export function validateFileCommentAnchor(
   const textQuote = boundedOptionalString(obj, 'text_quote', 240, errors);
   const textPrefix = boundedOptionalString(obj, 'text_prefix', 120, errors);
   const textSuffix = boundedOptionalString(obj, 'text_suffix', 120, errors);
+  const attrFingerprint = boundedOptionalString(obj, 'attr_fingerprint', 256, errors);
   const versionDigest = boundedOptionalString(obj, 'version_digest', 64, errors)?.toLowerCase();
   if (versionDigest && !SHA256_RE.test(versionDigest)) {
     errors.push({ path: 'anchor.version_digest', code: 'invalid', message: 'anchor.version_digest must be a 64-char sha256 hex string' });
@@ -183,6 +185,7 @@ export function validateFileCommentAnchor(
     ...(textQuote ? { text_quote: textQuote } : {}),
     ...(textPrefix ? { text_prefix: textPrefix } : {}),
     ...(textSuffix ? { text_suffix: textSuffix } : {}),
+    ...(attrFingerprint ? { attr_fingerprint: attrFingerprint } : {}),
     file_version_id: version.id,
     file_version_number: version.versionNumber,
     ...(versionDigest ? { version_digest: versionDigest } : {}),
@@ -246,7 +249,10 @@ export async function listFlightDeckPgFileComments(
   sql: DbClient = getDb(),
 ): Promise<FlightDeckPgFileCommentRow[]> {
   const versionFilter = input.versionId ? sql`AND c.file_version_id = ${input.versionId}` : sql``;
-  const statusFilter = input.status ? sql`AND c.comment_status = ${input.status}` : sql``;
+  // Filter by the discussion root's status so resolved roots never leave orphaned open replies.
+  const statusFilter = input.status
+    ? sql`AND COALESCE(root.comment_status, c.comment_status) = ${input.status}`
+    : sql``;
   const cursorFilter = input.afterCreatedAt && input.afterId
     ? sql`AND (c.created_at, c.id) > (${input.afterCreatedAt}, ${input.afterId})`
     : sql``;
@@ -258,6 +264,8 @@ export async function listFlightDeckPgFileComments(
       ca.npub AS created_by_actor_npub,
       ua.npub AS updated_by_actor_npub
     FROM flightdeck_pg_file_comments c
+    LEFT JOIN flightdeck_pg_file_comments root
+      ON root.workspace_id = c.workspace_id AND root.file_id = c.file_id AND root.id = c.parent_comment_id
     LEFT JOIN flightdeck_pg_file_versions v
       ON v.workspace_id = c.workspace_id AND v.id = c.file_version_id
     LEFT JOIN flightdeck_pg_actors ca ON ca.id = c.created_by_actor_id
@@ -265,6 +273,7 @@ export async function listFlightDeckPgFileComments(
     WHERE c.workspace_id = ${input.workspaceId}
       AND c.file_id = ${input.fileId}
       AND c.deleted_at IS NULL
+      AND (c.parent_comment_id IS NULL OR (root.id IS NOT NULL AND root.deleted_at IS NULL))
       ${versionFilter}
       ${statusFilter}
       ${cursorFilter}
@@ -324,8 +333,18 @@ export async function findFlightDeckPgFileCommentByClientRequestId(
   return row ?? null;
 }
 
+function replayPayloadMatches(
+  existing: FlightDeckPgFileCommentRow,
+  candidate: { body: string; parentCommentId: string | null; fileVersionId: string },
+): boolean {
+  return existing.body === candidate.body
+    && (existing.parent_comment_id ?? null) === (candidate.parentCommentId ?? null)
+    && existing.file_version_id === candidate.fileVersionId;
+}
+
 export type CreateFileCommentResult =
   | { status: 'created'; comment: FlightDeckPgFileCommentRow; replayed: boolean }
+  | { status: 'idempotency_conflict' }
   | { status: 'parent_not_found' }
   | { status: 'nested_reply_not_allowed' }
   | { status: 'version_not_found' }
@@ -345,18 +364,6 @@ export async function createFlightDeckPgFileComment(
   },
   sql: DbClient = getDb(),
 ): Promise<CreateFileCommentResult> {
-  if (input.clientRequestId) {
-    const existing = await findFlightDeckPgFileCommentByClientRequestId({
-      workspaceId: input.workspaceId,
-      fileId: input.file.id,
-      actorId: input.actorId,
-      clientRequestId: input.clientRequestId,
-    }, sql);
-    if (existing) {
-      return { status: 'created', comment: existing, replayed: true };
-    }
-  }
-
   let resolvedVersionId: string;
   let resolvedAnchor: Record<string, unknown>;
 
@@ -388,6 +395,7 @@ export async function createFlightDeckPgFileComment(
     resolvedAnchor = validated.anchor;
   }
 
+  // Atomic idempotent insert: simultaneous retries with the same client_request_id never abort the transaction.
   const [inserted] = await sql<FlightDeckPgFileCommentRow[]>`
     INSERT INTO flightdeck_pg_file_comments (
       workspace_id,
@@ -419,8 +427,31 @@ export async function createFlightDeckPgFileComment(
       ${input.actorId},
       ${input.actorId}
     )
+    ON CONFLICT (workspace_id, file_id, created_by_actor_id, client_request_id)
+      WHERE client_request_id IS NOT NULL
+      DO NOTHING
     RETURNING *
   `;
+
+  if (!inserted && input.clientRequestId) {
+    const existing = await findFlightDeckPgFileCommentByClientRequestId({
+      workspaceId: input.workspaceId,
+      fileId: input.file.id,
+      actorId: input.actorId,
+      clientRequestId: input.clientRequestId,
+    }, sql);
+    if (existing) {
+      if (!replayPayloadMatches(existing, {
+        body: input.body,
+        parentCommentId: input.parentCommentId ?? null,
+        fileVersionId: resolvedVersionId,
+      })) {
+        return { status: 'idempotency_conflict' };
+      }
+      return { status: 'created', comment: existing, replayed: true };
+    }
+  }
+
   const hydrated = await resolveFlightDeckPgFileComment(input.workspaceId, input.file.id, inserted!.id, sql);
   return { status: 'created', comment: hydrated ?? inserted!, replayed: false };
 }
@@ -462,11 +493,10 @@ export async function deleteFlightDeckPgFileComment(
     fileId: string;
     commentId: string;
     actorId: string;
-    rowVersion: number | null;
+    rowVersion: number;
   },
   sql: DbClient = getDb(),
-): Promise<FlightDeckPgFileCommentRow | null> {
-  const versionClause = input.rowVersion === null ? sql`` : sql`AND row_version = ${input.rowVersion}`;
+): Promise<{ comment: FlightDeckPgFileCommentRow; cascadedReplyCount: number } | null> {
   const [deleted] = await sql<FlightDeckPgFileCommentRow[]>`
     UPDATE flightdeck_pg_file_comments
     SET
@@ -478,8 +508,27 @@ export async function deleteFlightDeckPgFileComment(
       AND file_id = ${input.fileId}
       AND id = ${input.commentId}
       AND deleted_at IS NULL
-      ${versionClause}
+      AND row_version = ${input.rowVersion}
     RETURNING *
   `;
-  return deleted ?? null;
+  if (!deleted) return null;
+  let cascadedReplyCount = 0;
+  if (deleted.parent_comment_id === null) {
+    // Cascade soft-delete thread replies so no reply is stranded with an invisible parent.
+    const cascaded = await sql<{ id: string }[]>`
+      UPDATE flightdeck_pg_file_comments
+      SET
+        deleted_at = NOW(),
+        updated_by_actor_id = ${input.actorId},
+        row_version = row_version + 1,
+        updated_at = NOW()
+      WHERE workspace_id = ${input.workspaceId}
+        AND file_id = ${input.fileId}
+        AND parent_comment_id = ${deleted.id}
+        AND deleted_at IS NULL
+      RETURNING id
+    `;
+    cascadedReplyCount = cascaded.length;
+  }
+  return { comment: deleted, cascadedReplyCount };
 }
