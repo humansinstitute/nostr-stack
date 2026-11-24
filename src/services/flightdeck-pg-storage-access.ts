@@ -463,3 +463,12 @@ export async function hasFlightDeckPgStorageAuthority(storageObjectId: string, s
   ) AS linked`;
   return row?.linked === true;
 }
+
+/** The read gate shared by `GET /api/v4/storage/{id}/content` and the migration export: typed workspace resources use their current
+ * channel ACL, anything else the generic storage contract. */
+export async function resolveReadablePrivateStorageObject(objectId: string, actorNpub: string) {
+  if (await hasFlightDeckPgStorageAuthority(objectId)) {
+    return resolveReadableFlightDeckPgBlossomObject({ actorNpub, storageObjectId: objectId });
+  }
+  return canAccessStorageObject(objectId, actorNpub);
+}

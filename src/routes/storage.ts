@@ -4,7 +4,6 @@ import { requireNip98AuthResolved } from '../auth';
 import { getInsufficientCreditsBlock } from '../services/billing';
 import {
   storageBlossomMetadata,
-  canAccessStorageObject,
   completeStorageObject,
   getStorageDownloadUrl,
   getStorageObject,
@@ -14,16 +13,9 @@ import {
   writeStorageObject,
 } from '../services/storage';
 import type { CompleteStorageInput, PrepareStorageInput } from '../types';
-import { resolveReadableFlightDeckPgBlossomObject, hasFlightDeckPgStorageAuthority } from '../services/flightdeck-pg-storage-access';
+import { resolveReadablePrivateStorageObject } from '../services/flightdeck-pg-storage-access';
 
 export const storageRouter = new Hono();
-
-async function resolveReadablePrivateStorageObject(objectId: string, actorNpub: string) {
-  if (await hasFlightDeckPgStorageAuthority(objectId)) {
-    return resolveReadableFlightDeckPgBlossomObject({ actorNpub, storageObjectId: objectId });
-  }
-  return canAccessStorageObject(objectId, actorNpub);
-}
 
 storageRouter.post('/prepare', async (c) => {
   const auth = await requireNip98AuthResolved(c);

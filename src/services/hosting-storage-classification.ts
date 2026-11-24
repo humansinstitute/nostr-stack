@@ -56,6 +56,7 @@ export const EXCLUDED_STORAGE_TABLES: Record<string, string> = {
   flightdeck_pg_notification_cursors: 'ephemeral', flightdeck_pg_edit_leases: 'ephemeral', flightdeck_pg_channel_move_previews: 'ephemeral',
   flightdeck_pg_member_removal_previews: 'ephemeral', managed_storage_previews: 'ephemeral', flightdeck_pg_wapp_install_intents: 'ephemeral',
   flightdeck_pg_resource_view_state_rollouts: 'ephemeral', git_capabilities: 'ephemeral',
+  workspace_exports: 'ephemeral', workspace_export_keys: 'ephemeral', workspace_export_assets: 'ephemeral',
   // Delivery queues and idempotency ledgers.
   flightdeck_pg_outbox_events: 'queue', flightdeck_pg_notification_alerts: 'queue', flightdeck_pg_notification_deliveries: 'queue',
   flightdeck_pg_notification_events: 'queue', flightdeck_pg_notification_intake: 'queue', flightdeck_pg_notification_items: 'queue',

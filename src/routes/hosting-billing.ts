@@ -9,12 +9,35 @@ import { allocateWorkspaceCredit, configureStorageRate, enrollWorkspaceBilling, 
 import { readStoredMetering } from '../services/hosting-metering';
 import { createHostingCheckout, receiveHostingStripeWebhook } from '../services/hosting-stripe';
 import { accountStorageSummary, workspaceStorageHours } from '../services/hosting-storage';
+import { finalizeWorkspaceExport, readWorkspaceExportPage, readWorkspaceExportStatus, startWorkspaceExport } from '../services/workspace-export';
 export const hostingBillingRouter=new Hono();
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 hostingBillingRouter.post('/stripe/webhook',async c=>{
   try {return c.json(await receiveHostingStripeWebhook(Buffer.from(await c.req.arrayBuffer()),c.req.header('stripe-signature')??null));}
   catch(e){if(e instanceof HostingError)return c.json({code:e.code,error:e.message},e.status as any);throw e;}
 });
+// Read-only migration export (not a backup). Registered outside the PG write boundary so it stays available when the workspace is
+// read-only for insufficient funds; it only ever reads what the signed-in member is currently authorized to read.
+const exportGuard=(handler:(c:any)=>Promise<Response>)=>async(c:any)=>{
+  c.header('Cache-Control','private, no-store');
+  try{return await handler(c);}catch(e){if(e instanceof HostingError)return c.json({code:e.code,error:e.message},e.status as any);throw e;}
+};
+async function exportMutation(c:any){
+  const raw=await c.req.text();if(Buffer.byteLength(raw)>1024)throw new HostingError(400,'body_too_large');
+  const proof=await verifyStrictNip98Mutation(c.req.header('authorization')??null,c.req.raw,raw);
+  if(!proof.ok)throw new HostingError(401,proof.reasonCode);
+  if(proof.userNpub!==proof.signerNpub)throw new HostingError(403,'direct_user_signature_required');
+  return proof.userNpub as string;
+}
+async function exportReader(c:any){const auth=await requireNip98AuthResolved(c);if(auth instanceof Response)throw new HostingError(401,'nip98_auth_required');return auth.userNpub as string;}
+hostingBillingRouter.post('/workspaces/:workspaceId/migration-export',exportGuard(async c=>c.json(await startWorkspaceExport(c.req.param('workspaceId'),await exportMutation(c)),201)));
+hostingBillingRouter.get('/workspaces/:workspaceId/migration-export/:exportId',exportGuard(async c=>c.json(await readWorkspaceExportStatus(c.req.param('workspaceId'),c.req.param('exportId'),await exportReader(c)))));
+hostingBillingRouter.get('/workspaces/:workspaceId/migration-export/:exportId/page',exportGuard(async c=>c.json(await readWorkspaceExportPage(c.req.param('workspaceId'),c.req.param('exportId'),await exportReader(c),{section:c.req.query('section'),cursor:c.req.query('cursor'),limit:c.req.query('limit')}))));
+hostingBillingRouter.post('/workspaces/:workspaceId/migration-export/:exportId/finalize',exportGuard(async c=>{
+  const actor=await exportMutation(c);
+  const result=await finalizeWorkspaceExport(c.req.param('workspaceId'),c.req.param('exportId'),actor);
+  return result.complete?c.json({manifest:result.manifest}):c.json({code:'export_incomplete',error:'Export is not complete',manifest:result.manifest},409);
+}));
 hostingBillingRouter.all('/workspaces/:workspaceId/:operation',async c=> {
   c.header('Cache-Control','private, no-store');
   try {

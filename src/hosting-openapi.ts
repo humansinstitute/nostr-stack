@@ -120,3 +120,38 @@ hostingPaths['/api/v4/hosting-billing/workspaces/{workspaceId}/storage'] = { get
   parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: uuid }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } }],
   responses: { '200': response({ oneOf: [ref('HostingStorageSummary'), ref('HostingWorkspaceStorageScope')] }), ...errors },
 } };
+
+// ---- Read-only migration export (docs/contract/workspace-migration-export-v1.md) -------------------------------------------
+const exportParams = [{ name: 'workspaceId', in: 'path', required: true, schema: uuid }, { name: 'exportId', in: 'path', required: true, schema: uuid }];
+const exportErrors = { ...errors, '410': { description: 'Export session expired' }, '413': { description: 'A single item exceeds the export item limit; the export fails closed' }, '429': { description: 'Too many open export sessions' } };
+const exportSections = { type: 'object', additionalProperties: object({ items: { type: 'integer' }, done: { type: 'boolean' } }) };
+const exportProgress = object({ export_id: uuid, workspace_id: uuid, section: { enum: ['records', 'history', 'assets', 'complete'] }, as_of: object({ position: { type: 'string' }, epoch: uuid, access_revision: { type: 'string' } }),
+  started_at: dateTime, expires_at: dateTime, finalized: { type: 'boolean' }, sections: exportSections });
+const exportManifest = { type: 'object', description: 'Completeness manifest. `status` is complete only when nothing is missing, inconsistent or unexported; incomplete_reasons lists writes_during_export, dangling_relationships, asset_issues and uncovered_content.', required: ['version', 'export_id', 'workspace_id', 'scope', 'status', 'incomplete_reasons', 'sections', 'integrity', 'coverage'], properties: {
+  version: { const: 1 }, export_id: uuid, workspace_id: uuid, scope: { const: 'actor_visible' }, as_of: { type: 'object' }, finalized_at: dateTime,
+  sections: { type: 'object', additionalProperties: object({ items: { type: 'integer' }, bytes: { type: 'integer' }, chain: { type: 'string', pattern: '^[0-9a-f]{64}$' } }) },
+  record_families: { type: 'object', additionalProperties: { type: 'integer' } },
+  integrity: { type: 'object', properties: { consistent: { type: 'boolean' }, dangling_relationships: { type: 'array', items: { type: 'object' } }, asset_issues: { type: 'object', additionalProperties: { type: 'integer' } }, exported_scope_complete: { type: 'boolean' } } },
+  coverage: { type: 'object', properties: { record_families: { type: 'array', items: { type: 'string' } }, history_tables: { type: 'array', items: { type: 'string' } }, uncovered: { type: 'array', items: { type: 'object' } }, uncovered_required: { type: 'array', items: { type: 'object' } } } },
+  status: { enum: ['complete', 'incomplete'] }, incomplete_reasons: { type: 'array', items: { enum: ['writes_during_export', 'dangling_relationships', 'asset_issues', 'uncovered_content'] } } } };
+hostingPaths['/api/v4/hosting-billing/workspaces/{workspaceId}/migration-export'] = { post: {
+  tags: ['Billing'], summary: 'Open a bounded read-only migration export session', security: [{ nip98: [] }],
+  description: 'Any workspace member, with a direct user signature. Pins the committed record clock. The export contains only what the member can currently read under the existing channel/Docs/Files ACL and is NOT a backup or an owner-wide dump. Available while the workspace is read-only for insufficient funds. At most 3 open sessions per member and workspace; sessions expire after 7 days.',
+  parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: uuid }],
+  responses: { '201': response({ type: 'object', properties: { export_id: uuid, scope: { const: 'actor_visible' }, coverage: { type: 'object' }, bounds: { type: 'object' } } }), ...(exportErrors as any) },
+} };
+hostingPaths['/api/v4/hosting-billing/workspaces/{workspaceId}/migration-export/{exportId}'] = { get: {
+  tags: ['Billing'], summary: 'Export session progress and, once finalized, its outcome', security: [{ nip98: [] }], parameters: exportParams,
+  responses: { '200': response({ allOf: [exportProgress, { type: 'object', properties: { outcome: { oneOf: [{ type: 'null' }, exportManifest] } } }] }), ...(exportErrors as any) },
+} };
+hostingPaths['/api/v4/hosting-billing/workspaces/{workspaceId}/migration-export/{exportId}/page'] = { get: {
+  tags: ['Billing'], summary: 'One page of an export section (records, then history, then assets)', security: [{ nip98: [] }],
+  description: 'Sections are traversed in order with server-held progress. Send the previous page\'s next_cursor to advance; resending the cursor of the page just delivered replays it; anything else is 409 cursor_invalid. Pages carry at most 200 items and 1 MiB (a single record up to 8 MiB). page.digest is sha256 of the page\'s item identities joined by newline (record:family:id:position, doc_version:doc:row_version, file_version:file:version, doc_recovery_version:id:0, daily_note_version:note:row_version, asset:object:status:sha256) and progress.chain chains page digests from sha256("nstack-export-v1"). Assets report verified, missing_metadata, workspace_mismatch, upload_incomplete, not_readable, missing_bytes, size_mismatch, hash_mismatch or unverified; bytes are fetched from the item\'s content_path under the existing storage ACL.',
+  parameters: [...exportParams, { name: 'section', in: 'query', required: true, schema: { enum: ['records', 'history', 'assets'] } }, { name: 'cursor', in: 'query', schema: { type: 'string' } }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200 } }],
+  responses: { '200': response({ type: 'object', properties: { export_id: uuid, section: { type: 'string' }, items: { type: 'array', items: { type: 'object' } }, next_cursor: { type: ['string', 'null'] }, section_complete: { type: 'boolean' }, page: object({ count: { type: 'integer' }, digest: { type: 'string' } }), progress: object({ items: { type: 'integer' }, chain: { type: 'string' } }) } }), ...(exportErrors as any) },
+} };
+hostingPaths['/api/v4/hosting-billing/workspaces/{workspaceId}/migration-export/{exportId}/finalize'] = { post: {
+  tags: ['Billing'], summary: 'Close the session and return the completeness manifest', security: [{ nip98: [] }], parameters: exportParams,
+  description: '200 only when the manifest status is complete. Otherwise 409 export_incomplete carries the same manifest: missing or altered assets, writes during the export, relationships whose parent was not readable, and customer content families the export does not yet deliver all fail the export rather than producing a partial backup. Idempotent.',
+  responses: { '200': response({ type: 'object', properties: { manifest: exportManifest } }), ...(exportErrors as any) },
+} };
