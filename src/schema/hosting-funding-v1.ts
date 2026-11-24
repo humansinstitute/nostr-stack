@@ -78,6 +78,9 @@ CREATE TABLE IF NOT EXISTS hosting_lightning_quotes (
  CHECK(state='issuing' OR (invoice IS NOT NULL AND payment_hash IS NOT NULL AND amount_sats IS NOT NULL AND expires_at IS NOT NULL AND payee_ref IS NOT NULL AND rate_source IS NOT NULL AND rate_quoted_at IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS hosting_lightning_quotes_intent ON hosting_lightning_quotes(intent_id);
+-- A quote with no intent is a repeat account top-up: it credits the owner account only and starts nothing else.
+ALTER TABLE hosting_lightning_quotes ALTER COLUMN intent_id DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS hosting_lightning_quotes_topup ON hosting_lightning_quotes(account_id) WHERE intent_id IS NULL;
 -- Customer payout invoices are claimed globally, once, by payment hash BEFORE any provider payout is attempted. The claim is made in the
 -- same transaction as the refund hold, survives every outcome (pending, unknown, failed, succeeded) and is never released or guessed:
 -- a second request, settlement or account for the same invoice conflicts on the primary key instead of reaching the provider.

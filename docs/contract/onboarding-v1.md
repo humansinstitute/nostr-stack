@@ -117,6 +117,20 @@ triggers are installed; they install at start-up when `ONBOARDING_ENABLED=true`.
   (the `storage_protection` source is registered) and live refund acceptance remain release gates; see
   [funding-reversals-v1.md](funding-reversals-v1.md).
 
+## Repeat account top-ups
+
+After the owner account backs a provisioned workspace (`hosting_workspace_accounts`), the owner can add credit
+without a new intent, workspace, invitation seat or introduction. Human direct-signature routes, gated by
+`ONBOARDING_ENABLED`; amounts are US$5 to US$10,000 (`amount_cents` 500..1000000):
+
+- `GET /api/v4/onboarding/topups` — credited top-ups (settlements with no intent), open Lightning quotes, unfulfilled checkout orders.
+- `POST /topups/checkout` `{idempotency_key, return_url, amount_cents}` — Stripe Checkout (test mode) bound to the account; the order carries no `intent_id`.
+- `POST /topups/lightning/quote` `{idempotency_key, amount_cents}` and `POST /topups/lightning/quotes/{quoteId}/refresh` — same provider port and verification as intent quotes; the quote has `intent_id: null` (at most 5 open per account).
+
+Credit still happens only through `recordSettlement` (one immutable settlement, one ledger credit per verified
+payment, replay and concurrency safe). `404 account_not_found` / `409 account_not_provisioned` otherwise.
+A top-up nets against reversal debt first and clears `depleted_at` only when the balance turns positive.
+
 ## Validation
 
 ```sh

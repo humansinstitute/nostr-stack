@@ -4,6 +4,7 @@ import { getDb } from '../db';
 import { HostingError } from './hosting-billing';
 import { applyAdjustment, availableRefundableUnits, missingFundingReserves, recordSettlement, refundableCents, UNITS_PER_CENT } from './hosting-funding';
 import { markOnboardingFunded, requireOnboardingEnabled } from './onboarding';
+import { TOPUP_MAX_CENTS, TOPUP_MIN_CENTS } from './hosting-topup-limits';
 
 type Db = ReturnType<typeof getDb>;
 const HASH = /^[0-9a-f]{64}$/;
@@ -48,7 +49,7 @@ export function lightningProvider(): LightningProvider {
 }
 
 const quoteView = (q: any) => ({
-  id: q.id as string, intent_id: q.intent_id as string, state: q.state as string, amount_cents: q.amount_cents as number,
+  id: q.id as string, intent_id: (q.intent_id ?? null) as string | null, state: q.state as string, amount_cents: q.amount_cents as number,
   amount_sats: q.amount_sats === null ? null : Number(q.amount_sats), invoice: q.invoice as string | null, payment_hash: q.payment_hash as string | null,
   expires_at: q.expires_at ? new Date(q.expires_at).toISOString() : null,
   rate: q.rate_source ? { source: q.rate_source as string, quoted_at: new Date(q.rate_quoted_at).toISOString() } : null,
@@ -84,6 +85,38 @@ export async function issueLightningQuote(intentId: string, ownerNpub: string, b
   });
   return quoteView(held.state === 'issuing' ? await completeIssuance(held, db, p) : held);
 }
+const MAX_OPEN_TOPUP_QUOTES = 5;
+/** Issues (or replays) a Lightning quote for a repeat top-up of the owner's account. Not tied to any intent: a verified settlement only
+ * credits the account ledger. The caller (service layer) has already proved the account is the owner's and is provisioned. */
+export async function issueTopupLightningQuote(accountId: string, body: unknown, db: Db = getDb(), p: LightningProvider = lightningProvider()) {
+  requireOnboardingEnabled();
+  const b = body as any;
+  if (!b || Object.keys(b).sort().join(',') !== 'amount_cents,idempotency_key' || typeof b.idempotency_key !== 'string' || !KEY.test(b.idempotency_key)
+    || !Number.isSafeInteger(b.amount_cents) || b.amount_cents < TOPUP_MIN_CENTS || b.amount_cents > TOPUP_MAX_CENTS) throw new HostingError(400, 'invalid_quote_request');
+  const digest = sha256(JSON.stringify(['topup', accountId, b.amount_cents, b.idempotency_key]));
+  const held = await db.begin(async transaction => {
+    const tx = transaction as unknown as Db;
+    await tx`SELECT id FROM hosting_accounts WHERE id=${accountId} FOR UPDATE`;
+    const [prior] = await tx`SELECT * FROM hosting_lightning_quotes WHERE account_id=${accountId} AND idempotency_key=${b.idempotency_key} FOR UPDATE`;
+    if (prior) {
+      if (prior.request_sha256 !== digest || prior.intent_id !== null) throw new HostingError(409, 'idempotency_conflict');
+      return prior;
+    }
+    const [{ open }] = await tx`SELECT count(*)::int AS open FROM hosting_lightning_quotes WHERE account_id=${accountId} AND intent_id IS NULL AND state IN ('issuing','open')`;
+    if (open >= MAX_OPEN_TOPUP_QUOTES) throw new HostingError(429, 'too_many_open_topup_quotes');
+    const [row] = await tx`INSERT INTO hosting_lightning_quotes(account_id,intent_id,idempotency_key,request_sha256,amount_cents) VALUES(${accountId},NULL,${b.idempotency_key},${digest},${b.amount_cents}) RETURNING *`;
+    return row!;
+  });
+  return quoteView(held.state === 'issuing' ? await completeIssuance(held, db, p) : held);
+}
+/** Owner-visible top-up quote; any other identity or an intent quote gets the same neutral 404. */
+export async function readTopupLightningQuote(quoteId: string, accountId: string, db: Db = getDb()) {
+  if (!UUID.test(quoteId)) throw new HostingError(404, 'quote_not_found');
+  const [q] = await db`SELECT * FROM hosting_lightning_quotes WHERE id=${quoteId} AND account_id=${accountId} AND intent_id IS NULL`;
+  if (!q) throw new HostingError(404, 'quote_not_found');
+  return q;
+}
+
 /** The provider call is idempotent per quote id, so a crash between issue and record is repaired by replaying the same request. */
 async function completeIssuance(held: any, db: Db, p: LightningProvider) {
   const issued = await p.issueInvoice({ orderRef: held.id, amountCents: held.amount_cents });

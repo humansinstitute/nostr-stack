@@ -5,6 +5,7 @@ import { createHostingCheckout, requestStripeRefund } from '../services/hosting-
 import { fundingReversalSummary } from '../services/hosting-funding';
 import { issueLightningQuote, readLightningQuote, reconcileOpenLightningQuotes, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
 import { getDb } from '../db';
+import { createTopupCheckout, issueTopupQuote, listTopups, refreshTopupQuote } from '../services/hosting-topup';
 import { accountStorageSummary } from '../services/hosting-storage';
 import {
   cancelIntent, createAgentOffer, createIntent, createInvite, intentForCheckout, inviteAvailability, listAgentOffers, listIntents, listInvites,
@@ -78,6 +79,12 @@ onboardingRouter.post('/intents/:id/provision', guard(async c => {
   const { actor } = await mutation(c);
   return c.json({ intent: await provisionIntent(c.req.param('id'), actor) });
 }));
+
+// Repeat account top-ups after provisioning. Account-level credit only: no intent, workspace, seat or introduction is created.
+onboardingRouter.get('/topups', guard(async c => c.json(await listTopups(await reader(c)))));
+onboardingRouter.post('/topups/checkout', guard(async c => { const { actor, body } = await mutation(c); return c.json(await createTopupCheckout(actor, body), 201); }));
+onboardingRouter.post('/topups/lightning/quote', guard(async c => { const { actor, body } = await mutation(c); return c.json({ quote: await issueTopupQuote(actor, body) }, 201); }));
+onboardingRouter.post('/topups/lightning/quotes/:quoteId/refresh', guard(async c => { const { actor } = await mutation(c); return c.json({ quote: await refreshTopupQuote(actor, c.req.param('quoteId')) }); }));
 
 // Platform-administrator invitation and offer management.
 onboardingRouter.get('/admin/invites', guard(async c => c.json({ invites: await listInvites(await reader(c)) })));

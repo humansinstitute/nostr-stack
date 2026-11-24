@@ -4,6 +4,7 @@ import { getDb } from '../db';
 import { HostingError } from './hosting-billing';
 import { applyAdjustment, availableRefundableUnits, missingFundingReserves, recordFundingEvent, recordSettlement, refundableCents, UNITS_PER_CENT } from './hosting-funding';
 import { markOnboardingFunded, ONBOARDING_MIN_FUNDING_CENTS } from './onboarding';
+import { TOPUP_MAX_CENTS, TOPUP_MIN_CENTS } from './hosting-topup-limits';
 type Db=ReturnType<typeof getDb>;
 export function hostingStripeClient() {
   const key=process.env.STRIPE_SECRET_KEY;
@@ -14,9 +15,9 @@ export function hostingStripeClient() {
   if(!key.startsWith('sk_test_')&&!key.startsWith('rk_test_'))throw new HostingError(503,'stripe_mode_mismatch');
   return new Stripe(key,{maxNetworkRetries:2,timeout:15000});
 }
-export async function createHostingCheckout(accountId:string,body:unknown,db:Db=getDb(),client=hostingStripeClient(),opts:{intentId?:string}={}) {
+export async function createHostingCheckout(accountId:string,body:unknown,db:Db=getDb(),client=hostingStripeClient(),opts:{intentId?:string;topup?:boolean}={}) {
   const b=body as any;
-  if(!b||Object.keys(b).sort().join(',')!=='amount_cents,idempotency_key,return_url'||!(opts.intentId?Number.isSafeInteger(b.amount_cents)&&b.amount_cents>=ONBOARDING_MIN_FUNDING_CENTS&&b.amount_cents<=1_000_000:[500,1000,2500,5000,10000].includes(b.amount_cents))
+  if(!b||Object.keys(b).sort().join(',')!=='amount_cents,idempotency_key,return_url'||!(opts.intentId?Number.isSafeInteger(b.amount_cents)&&b.amount_cents>=ONBOARDING_MIN_FUNDING_CENTS&&b.amount_cents<=1_000_000:opts.topup?Number.isSafeInteger(b.amount_cents)&&b.amount_cents>=TOPUP_MIN_CENTS&&b.amount_cents<=TOPUP_MAX_CENTS:[500,1000,2500,5000,10000].includes(b.amount_cents))
     ||typeof b.idempotency_key!=='string'||!/^[a-zA-Z0-9_-]{8,100}$/.test(b.idempotency_key)||typeof b.return_url!=='string')throw new HostingError(400,'invalid_checkout');
   const allowed=(process.env.HOSTING_STRIPE_RETURN_URLS||'').split(',').map(s=>s.trim());
   if(!allowed.includes(b.return_url))throw new HostingError(400,'return_url_not_allowed');
