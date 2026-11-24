@@ -29,8 +29,12 @@ describe('production deployment security contract', () => {
 
     expect(runtimeConfig).toContain("user: requiredEnv('DB_USER')");
     expect(runtimeConfig).toContain("password: requiredEnv('DB_PASSWORD')");
-    expect(runtimeConfig).toContain("adminPassword: requiredEnv('GRAPH_DB_ADMIN_PASSWORD')");
-    expect(runtimeConfig).toContain("appPassword: requiredEnv('GRAPH_DB_APP_PASSWORD')");
+    // Graph credentials are mandatory whenever the graph is enabled and never fall back to a built-in value when it is not
+    // (progressive setup lets a graph-less installation start). The production compose file above still requires all of them.
+    const graphEnabled = "/^(1|true|yes)$/i.test(process.env.GRAPH_ENABLED || '')";
+    for (const [field, name] of [['adminUser', 'GRAPH_DB_ADMIN_USER'], ['adminPassword', 'GRAPH_DB_ADMIN_PASSWORD'], ['appUser', 'GRAPH_DB_APP_USER'], ['appPassword', 'GRAPH_DB_APP_PASSWORD']]) {
+      expect(runtimeConfig).toContain(`${field}: (${graphEnabled} ? requiredEnv('${name}') : String(process.env.${name} || ''))`);
+    }
   });
 
   test('binds host-published Tower and MinIO ports to loopback by default', () => {
