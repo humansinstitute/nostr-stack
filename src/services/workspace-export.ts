@@ -5,6 +5,7 @@ import { recordVisibility, type RecordEntry } from './flightdeck-record-visibili
 import { resolveReadablePrivateStorageObject } from './flightdeck-pg-storage-access';
 import { getStorageObject, hashStorageBytes, statStorageBytes } from './storage';
 import { exportCoverage } from './workspace-export-coverage';
+import { adapterAllows, adapterContext, EXPORT_ADAPTERS, keyFamily } from './workspace-export-adapters';
 
 type Db = ReturnType<typeof getDb>;
 export const EXPORT_PAGE_ITEMS = 200;
@@ -15,7 +16,7 @@ export const EXPORT_MAX_OPEN_SESSIONS = 3;
 /** Objects larger than this cannot be re-hashed inside a request; they are reported `unverified`, never assumed intact. */
 export const EXPORT_ASSET_HASH_MAX_BYTES = 256 * 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const SECTIONS = ['records', 'history', 'assets'] as const;
+const SECTIONS = ['records', 'content', 'history', 'assets'] as const;
 const DONE = 'x-section-complete';
 export type ExportSection = typeof SECTIONS[number];
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -28,9 +29,9 @@ function decode<T>(cursor: string | null | undefined, check: (v: unknown) => v i
 }
 
 type SectionState = { through: string | null; prev: string | null; items: number; bytes: number; chain: string; done: boolean };
-type ExportState = { section: ExportSection | 'complete'; sections: Record<ExportSection, SectionState>; families: Record<string, number>; assetIssues: Record<string, number> };
+type ExportState = { section: ExportSection | 'complete'; sections: Record<ExportSection, SectionState>; families: Record<string, number>; tables: Record<string, number>; assetIssues: Record<string, number> };
 const emptySection = (): SectionState => ({ through: null, prev: null, items: 0, bytes: 0, chain: sha('nstack-export-v1'), done: false });
-const initialState = (): ExportState => ({ section: 'records', sections: { records: emptySection(), history: emptySection(), assets: emptySection() }, families: {}, assetIssues: {} });
+const initialState = (): ExportState => ({ section: 'records', sections: { records: emptySection(), content: emptySection(), history: emptySection(), assets: emptySection() }, families: {}, tables: {}, assetIssues: {} });
 
 /** Member viewer or a neutral refusal. The export only ever contains what this actor can currently read. */
 async function viewerFor(workspaceId: string, actorNpub: string, sql: Db) {
@@ -84,7 +85,7 @@ export async function readWorkspaceExportStatus(workspaceId: string, exportId: s
   return { ...progressView(row), outcome: row.outcome ?? null };
 }
 
-type Page = { items: unknown[]; identities: string[]; bytes: number; next: string | null; keys: { family: string; id: string }[]; assets: { object_id: string; family: string; id: string; role: string }[];
+type Page = { items: unknown[]; identities: string[]; bytes: number; next: string | null; keys: { family: string; id: string; refs?: { f: string; i: string }[] }[]; tables?: Record<string, number>; assets: { object_id: string; family: string; id: string; role: string }[];
   families?: Record<string, number>; assetIssues?: Record<string, number> };
 
 const objectRefs = (family: string, id: string, row: any) => {
@@ -119,6 +120,39 @@ async function recordsPage(exportId: string, workspaceId: string, viewer: Awaite
   }
   page.next = scanned.length <= limit && processed === window.length ? null : encode(last);
   return page;
+}
+
+/** Customer content outside the record-sync families (reactions, watchers, workrooms and their records, approvals, invocations, agent
+ * activity, canvases), each filtered by the rule of its existing read route; see workspace-export-adapters.ts. */
+async function contentPage(workspaceId: string, viewer: Awaited<ReturnType<typeof viewerFor>>, cursor: string | null, limit: number, sql: Db): Promise<Page> {
+  let [t, last] = decode(cursor, (v): v is [number, string] => Array.isArray(v) && v.length === 2 && Number.isInteger(v[0]) && v[0] >= 0 && v[0] < EXPORT_ADAPTERS.length && typeof v[1] === 'string') ?? [0, ''];
+  const visible = recordVisibility(workspaceId, viewer.actorId, { npub: viewer.npub, app_npub: viewer.workspace.app_npub }, sql);
+  const ctx = adapterContext({ workspaceId, actorId: viewer.actorId, npub: viewer.npub, appNpub: viewer.workspace.app_npub }, visible, sql);
+  for (; t < EXPORT_ADAPTERS.length; t++, last = '') {
+    const a = EXPORT_ADAPTERS[t]!;
+    const rows = await sql.unsafe(`SELECT ${a.key} AS k, to_jsonb(t) AS row, ${a.channel ?? 'NULL::uuid'} AS channel, octet_length(to_jsonb(t)::text) AS bytes FROM ${a.from}
+      WHERE t.workspace_id=$1 AND ${a.where ?? 'TRUE'} AND ${a.key} > $2 ORDER BY ${a.key} LIMIT ${limit + 1}`, [workspaceId, last]) as { k: string; row: any; channel: string | null; bytes: number }[];
+    if (!rows.length) continue;
+    const page: Page = { items: [], identities: [], bytes: 0, next: null, keys: [], assets: [], tables: {} };
+    const window = rows.slice(0, limit);
+    let processed = 0, lastKey = '';
+    for (const r of window) {
+      if (await adapterAllows(a, { ...r.row, _channel: r.channel }, ctx)) {
+        if (Number(r.bytes) > EXPORT_ITEM_MAX_BYTES) throw new HostingError(413, 'export_item_too_large');
+        if (page.items.length && page.bytes + Number(r.bytes) > EXPORT_PAGE_BYTES) break;
+        const refs = a.refs(r.row);
+        const row = a.omit ? Object.fromEntries(Object.entries(r.row).filter(([column]) => !a.omit!(column))) : r.row;
+        page.items.push({ kind: 'table_row', table: a.table, key: r.k, row });
+        page.identities.push(`table_row:${a.table}:${r.k}`);
+        page.bytes += Number(r.bytes); page.keys.push({ family: keyFamily(a.table), id: r.k, refs });
+        page.tables![a.table] = (page.tables![a.table] ?? 0) + 1;
+      }
+      processed++; lastKey = r.k;
+    }
+    page.next = rows.length > processed ? encode([t, lastKey]) : t < EXPORT_ADAPTERS.length - 1 ? encode([t + 1, '']) : null;
+    return page;
+  }
+  return { items: [], identities: [], bytes: 0, next: null, keys: [], assets: [] };
 }
 
 const HISTORY = [
@@ -228,9 +262,10 @@ export async function readWorkspaceExportPage(workspaceId: string, exportId: str
     const replaying = !advancing && mine.through !== null && cursor === mine.prev;
     if (!advancing && !replaying) throw new HostingError(409, 'cursor_invalid');
     const page = section === 'records' ? await recordsPage(exportId, workspaceId, viewer, cursor, limit, sql)
+      : section === 'content' ? await contentPage(workspaceId, viewer, cursor, limit, sql)
       : section === 'history' ? await historyPage(exportId, workspaceId, viewer, cursor, limit, sql)
       : await assetsPage(exportId, viewer, cursor, sql);
-    if (page.keys.length) await sql`INSERT INTO workspace_export_keys(export_id,workspace_id,family,id) SELECT ${exportId},${workspaceId},f,i FROM unnest(${page.keys.map(k => k.family)}::text[],${page.keys.map(k => k.id)}::text[]) AS t(f,i) ON CONFLICT DO NOTHING`;
+    if (page.keys.length) await sql`INSERT INTO workspace_export_keys(export_id,workspace_id,family,id,refs) SELECT ${exportId},${workspaceId},f,i,r::jsonb FROM unnest(${page.keys.map(k => k.family)}::text[],${page.keys.map(k => k.id)}::text[],${page.keys.map(k => JSON.stringify(k.refs ?? []))}::text[]) AS t(f,i,r) ON CONFLICT DO NOTHING`;
     if (page.assets.length) await sql`INSERT INTO workspace_export_assets(export_id,workspace_id,object_id,ref_family,ref_id,role)
       SELECT ${exportId},${workspaceId},o,f,i,r FROM unnest(${page.assets.map(a => a.object_id)}::uuid[],${page.assets.map(a => a.family)}::text[],${page.assets.map(a => a.id)}::text[],${page.assets.map(a => a.role)}::text[]) AS t(o,f,i,r) ON CONFLICT DO NOTHING`;
     const pageDigest = sha(page.identities.join('\n'));
@@ -238,6 +273,7 @@ export async function readWorkspaceExportPage(workspaceId: string, exportId: str
       // `through` is the cursor that fetches the next page; `prev` the one just delivered (replayable). A finished section has no next cursor.
       state.sections[section] = { through: page.next ?? DONE, prev: cursor, items: mine.items + page.items.length, bytes: mine.bytes + page.bytes, chain: chainNext(mine.chain, pageDigest), done: page.next === null };
       for (const [family, n] of Object.entries(page.families ?? {})) state.families[family] = (state.families[family] ?? 0) + n;
+      for (const [table, n] of Object.entries(page.tables ?? {})) state.tables[table] = (state.tables[table] ?? 0) + n;
       for (const [status, n] of Object.entries(page.assetIssues ?? {})) state.assetIssues[status] = (state.assetIssues[status] ?? 0) + n;
       state.section = SECTIONS.find(s => !state.sections[s].done) ?? 'complete';
       await sql`UPDATE workspace_exports SET state=${sql.json(state as any)} WHERE id=${exportId}`;
@@ -264,6 +300,11 @@ async function danglingEdges(exportId: string, workspaceId: string, sql: Db) {
         AND NOT EXISTS(SELECT 1 FROM workspace_export_keys p WHERE p.export_id=k.export_id AND p.family=${parent} AND p.id=c.row->>${field})`;
     if (r!.n > 0) out.push({ child, field, parent, count: r!.n, sample: r!.sample });
   }
+  const rest = await sql`SELECT k.family AS child,e->>'f' AS parent,count(*)::int AS n,(array_agg(k.id ORDER BY k.id))[1:5] AS sample
+    FROM workspace_export_keys k, jsonb_array_elements(k.refs) e
+    WHERE k.export_id=${exportId} AND k.refs<>'[]'::jsonb AND NOT EXISTS(SELECT 1 FROM workspace_export_keys p WHERE p.export_id=k.export_id AND p.family=e->>'f' AND p.id=e->>'i')
+    GROUP BY k.family,e->>'f' ORDER BY k.family,e->>'f'`;
+  for (const r of rest) out.push({ child: r.child, field: 'ref', parent: r.parent, count: r.n, sample: r.sample });
   return out;
 }
 
@@ -296,6 +337,7 @@ export async function finalizeWorkspaceExport(workspaceId: string, exportId: str
       finalized_at: new Date().toISOString(),
       sections: Object.fromEntries(SECTIONS.map(s => [s, { items: state.sections[s].items, bytes: state.sections[s].bytes, chain: state.sections[s].chain }])),
       record_families: state.families,
+      content_tables: state.tables,
       integrity: { consistent, dangling_relationships: dangling, asset_issues: state.assetIssues, exported_scope_complete: reasons.every(r => r === 'uncovered_content') },
       coverage,
       status: reasons.length ? 'incomplete' as const : 'complete' as const,

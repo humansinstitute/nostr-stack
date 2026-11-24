@@ -57,14 +57,14 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
   /** Drives a whole export through the service and verifies the client-side chain the manifest advertises. */
   async function run(actor: string, limit = 200) {
     const started = await startWorkspaceExport(ws, actor, db as any);
-    const seen: Record<string, any[]> = { records: [], history: [], assets: [] };
+    const seen: Record<string, any[]> = { records: [], content: [], history: [], assets: [] };
     const chains: Record<string, string> = {};
-    for (const section of ['records', 'history', 'assets'] as const) {
+    for (const section of ['records', 'content', 'history', 'assets'] as const) {
       let cursor: string | null = null, chain = sha('nstack-export-v1');
       for (let i = 0; i < 200; i++) {
         const page: any = await readWorkspaceExportPage(ws, started.export_id, actor, { section, cursor, limit }, db as any);
         seen[section]!.push(...page.items);
-        const identities = page.items.map((item: any) => item.kind === 'record' ? `record:${item.family}:${item.id}:${item.position}`
+        const identities = page.items.map((item: any) => item.kind === 'table_row' ? `table_row:${item.table}:${item.key}` : item.kind === 'record' ? `record:${item.family}:${item.id}:${item.position}`
           : item.kind === 'asset' ? `asset:${item.object_id}:${item.status}:${item.sha256_hex ?? ''}`
           : item.kind === 'doc_recovery_version' ? `${item.kind}:${item.row.id}:0`
           : item.kind === 'doc_version' ? `${item.kind}:${item.row.doc_id}:${item.row.row_version}`
@@ -78,7 +78,7 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
       chains[section] = chain;
     }
     const result = await finalizeWorkspaceExport(ws, started.export_id, actor, db as any);
-    for (const section of ['records', 'history', 'assets'] as const) {
+    for (const section of ['records', 'content', 'history', 'assets'] as const) {
       expect((result.manifest as any).sections[section]).toMatchObject({ items: seen[section]!.length, chain: chains[section] });
     }
     return { started, seen, ...result, manifest: result.manifest as any };
@@ -115,12 +115,38 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     const fileV1 = await object('file-v1', 'file bytes');
     [{ id: ids.file }] = await db`INSERT INTO flightdeck_pg_files(workspace_id,scope_id,channel_id,storage_object_id,display_name,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${scope},${open},${fileV1},'File',${ownerId},${ownerId}) RETURNING id` as any;
     await db`INSERT INTO flightdeck_pg_file_versions(workspace_id,file_id,version_number,storage_object_id,created_by_actor_id) VALUES(${ws},${ids.file},1,${fileV1},${ownerId})`;
-    await db`INSERT INTO flightdeck_pg_tasks(workspace_id,scope_id,channel_id,title,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${scope},${open},'Task',${ownerId},${ownerId})`;
+    [{ id: ids.task }] = await db`INSERT INTO flightdeck_pg_tasks(workspace_id,scope_id,channel_id,title,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${scope},${open},'Task',${ownerId},${ownerId}) RETURNING id` as any;
     // Closed channel: only the owner may read it.
     ids.secret = await message(closed, 'owner only');
     const secretDoc = await object('secret-doc', 'secret');
     [{ id: ids.secretDoc }] = await db`INSERT INTO flightdeck_pg_docs(workspace_id,scope_id,channel_id,title,storage_object_id,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${scope},${closed},'Secret',${secretDoc},${ownerId},${ownerId}) RETURNING id` as any;
     await db`INSERT INTO flightdeck_pg_doc_versions(workspace_id,doc_id,row_version,scope_id,channel_id,storage_object_id,title,actor_id,operation) VALUES(${ws},${ids.secretDoc},1,${scope},${closed},${secretDoc},'Secret',${ownerId},'created')`;
+
+    // Content outside the record families: each table follows the read rule of its own route.
+    await db`INSERT INTO flightdeck_pg_reactions(workspace_id,scope_id,channel_id,target_type,target_id,emoji,emoji_shortcode,reactor_actor_id,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${scope},${open},'message',${ids.m1},'thumbs_up',':thumbs_up:',${ownerId},${ownerId},${ownerId})`;
+    await db`INSERT INTO flightdeck_pg_task_watchers(workspace_id,scope_id,channel_id,task_id,actor_id,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${scope},${open},${ids.task},${ownerId},${ownerId},${ownerId})`;
+    const workroom = async (channel: string, title: string) => {
+      const [w] = await db`INSERT INTO flightdeck_pg_workrooms(workspace_id,scope_id,channel_id,title,goal,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${scope},${channel},${title},'goal',${ownerId},${ownerId}) RETURNING id`;
+      await db`INSERT INTO flightdeck_pg_workroom_participants(workspace_id,workroom_id,actor_npub,kind,role) VALUES(${ws},${w!.id},${owner},'human','contributor')`;
+      await db`INSERT INTO flightdeck_pg_workroom_events(workspace_id,workroom_id,scope_id,channel_id,event_type) VALUES(${ws},${w!.id},${scope},${channel},'created')`;
+      await db`INSERT INTO flightdeck_pg_workroom_links(workspace_id,workroom_id,scope_id,channel_id,link_type,target_type,external_url) VALUES(${ws},${w!.id},${scope},${channel},'external_url','external_url','https://example.test/pr/1')`;
+      return w!.id as string;
+    };
+    ids.workroom = await workroom(open, 'Open room'); ids.closedWorkroom = await workroom(closed, 'Closed room');
+    const approval = async (target: string, type: string) => (await db`INSERT INTO flightdeck_pg_approvals(workspace_id,target_type,target_id,action,requested_by_actor_id,requested_by_npub) VALUES(${ws},${type},${target},'merge',${ownerId},${owner}) RETURNING id`)[0]!.id as string;
+    ids.approvalOpen = await approval(ids.workroom, 'workroom'); ids.approvalClosed = await approval(ids.closedWorkroom, 'workroom'); ids.approvalDoc = await approval(ids.doc, 'doc');
+    const invocation = async (channel: string, recipients: unknown[]) => (await db`INSERT INTO flightdeck_pg_invocations(workspace_id,scope_id,channel_id,created_by_actor_id,prompt,recipients) VALUES(${ws},${scope},${channel},${ownerId},'please',${db.json(recipients as any)}) RETURNING id`)[0]!.id as string;
+    ids.invOpen = await invocation(open, []); ids.invRecipient = await invocation(closed, [{ npub: reader, type: 'person' }]); ids.invHidden = await invocation(closed, []);
+    [{ id: ids.thread }] = await db`INSERT INTO flightdeck_pg_threads(workspace_id,scope_id,channel_id,title,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${scope},${open},'Thread',${ownerId},${ownerId}) RETURNING id` as any;
+    [{ id: ids.activity }] = await db`INSERT INTO flightdeck_pg_agent_activities(workspace_id,scope_id,channel_id,thread_id,trigger_message_id,session_id,activity_id,agent_npub,publisher_actor_id,state,sequence,expires_at,lease_expires_at)
+      VALUES(${ws},${scope},${open},${ids.thread},${ids.m1},'sess','act-1',${owner},${ownerId},'completed',1,now()+interval '1 day',now()+interval '1 day') RETURNING id` as any;
+    await db`INSERT INTO flightdeck_pg_agent_activity_commentary(workspace_id,agent_activity_id,turn_id,activity_id,state,summary,sequence,delivery_cursor) VALUES(${ws},${ids.activity},'t1','act-1','working','did the thing',1,1)`;
+    const canvas = async (title: string, mode: string) => (await db`INSERT INTO flightdeck_pg_canvases(workspace_id,title,position,visibility_mode,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${title},1,${mode},${ownerId},${ownerId}) RETURNING id`)[0]!.id as string;
+    ids.canvasOpen = await canvas('Shared', 'workspace'); ids.canvasPrivate = await canvas('Private', 'restricted');
+    await db`INSERT INTO flightdeck_pg_canvas_visibility_principals(workspace_id,canvas_id,principal_type,principal_actor_id,created_by_actor_id) VALUES(${ws},${ids.canvasPrivate},'actor',${ownerId},${ownerId})`;
+    for (const c of [ids.canvasOpen, ids.canvasPrivate]) await db`INSERT INTO flightdeck_pg_canvas_elements(workspace_id,canvas_id,kind,layout,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${c},'text',${db.json({ x: 1 })},${ownerId},${ownerId})`;
+    await db`INSERT INTO flightdeck_pg_canvas_naplets(workspace_id,canvas_id,source_type,source_id,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${ids.canvasOpen},'document',${ids.doc},${ownerId},${ownerId})`;
+    for (const viewer of [ownerId, readerId]) await db`INSERT INTO flightdeck_pg_canvas_orders(workspace_id,viewer_actor_id,canvas_id,position) VALUES(${ws},${viewer},${ids.canvasOpen},3)`;
   });
   afterAll(async () => { resetInMemoryStorageForTest(); await closeDb(); const root = postgres({ ...conn, database: 'postgres' }); await root.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`); await root.end(); });
 
@@ -128,7 +154,7 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     const unknown = BILLABLE_STORAGE_TABLES.filter(t => !EXPORT_COVERED_TABLES.has(t) && !(t in EXPORT_UNCOVERED));
     expect(unknown).toEqual([]);
     const coverage = exportCoverage();
-    expect(coverage.uncovered_required.map(u => u.table)).toContain('flightdeck_pg_canvases');
+    expect(coverage.uncovered_required.map(u => u.table)).not.toContain('flightdeck_pg_canvases');
     expect(coverage.uncovered_required.map(u => u.table)).toContain('git_repositories');
     expect(coverage.uncovered.find(u => u.table === 'flightdeck_pg_permission_grants')!.category).toBe('access');
   });
@@ -187,7 +213,7 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     const small = await run(owner, 2);
     expect(small.seen.records!.length).toBeGreaterThan(4);
     const started = await startWorkspaceExport(ws, owner, db as any);
-    await expect(readWorkspaceExportPage(ws, started.export_id, owner, { section: 'history' }, db as any)).rejects.toMatchObject({ code: 'section_out_of_order' });
+    await expect(readWorkspaceExportPage(ws, started.export_id, owner, { section: 'content' }, db as any)).rejects.toMatchObject({ code: 'section_out_of_order' });
     const first: any = await readWorkspaceExportPage(ws, started.export_id, owner, { section: 'records', limit: 2 }, db as any);
     expect(first.next_cursor).not.toBeNull();
     const replay: any = await readWorkspaceExportPage(ws, started.export_id, owner, { section: 'records', limit: 2 }, db as any);
@@ -228,7 +254,7 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
   test('revocation ends the session before any further data, replay included; history re-authorizes its parents', async () => {
     const regrant = async () => { await db`UPDATE flightdeck_pg_permission_grants SET revoked_at=NULL WHERE workspace_id=${ws} AND principal_actor_id=${readerId} AND resource_channel_id=${open}`; };
     const revoke = () => db`UPDATE flightdeck_pg_permission_grants SET revoked_at=now() WHERE workspace_id=${ws} AND principal_actor_id=${readerId} AND resource_channel_id=${open}`;
-    const drain = async (id: string, section: 'records' | 'history' | 'assets') => {
+    const drain = async (id: string, section: 'records' | 'content' | 'history' | 'assets') => {
       let cursor: string | null = null; const items: any[] = [];
       for (let i = 0; i < 50; i++) { const page: any = await readWorkspaceExportPage(ws, id, reader, { section, cursor, limit: 2 }, db as any); items.push(...page.items); if (page.next_cursor === null) return items; cursor = page.next_cursor; }
       throw new Error('runaway');
@@ -237,6 +263,7 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     // 1. Channel access revoked between records and history while workspace membership remains: no history, no replay, no completion.
     const a = await startWorkspaceExport(ws, reader, db as any);
     const records = await drain(a.export_id, 'records');
+    await drain(a.export_id, 'content');
     expect(records.some(r => r.id === ids.doc)).toBe(true);
     const firstPage: any = await readWorkspaceExportPage(ws, a.export_id, reader, { section: 'records', limit: 2 }, db as any).catch(() => null);
     void firstPage;
@@ -250,7 +277,7 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     await regrant();
     await expect(readWorkspaceExportPage(ws, b.export_id, reader, { section: 'records' }, db as any)).rejects.toMatchObject({ code: 'export_invalidated' });
     const c = await startWorkspaceExport(ws, reader, db as any);
-    await drain(c.export_id, 'records');
+    await drain(c.export_id, 'records'); await drain(c.export_id, 'content');
     await revoke();
     const [{ access_revision, epoch }] = await db`SELECT access_revision::text,epoch FROM flightdeck_pg_record_clock WHERE workspace_id=${ws}` as any;
     await db`UPDATE workspace_exports SET access_revision=${access_revision},clock_epoch=${epoch} WHERE id=${c.export_id}`;
@@ -268,10 +295,64 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     expect((await run(reader)).seen.records!.some(r => r.id === ids.doc)).toBe(true);
   });
 
+  test('content adapters: each table follows its own route rule; the owner sees all, the member only what the rule allows', async () => {
+    await db`DELETE FROM workspace_exports WHERE workspace_id=${ws}`;
+    // Removing a membership (earlier test) removes that member's private ordering.
+    await db`INSERT INTO flightdeck_pg_canvas_orders(workspace_id,viewer_actor_id,canvas_id,position) VALUES(${ws},${readerId},${ids.canvasOpen},3) ON CONFLICT DO NOTHING`;
+    const owned = await run(owner);
+    const mine = await run(reader);
+    const idsOf = (r: any, table: string) => r.seen.content.filter((i: any) => i.table === `flightdeck_pg_${table}`).map((i: any) => i.row.id ?? i.key).sort();
+    const want = (...x: string[]) => x.sort();
+    expect(idsOf(owned, 'workrooms')).toEqual(want(ids.workroom!, ids.closedWorkroom!));
+    expect(idsOf(mine, 'workrooms')).toEqual(want(ids.workroom!));
+    expect(owned.seen.content.filter((i: any) => i.table.startsWith('flightdeck_pg_workroom_')).length).toBe(6);
+    expect(mine.seen.content.filter((i: any) => i.table.startsWith('flightdeck_pg_workroom_')).length).toBe(3);
+    // Approvals: a workroom approval follows the workroom's channel; any other target needs workspace.manage.
+    expect(idsOf(owned, 'approvals')).toEqual(want(ids.approvalOpen!, ids.approvalClosed!, ids.approvalDoc!));
+    expect(idsOf(mine, 'approvals')).toEqual(want(ids.approvalOpen!));
+    // Invocations: channel readers, the creator, or a named recipient.
+    expect(idsOf(owned, 'invocations')).toEqual(want(ids.invOpen!, ids.invRecipient!, ids.invHidden!));
+    expect(idsOf(mine, 'invocations')).toEqual(want(ids.invOpen!, ids.invRecipient!));
+    expect(idsOf(mine, 'reactions').length).toBe(1);
+    expect(idsOf(mine, 'task_watchers').length).toBe(1);
+    expect(idsOf(mine, 'agent_activities')).toEqual(want(ids.activity!));
+    expect(idsOf(mine, 'agent_activity_commentary').length).toBe(1);
+    expect(JSON.stringify(mine.seen.content.filter((i: any) => i.table === 'flightdeck_pg_agent_activities'))).not.toContain('lease_');
+    // Canvases: workspace-mode for the member; the restricted one only for its principals (or workspace.manage).
+    expect(idsOf(owned, 'canvases')).toEqual(want(ids.canvasOpen!, ids.canvasPrivate!));
+    expect(idsOf(mine, 'canvases')).toEqual(want(ids.canvasOpen!));
+    expect(mine.seen.content.filter((i: any) => i.table === 'flightdeck_pg_canvas_elements').length).toBe(1);
+    expect(owned.seen.content.filter((i: any) => i.table === 'flightdeck_pg_canvas_elements').length).toBe(2);
+    expect(mine.seen.content.filter((i: any) => i.table === 'flightdeck_pg_canvas_orders').map((i: any) => i.row.viewer_actor_id)).toEqual([readerId]);
+    expect(JSON.stringify(mine.seen)).not.toContain(ids.closedWorkroom!);
+    expect(mine.manifest.content_tables).toMatchObject({ flightdeck_pg_canvases: 1, flightdeck_pg_workrooms: 1 });
+    // Relationships hold (every parent was delivered) and what remains unexported is named per table with a reason.
+    expect(owned.manifest.integrity.dangling_relationships).toEqual([]);
+    expect(mine.manifest.integrity.dangling_relationships).toEqual([]);
+    const required = owned.manifest.coverage.uncovered_required.map((u: any) => u.table);
+    expect(required).toEqual(expect.arrayContaining(['flightdeck_pg_org_data_records', 'flightdeck_pg_napplet_bundles', 'flightdeck_pg_drive_shares', 'managed_storage_sets', 'git_repositories']));
+    expect(required).not.toContain('flightdeck_pg_canvases');
+    expect(owned.manifest.coverage.uncovered.find((u: any) => u.table === 'git_repositories').reason).toContain('Forgejo');
+    expect(owned.manifest.coverage.uncovered.find((u: any) => u.table === 'flightdeck_pg_response_activities').category).toBe('operational');
+    expect(owned.manifest.status).toBe('incomplete');
+  });
+
+  test('a content row whose parent was not delivered is a reported broken relationship', async () => {
+    // A reaction on a doc the member cannot read (the doc is in the closed channel) but whose own channel is readable cannot occur;
+    // force it by pointing a reaction in the open channel at a record that is not delivered.
+    const orphan = randomUUID();
+    await db`INSERT INTO flightdeck_pg_reactions(workspace_id,scope_id,channel_id,target_type,target_id,emoji,emoji_shortcode,reactor_actor_id,created_by_actor_id,updated_by_actor_id) VALUES(${ws},${scope},${open},'message',${orphan},'heart',':heart:',${ownerId},${ownerId},${ownerId})`;
+    await db`DELETE FROM workspace_exports WHERE workspace_id=${ws}`;
+    const result = await run(owner);
+    expect(result.manifest.integrity.dangling_relationships).toEqual([expect.objectContaining({ child: 'table:flightdeck_pg_reactions', parent: 'message', count: 1, sample: [expect.any(String)] })]);
+    expect(result.manifest.incomplete_reasons).toContain('dangling_relationships');
+    await db`DELETE FROM flightdeck_pg_reactions WHERE target_id=${orphan}`;
+  });
+
   test('a write during the export is reported, never hidden', async () => {
     const started = await startWorkspaceExport(ws, owner, db as any);
     let cursor: string | null = null;
-    for (const section of ['records', 'history', 'assets'] as const) {
+    for (const section of ['records', 'content', 'history', 'assets'] as const) {
       cursor = null;
       for (;;) { const page: any = await readWorkspaceExportPage(ws, started.export_id, owner, { section, cursor }, db as any); if (page.next_cursor === null) break; cursor = page.next_cursor; }
       if (section === 'records') await message(open, 'written mid-export');
@@ -315,7 +396,7 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     const exportId = started.json.export_id as string;
     expect((await http('GET', `/migration-export/${exportId}`, readerKey)).status).toBe(404);
     expect((await http('GET', `/migration-export/${exportId}`, ownerKey)).json).toMatchObject({ export_id: exportId, finalized: false });
-    for (const section of ['records', 'history', 'assets']) {
+    for (const section of ['records', 'content', 'history', 'assets']) {
       let cursor = '';
       for (;;) {
         const page = await http('GET', `/migration-export/${exportId}/page?section=${section}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, ownerKey);

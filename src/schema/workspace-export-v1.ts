@@ -17,8 +17,10 @@ CREATE TABLE IF NOT EXISTS workspace_export_keys (
  export_id UUID NOT NULL REFERENCES workspace_exports(id) ON DELETE CASCADE,
  workspace_id UUID NOT NULL,
  family TEXT NOT NULL, id TEXT NOT NULL,
+ refs JSONB NOT NULL DEFAULT '[]',
  PRIMARY KEY(export_id,family,id)
 );
+ALTER TABLE workspace_export_keys ADD COLUMN IF NOT EXISTS refs JSONB NOT NULL DEFAULT '[]';
 CREATE TABLE IF NOT EXISTS workspace_export_assets (
  export_id UUID NOT NULL REFERENCES workspace_exports(id) ON DELETE CASCADE,
  workspace_id UUID NOT NULL,
