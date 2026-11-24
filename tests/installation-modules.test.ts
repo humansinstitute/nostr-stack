@@ -71,8 +71,10 @@ describe('strict optional module configuration',()=>{
   expect(()=>validateModuleSettings({...configured(),graph:{enabled:true,password:'x'}})).toThrow();
   expect(()=>validateModuleSettings({...configured(),relay:{...configured().relay,enabled:'true'}})).toThrow();
  });
+ // Built at runtime so the synthetic userinfo rejection fixture is not a credential-URL literal in tracked source.
+ const credentialOrigin=()=>{const u=new URL('https://example.com');u.username='fixture';u.password='fixture';return u.href.replace(/\/$/,'');};
  test('root transport origins are separate and secure',()=>{
-  for(const origin of ['http://remote.example.com','https://user:pw@example.com','https://example.com/path','https://example.com/','https://example.com?x=1'])expect(()=>validateModuleSettings({...configured(),blossom:{...configured().blossom,origin}})).toThrow();
+  for(const origin of ['http://remote.example.com',credentialOrigin(),'https://example.com/path','https://example.com/','https://example.com?x=1'])expect(()=>validateModuleSettings({...configured(),blossom:{...configured().blossom,origin}})).toThrow();
   const m=configured();m.blossom.origin='https://relay.example.com';expect(()=>validateModuleSettings(m)).toThrow('module_origins_must_be_separate');
   m.blossom.origin='http://127.0.0.1:13002';expect(validateModuleSettings(m).blossom.origin).toBe(m.blossom.origin);
  });

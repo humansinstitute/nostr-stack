@@ -3,6 +3,8 @@ import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';import {join} from 'node:path';
 import {runControllerOperation,atomicJson,type ControllerOperation} from '../src/installation/controller';
 import {defaultSettings,validateInstallationSettings} from '../src/installation/settings';
+// Built at runtime so the synthetic userinfo rejection fixture is not a credential-URL literal in tracked source.
+const credentialOrigin=()=>{const u=new URL('https://example.com');u.username='fixture';u.password='fixture';return u.href.replace(/\/$/,'');};
 test('controller verifies apply and rolls back failed or interrupted changes',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'nstack-controller-'));
  try{
@@ -15,7 +17,7 @@ test('controller verifies apply and rolls back failed or interrupted changes',as
  await atomicJson(join(dir,'settings.json'),defaultSettings);
  await runControllerOperation(dir,interrupted,{restart:async()=>{},verify:async()=>true});expect(interrupted.state).toBe('rolled_back');
  expect(()=>validateInstallationSettings({...defaultSettings,command:'rm -rf /'})).toThrow();
- expect(()=>validateInstallationSettings({...defaultSettings,https_origin:'https://user:pass@example.com'})).toThrow();
+ expect(()=>validateInstallationSettings({...defaultSettings,https_origin:credentialOrigin()})).toThrow();
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
