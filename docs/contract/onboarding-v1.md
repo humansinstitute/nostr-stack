@@ -119,9 +119,9 @@ triggers are installed; they install at start-up when `ONBOARDING_ENABLED=true`.
 
 ## Repeat account top-ups
 
-After the owner account backs a provisioned workspace (`hosting_workspace_accounts`), the owner can add credit
+After provisioning has completed (the account has an activated peak-storage enrollment, written in the transaction that marks the intent provisioned), the owner can add credit
 without a new intent, workspace, invitation seat or introduction. Human direct-signature routes, gated by
-`ONBOARDING_ENABLED`; amounts are US$5 to US$10,000 (`amount_cents` 500..1000000):
+`ONBOARDING_ENABLED`; amounts are the approved US$21 floor up to the US$10,000 processor bound (`amount_cents` 2100..1000000; the upper figure is a technical limit, not a product tier):
 
 - `GET /api/v4/onboarding/topups` — credited top-ups (settlements with no intent), open Lightning quotes, unfulfilled checkout orders.
 - `POST /topups/checkout` `{idempotency_key, return_url, amount_cents}` — Stripe Checkout (test mode) bound to the account; the order carries no `intent_id`.

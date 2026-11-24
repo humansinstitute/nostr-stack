@@ -107,67 +107,91 @@ describe.skipIf(!port || port === 5432)('repeat account top-ups on disposable Po
   });
 
   test('requires an owned, provisioned account; nothing is created for others', async () => {
-    await expect(createTopupCheckout(carol, { amount_cents: 1000, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble())).rejects.toMatchObject({ code: 'account_not_found' });
+    await expect(createTopupCheckout(carol, { amount_cents: 2100, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble())).rejects.toMatchObject({ code: 'account_not_found' });
     await openOwnerAccount(carol, db as any);
-    await expect(createTopupCheckout(carol, { amount_cents: 1000, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble())).rejects.toMatchObject({ code: 'account_not_provisioned' });
-    await expect(issueTopupQuote(carol, { amount_cents: 1000, idempotency_key: key() }, db as any, ln)).rejects.toMatchObject({ code: 'account_not_provisioned' });
+    await expect(createTopupCheckout(carol, { amount_cents: 2100, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble())).rejects.toMatchObject({ code: 'account_not_provisioned' });
+    await expect(issueTopupQuote(carol, { amount_cents: 2100, idempotency_key: key() }, db as any, ln)).rejects.toMatchObject({ code: 'account_not_provisioned' });
     expect((await call('GET', '/topups')).status).toBe(401);
-    expect((await call('POST', '/topups/checkout', undefined, { amount_cents: 1000, idempotency_key: key(), return_url: returnUrl })).status).toBe(401);
+    expect((await call('POST', '/topups/checkout', undefined, { amount_cents: 2100, idempotency_key: key(), return_url: returnUrl })).status).toBe(401);
     expect((await call('GET', '/topups', carolKey)).status).toBe(409);
+  });
+
+  test('a failed or partial provisioning is not post-provisioning: no top-up until activation', async () => {
+    const dave = nip19.npubEncode(getPublicKey(randomBytes(32)));
+    const { intent } = await createIntent(dave, { client_request_key: key(), invite_code: invite.code, workspace_name: 'Partial Dave', funding_cents: 2100 }, db as any);
+    const double = stripeDouble();
+    const checkout = await createHostingCheckout(intent.account_id, { amount_cents: 2100, idempotency_key: key(), return_url: returnUrl }, db as any, double, { intentId: intent.id });
+    const [order] = await db`SELECT * FROM hosting_checkout_orders WHERE id=${checkout.order_id}`;
+    await fulfillHostingCheckout(paid(order!.id, order!.account_id, 2100, (await double.checkout.sessions.retrieve()).id), db as any);
+    const attempt = { amount_cents: 2100, idempotency_key: key(), return_url: returnUrl };
+    // Funded but nothing provisioned.
+    await expect(createTopupCheckout(dave, attempt, db as any, stripeDouble())).rejects.toMatchObject({ code: 'account_not_provisioned' });
+    // Workspace exists but the billing step failed: still no top-up path.
+    await expect(provisionIntent(intent.id, dave, db as any, { beforeStep: s => { if (s === 'billing_link') throw new Error('fixture failure'); } })).rejects.toMatchObject({ code: 'provisioning_step_failed' });
+    await expect(createTopupCheckout(dave, attempt, db as any, stripeDouble())).rejects.toMatchObject({ code: 'account_not_provisioned' });
+    // A billing link with an enrollment that was never activated is not provisioned either.
+    const [row] = await db`SELECT workspace_id FROM onboarding_intents WHERE id=${intent.id}`;
+    await db`INSERT INTO hosting_workspace_accounts(workspace_id,account_id) VALUES(${row!.workspace_id},${intent.account_id})`;
+    await db`INSERT INTO hosting_storage_enrollments(workspace_id,account_id,origin_intent_id) VALUES(${row!.workspace_id},${intent.account_id},${intent.id})`;
+    await expect(issueTopupQuote(dave, { amount_cents: 2100, idempotency_key: key() }, db as any, ln)).rejects.toMatchObject({ code: 'account_not_provisioned' });
+    expect((await call('GET', '/topups', undefined)).status).toBe(401);
+    // Completing provisioning (activation) opens the path.
+    await provisionIntent(intent.id, dave, db as any);
+    await expect(createTopupCheckout(dave, attempt, db as any, stripeDouble())).resolves.toMatchObject({ amount_cents: 2100 });
   });
 
   test('Stripe: repeat top-ups credit once per verified payment, with no intent, workspace, seat or introduction', async () => {
     const ws = await provisioned(alice, 'Topup Alice');
     const before = await counts(ws.account_id), balance = await paidUnits(ws.account_id);
     const [enrollmentBefore] = await db`SELECT intro_ends_at,activated_at FROM hosting_storage_enrollments WHERE account_id=${ws.account_id}`;
-    const bad = [{ amount_cents: 499 }, { amount_cents: 1_000_001 }, { amount_cents: 12.5 }, { amount_cents: '1000' }];
+    const bad = [{ amount_cents: 2099 }, { amount_cents: 1_000_001 }, { amount_cents: 12.5 }, { amount_cents: '2100' }];
     for (const b of bad) await expect(createTopupCheckout(alice, { ...b, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble())).rejects.toMatchObject({ code: 'invalid_checkout' });
-    await expect(createTopupCheckout(alice, { amount_cents: 1000, idempotency_key: key(), return_url: 'https://evil.test' }, db as any, stripeDouble())).rejects.toMatchObject({ code: 'return_url_not_allowed' });
+    await expect(createTopupCheckout(alice, { amount_cents: 2100, idempotency_key: key(), return_url: 'https://evil.test' }, db as any, stripeDouble())).rejects.toMatchObject({ code: 'return_url_not_allowed' });
 
     const sid = `cs_test_${randomUUID()}`, double = stripeDouble(sid), k = key();
-    const body = { amount_cents: 1234, idempotency_key: k, return_url: returnUrl };
+    const body = { amount_cents: 2234, idempotency_key: k, return_url: returnUrl };
     const first = await createTopupCheckout(alice, body, db as any, double);
     expect((await createTopupCheckout(alice, body, db as any, double)).order_id).toBe(first.order_id);
-    await expect(createTopupCheckout(alice, { ...body, amount_cents: 1235 }, db as any, double)).rejects.toMatchObject({ code: 'idempotency_conflict' });
+    await expect(createTopupCheckout(alice, { ...body, amount_cents: 2235 }, db as any, double)).rejects.toMatchObject({ code: 'idempotency_conflict' });
     const [order] = await db`SELECT * FROM hosting_checkout_orders WHERE id=${first.order_id}`;
     expect(order!.intent_id).toBeNull();
     expect((await listTopups(alice, db as any)).pending_checkout.map(o => o.order_id)).toEqual([order!.id]);
 
     // Unpaid or mismatched evidence credits nothing; verified payment credits exactly once under concurrent and replayed delivery.
-    expect(await fulfillHostingCheckout({ ...paid(order!.id, order!.account_id, 1234, sid), payment_status: 'unpaid' } as any, db as any)).toEqual({ credited: false });
+    expect(await fulfillHostingCheckout({ ...paid(order!.id, order!.account_id, 2234, sid), payment_status: 'unpaid' } as any, db as any)).toEqual({ credited: false });
     await expect(fulfillHostingCheckout(paid(order!.id, order!.account_id, 1200, sid), db as any)).rejects.toThrow('stripe_binding_mismatch');
     expect(await paidUnits(ws.account_id)).toBe(balance);
-    const session = paid(order!.id, order!.account_id, 1234, sid);
+    const session = paid(order!.id, order!.account_id, 2234, sid);
     const outcomes = await Promise.all(Array.from({ length: 8 }, () => fulfillHostingCheckout(session, db as any)));
     expect(outcomes.filter(o => o.credited).length).toBe(1);
     await fulfillHostingCheckout(session, db as any);
-    expect(await paidUnits(ws.account_id)).toBe(balance + 1234n * (USD_UNITS / 100n));
+    expect(await paidUnits(ws.account_id)).toBe(balance + 2234n * (USD_UNITS / 100n));
     expect((await db`SELECT 1 FROM hosting_ledger WHERE account_id=${ws.account_id} AND kind='stripe'`).length).toBe(2);
 
     // A second top-up on the same account compounds; a payment reference cannot be reused by a different order.
-    const sid2 = `cs_test_${randomUUID()}`, second = await createTopupCheckout(alice, { amount_cents: 500, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble(sid2));
+    const sid2 = `cs_test_${randomUUID()}`, second = await createTopupCheckout(alice, { amount_cents: 2500, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble(sid2));
     const [order2] = await db`SELECT * FROM hosting_checkout_orders WHERE id=${second.order_id}`;
-    await expect(fulfillHostingCheckout(paid(order2!.id, order2!.account_id, 500, sid2, session.payment_intent as string), db as any)).rejects.toThrow('settlement_binding_conflict');
-    await fulfillHostingCheckout(paid(order2!.id, order2!.account_id, 500, sid2), db as any);
-    expect(await paidUnits(ws.account_id)).toBe(balance + 1734n * (USD_UNITS / 100n));
+    await expect(fulfillHostingCheckout(paid(order2!.id, order2!.account_id, 2500, sid2, session.payment_intent as string), db as any)).rejects.toThrow('settlement_binding_conflict');
+    await fulfillHostingCheckout(paid(order2!.id, order2!.account_id, 2500, sid2), db as any);
+    expect(await paidUnits(ws.account_id)).toBe(balance + 4734n * (USD_UNITS / 100n));
 
     expect(await counts(ws.account_id)).toEqual(before);
     const [enrollmentAfter] = await db`SELECT intro_ends_at,activated_at FROM hosting_storage_enrollments WHERE account_id=${ws.account_id}`;
     expect(enrollmentAfter).toEqual(enrollmentBefore);
     const listed = await listTopups(alice, db as any);
     expect(listed.pending_checkout).toEqual([]);
-    expect(listed.credited.filter(c => c.method === 'stripe').map(c => c.amount_cents).sort((a, b) => a - b)).toEqual([500, 1234]); // the intent-funding payment is not a top-up
+    expect(listed.credited.filter(c => c.method === 'stripe').map(c => c.amount_cents).sort((a, b) => a - b)).toEqual([2234, 2500]); // the intent-funding payment is not a top-up
   });
 
   test('Lightning: quote, verified settlement credits once; late, short or forged payments never credit; replay is safe', async () => {
     const ws = await provisioned(bob, 'Topup Bob');
     const before = await counts(ws.account_id), balance = await paidUnits(ws.account_id);
-    await expect(issueTopupQuote(bob, { amount_cents: 100, idempotency_key: key() }, db as any, ln)).rejects.toMatchObject({ code: 'invalid_quote_request' });
-    await expect(issueTopupQuote(bob, { amount_cents: 1000, idempotency_key: key(), extra: 1 }, db as any, ln)).rejects.toMatchObject({ code: 'invalid_quote_request' });
+    await expect(issueTopupQuote(bob, { amount_cents: 2000, idempotency_key: key() }, db as any, ln)).rejects.toMatchObject({ code: 'invalid_quote_request' });
+    await expect(issueTopupQuote(bob, { amount_cents: 2100, idempotency_key: key(), extra: 1 }, db as any, ln)).rejects.toMatchObject({ code: 'invalid_quote_request' });
     const k = key();
-    const [a, b] = await Promise.all([issueTopupQuote(bob, { amount_cents: 1500, idempotency_key: k }, db as any, ln), issueTopupQuote(bob, { amount_cents: 1500, idempotency_key: k }, db as any, ln)]);
-    expect(a.id).toBe(b.id); expect(a.intent_id).toBeNull(); expect(a.state).toBe('open'); expect(a.amount_sats).toBe(37500);
-    await expect(issueTopupQuote(bob, { amount_cents: 1600, idempotency_key: k }, db as any, ln)).rejects.toMatchObject({ code: 'idempotency_conflict' });
+    const [a, b] = await Promise.all([issueTopupQuote(bob, { amount_cents: 2500, idempotency_key: k }, db as any, ln), issueTopupQuote(bob, { amount_cents: 2500, idempotency_key: k }, db as any, ln)]);
+    expect(a.id).toBe(b.id); expect(a.intent_id).toBeNull(); expect(a.state).toBe('open'); expect(a.amount_sats).toBe(62500);
+    await expect(issueTopupQuote(bob, { amount_cents: 2600, idempotency_key: k }, db as any, ln)).rejects.toMatchObject({ code: 'idempotency_conflict' });
     // Unpaid refresh credits nothing.
     expect((await refreshTopupQuote(bob, a.id, db as any, ln)).state).toBe('open');
     expect(await paidUnits(ws.account_id)).toBe(balance);
@@ -178,23 +202,23 @@ describe.skipIf(!port || port === 5432)('repeat account top-ups on disposable Po
     const results = await Promise.all(Array.from({ length: 6 }, () => refreshTopupQuote(bob, a.id, db as any, ln)));
     expect(results.every(r => r.state === 'settled')).toBe(true);
     await refreshTopupQuote(bob, a.id, db as any, ln);
-    expect(await paidUnits(ws.account_id)).toBe(balance + 1500n * (USD_UNITS / 100n));
+    expect(await paidUnits(ws.account_id)).toBe(balance + 2500n * (USD_UNITS / 100n));
     expect((await db`SELECT 1 FROM hosting_ledger WHERE account_id=${ws.account_id} AND kind='lightning'`).length).toBe(1);
     expect((await db`SELECT intent_id FROM hosting_funding_settlements WHERE account_id=${ws.account_id} AND method='lightning'`)[0]!.intent_id).toBeNull();
     // Short payment is a mismatch, never credit.
-    const short = await issueTopupQuote(bob, { amount_cents: 800, idempotency_key: key() }, db as any, ln);
+    const short = await issueTopupQuote(bob, { amount_cents: 2800, idempotency_key: key() }, db as any, ln);
     ln.invoices.get(short.payment_hash!).status = 'settled'; ln.invoices.get(short.payment_hash!).received = short.amount_sats! - 1; ln.invoices.get(short.payment_hash!).settledAt = new Date().toISOString();
     expect((await refreshTopupQuote(bob, short.id, db as any, ln)).state).toBe('mismatch');
     // Payment after expiry is recorded for support, not credited.
-    const late = await issueTopupQuote(bob, { amount_cents: 700, idempotency_key: key() }, db as any, ln);
+    const late = await issueTopupQuote(bob, { amount_cents: 2700, idempotency_key: key() }, db as any, ln);
     ln.pay(late.payment_hash!); ln.invoices.get(late.payment_hash!).settledAt = new Date(Date.now() + 3_600_000).toISOString();
     expect((await refreshTopupQuote(bob, late.id, db as any, ln)).state).toBe('late_payment');
-    expect(await paidUnits(ws.account_id)).toBe(balance + 1500n * (USD_UNITS / 100n));
+    expect(await paidUnits(ws.account_id)).toBe(balance + 2500n * (USD_UNITS / 100n));
     expect(await counts(ws.account_id)).toEqual(before);
     // Open-quote cap.
     await provisioned(carol, 'Topup Carol');
-    for (let i = 0; i < 5; i++) await issueTopupQuote(carol, { amount_cents: 600, idempotency_key: key() }, db as any, ln);
-    await expect(issueTopupQuote(carol, { amount_cents: 600, idempotency_key: key() }, db as any, ln)).rejects.toMatchObject({ code: 'too_many_open_topup_quotes' });
+    for (let i = 0; i < 5; i++) await issueTopupQuote(carol, { amount_cents: 2600, idempotency_key: key() }, db as any, ln);
+    await expect(issueTopupQuote(carol, { amount_cents: 2600, idempotency_key: key() }, db as any, ln)).rejects.toMatchObject({ code: 'too_many_open_topup_quotes' });
   });
 
   test('a topup quote and an intent quote cannot be confused: an intent idempotency key never replays as a topup', async () => {
@@ -210,23 +234,23 @@ describe.skipIf(!port || port === 5432)('repeat account top-ups on disposable Po
     const ws = await provisioned(bob, 'Topup Bob Two');
     await db`UPDATE hosting_accounts SET paid_units='0',promo_units='0',depleted_at=now() WHERE id=${ws.account_id}`;
     const sid = `cs_test_${randomUUID()}`;
-    const order = await createTopupCheckout(bob, { amount_cents: 600, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble(sid));
+    const order = await createTopupCheckout(bob, { amount_cents: 2600, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble(sid));
     const [row] = await db`SELECT * FROM hosting_checkout_orders WHERE id=${order.order_id}`;
-    await fulfillHostingCheckout(paid(row!.id, row!.account_id, 600, sid), db as any);
+    await fulfillHostingCheckout(paid(row!.id, row!.account_id, 2600, sid), db as any);
     const [account] = await db`SELECT paid_units,depleted_at FROM hosting_accounts WHERE id=${ws.account_id}`;
-    expect(BigInt(account!.paid_units)).toBe(600n * (USD_UNITS / 100n)); expect(account!.depleted_at).toBeNull();
+    expect(BigInt(account!.paid_units)).toBe(2600n * (USD_UNITS / 100n)); expect(account!.depleted_at).toBeNull();
     await db`UPDATE hosting_accounts SET paid_units=${(-100n * USD_UNITS).toString()},depleted_at=now() WHERE id=${ws.account_id}`;
     const sid2 = `cs_test_${randomUUID()}`;
-    const o2 = await createTopupCheckout(bob, { amount_cents: 600, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble(sid2));
+    const o2 = await createTopupCheckout(bob, { amount_cents: 2600, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble(sid2));
     const [r2] = await db`SELECT * FROM hosting_checkout_orders WHERE id=${o2.order_id}`;
-    await fulfillHostingCheckout(paid(r2!.id, r2!.account_id, 600, sid2), db as any);
+    await fulfillHostingCheckout(paid(r2!.id, r2!.account_id, 2600, sid2), db as any);
     const [after] = await db`SELECT paid_units,depleted_at FROM hosting_accounts WHERE id=${ws.account_id}`;
-    expect(BigInt(after!.paid_units)).toBe(-100n * USD_UNITS + 600n * (USD_UNITS / 100n)); expect(after!.depleted_at).not.toBeNull();
+    expect(BigInt(after!.paid_units)).toBe(-100n * USD_UNITS + 2600n * (USD_UNITS / 100n)); expect(after!.depleted_at).not.toBeNull();
   });
 
   test('HTTP: human direct signature only; rollout gate closed fails closed; owner reads only own', async () => {
     await provisioned(bob, 'Topup Bob Http');
-    const quoteBody = { amount_cents: 900, idempotency_key: key() };
+    const quoteBody = { amount_cents: 2900, idempotency_key: key() };
     const created = await call('POST', '/topups/lightning/quote', bobKey, quoteBody);
     expect(created.status).toBe(201); expect(created.json.quote.intent_id).toBeNull();
     expect((await call('POST', `/topups/lightning/quotes/${created.json.quote.id}/refresh`, aliceKey)).status).toBe(404);
@@ -234,8 +258,8 @@ describe.skipIf(!port || port === 5432)('repeat account top-ups on disposable Po
     expect((await call('GET', '/topups', bobKey)).json.pending_lightning.some((q: any) => q.quote_id === created.json.quote.id)).toBe(true);
     process.env.ONBOARDING_ENABLED = 'false';
     try {
-      expect((await call('POST', '/topups/lightning/quote', bobKey, { amount_cents: 900, idempotency_key: key() })).json.code).toBe('onboarding_rollout_disabled');
-      expect((await call('POST', '/topups/checkout', bobKey, { amount_cents: 900, idempotency_key: key(), return_url: returnUrl })).json.code).toBe('onboarding_rollout_disabled');
+      expect((await call('POST', '/topups/lightning/quote', bobKey, { amount_cents: 2900, idempotency_key: key() })).json.code).toBe('onboarding_rollout_disabled');
+      expect((await call('POST', '/topups/checkout', bobKey, { amount_cents: 2900, idempotency_key: key(), return_url: returnUrl })).json.code).toBe('onboarding_rollout_disabled');
     } finally { process.env.ONBOARDING_ENABLED = 'true'; }
     const paths = buildOpenApiDocument().paths as any;
     for (const p of ['/api/v4/onboarding/topups', '/api/v4/onboarding/topups/checkout', '/api/v4/onboarding/topups/lightning/quote', '/api/v4/onboarding/topups/lightning/quotes/{quoteId}/refresh']) expect(paths[p]).toBeDefined();

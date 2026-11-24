@@ -179,6 +179,8 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     await db`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${ws} AND actor_id=${readerId}`;
     await expect(readWorkspaceExportPage(ws, lost.export_id, reader, { section: 'records' }, db as any)).rejects.toMatchObject({ code: 'workspace_membership_required' });
     await db`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${ws},${readerId},'member')`;
+    await db`DELETE FROM flightdeck_pg_permission_grants WHERE workspace_id=${ws} AND principal_actor_id=${readerId}`;
+    for (const permission of ['channel.read', 'doc.read', 'file.read', 'task.read']) await grant(readerId, open, permission); // membership removal also removes the member's grants
   });
 
   test('paging: small pages, replay of the delivered page, no skipping, strict section order', async () => {
@@ -221,6 +223,49 @@ describe.skipIf(!port || port === 5432)('migration export on disposable PostgreS
     for (const o of Object.values(objects)) await writeAuthorizedStorageBytes({ storage_path: o.path, content_type: 'text/plain' } as any, o.bytes);
     await db`UPDATE v4_storage_objects SET completed_at=now() WHERE id=${objects.attachment!.id}`;
     expect((await run(owner)).manifest.integrity.asset_issues).toEqual({});
+  });
+
+  test('revocation ends the session before any further data, replay included; history re-authorizes its parents', async () => {
+    const regrant = async () => { await db`UPDATE flightdeck_pg_permission_grants SET revoked_at=NULL WHERE workspace_id=${ws} AND principal_actor_id=${readerId} AND resource_channel_id=${open}`; };
+    const revoke = () => db`UPDATE flightdeck_pg_permission_grants SET revoked_at=now() WHERE workspace_id=${ws} AND principal_actor_id=${readerId} AND resource_channel_id=${open}`;
+    const drain = async (id: string, section: 'records' | 'history' | 'assets') => {
+      let cursor: string | null = null; const items: any[] = [];
+      for (let i = 0; i < 50; i++) { const page: any = await readWorkspaceExportPage(ws, id, reader, { section, cursor, limit: 2 }, db as any); items.push(...page.items); if (page.next_cursor === null) return items; cursor = page.next_cursor; }
+      throw new Error('runaway');
+    };
+    await db`DELETE FROM workspace_exports WHERE workspace_id=${ws}`;
+    // 1. Channel access revoked between records and history while workspace membership remains: no history, no replay, no completion.
+    const a = await startWorkspaceExport(ws, reader, db as any);
+    const records = await drain(a.export_id, 'records');
+    expect(records.some(r => r.id === ids.doc)).toBe(true);
+    const firstPage: any = await readWorkspaceExportPage(ws, a.export_id, reader, { section: 'records', limit: 2 }, db as any).catch(() => null);
+    void firstPage;
+    await revoke();
+    await expect(readWorkspaceExportPage(ws, a.export_id, reader, { section: 'history' }, db as any)).rejects.toMatchObject({ code: 'export_invalidated' });
+    await expect(readWorkspaceExportPage(ws, a.export_id, reader, { section: 'records', limit: 2 }, db as any)).rejects.toMatchObject({ code: 'export_invalidated' });
+    const closedOut = await finalizeWorkspaceExport(ws, a.export_id, reader, db as any).catch((e: any) => e);
+    expect(closedOut).toMatchObject({ code: 'export_not_traversed' });
+    // 2. Even when the pinned revision matches (a missed bump), history is filtered by the parents' CURRENT authority.
+    const b = await startWorkspaceExport(ws, reader, db as any);
+    await regrant();
+    await expect(readWorkspaceExportPage(ws, b.export_id, reader, { section: 'records' }, db as any)).rejects.toMatchObject({ code: 'export_invalidated' });
+    const c = await startWorkspaceExport(ws, reader, db as any);
+    await drain(c.export_id, 'records');
+    await revoke();
+    const [{ access_revision, epoch }] = await db`SELECT access_revision::text,epoch FROM flightdeck_pg_record_clock WHERE workspace_id=${ws}` as any;
+    await db`UPDATE workspace_exports SET access_revision=${access_revision},clock_epoch=${epoch} WHERE id=${c.export_id}`;
+    expect(await drain(c.export_id, 'history')).toEqual([]);
+    // 3. Assets referenced earlier now report not_readable instead of being offered as verified bytes.
+    const assets = await drain(c.export_id, 'assets');
+    expect(assets.length).toBeGreaterThan(0);
+    expect(assets.every(x => x.status === 'not_readable')).toBe(true);
+    const done = await finalizeWorkspaceExport(ws, c.export_id, reader, db as any);
+    expect(done.complete).toBe(false);
+    expect(done.manifest.incomplete_reasons).toEqual(expect.arrayContaining(['asset_issues']));
+    await regrant();
+    await db`DELETE FROM workspace_exports WHERE workspace_id=${ws}`;
+    // A fresh session after the revocation is reinstated again sees the channel.
+    expect((await run(reader)).seen.records!.some(r => r.id === ids.doc)).toBe(true);
   });
 
   test('a write during the export is reported, never hidden', async () => {

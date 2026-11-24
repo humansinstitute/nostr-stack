@@ -128,28 +128,38 @@ const HISTORY = [
   { kind: 'daily_note_version', table: 'flightdeck_pg_daily_note_versions', parent: 'daily_note', parentKey: 'daily_note_id', order: 'v.daily_note_id::text, v.row_version', keyset: 'v.daily_note_id::text, v.row_version', key: (r: any) => [String(r.daily_note_id), String(r.row_version)] },
 ];
 /** Retained history of every exported parent, with the parent's own authority (the parent was filtered in the records section). */
-async function historyPage(exportId: string, workspaceId: string, cursor: string | null, limit: number, sql: Db): Promise<Page> {
+async function historyPage(exportId: string, workspaceId: string, viewer: Awaited<ReturnType<typeof viewerFor>>, cursor: string | null, limit: number, sql: Db): Promise<Page> {
   let [t, a, b] = decode(cursor, (v): v is [number, string, string] => Array.isArray(v) && v.length === 3 && Number.isInteger(v[0]) && v[0] >= 0 && v[0] < HISTORY.length && typeof v[1] === 'string' && typeof v[2] === 'string') ?? [0, '', '-1'];
+  const visible = recordVisibility(workspaceId, viewer.actorId, { npub: viewer.npub, app_npub: viewer.workspace.app_npub }, sql);
   for (; t < HISTORY.length; t++, a = '', b = '-1') {
     const h = HISTORY[t]!;
     const rows = await sql.unsafe(`SELECT to_jsonb(v) AS row, octet_length(to_jsonb(v)::text) AS bytes FROM ${h.table} v
       JOIN workspace_export_keys k ON k.export_id=$1 AND k.family=$2 AND k.id=v.${h.parentKey}::text
       WHERE v.workspace_id=$3 AND (${h.keyset}) > ($4::text, $5::int) ORDER BY ${h.order} LIMIT ${limit + 1}`, [exportId, h.parent, workspaceId, a, Number(b)]) as { row: any; bytes: number }[];
     if (!rows.length) continue;
+    // The keys prove the parent was readable earlier. Authority is re-evaluated for every parent on every page, so history of a
+    // resource the member can no longer read (or that no longer exists) is never delivered.
+    const window = rows.slice(0, limit);
+    const parentIds = [...new Set(window.map(r => String(r.row[h.parentKey])))];
+    const parents = await sql<(RecordEntry & { id: string })[]>`SELECT family,id,position::text,bytes,context AS row FROM flightdeck_pg_record_current
+      WHERE workspace_id=${workspaceId} AND family=${h.parent} AND id=ANY(${parentIds}::text[])`;
+    const allowed = new Set<string>();
+    for (const p of parents) if (await visible({ ...p, operation: 'upsert' })) allowed.add(p.id);
     const page: Page = { items: [], identities: [], bytes: 0, next: null, keys: [], assets: [] };
-    let last: string[] | null = null;
-    for (const r of rows.slice(0, limit)) {
-      if (Number(r.bytes) > EXPORT_ITEM_MAX_BYTES) throw new HostingError(413, 'export_item_too_large');
-      if (page.items.length && page.bytes + Number(r.bytes) > EXPORT_PAGE_BYTES) break;
+    let last: string[] | null = null, processed = 0;
+    for (const r of window) {
       const key = h.key(r.row);
-      page.items.push({ kind: h.kind, row: r.row });
-      page.identities.push(`${h.kind}:${key.join(':')}`);
-      page.bytes += Number(r.bytes);
-      page.assets.push(...objectRefs(h.kind, key.join(':'), r.row));
-      last = key;
+      if (allowed.has(String(r.row[h.parentKey]))) {
+        if (Number(r.bytes) > EXPORT_ITEM_MAX_BYTES) throw new HostingError(413, 'export_item_too_large');
+        if (page.items.length && page.bytes + Number(r.bytes) > EXPORT_PAGE_BYTES) break;
+        page.items.push({ kind: h.kind, row: r.row });
+        page.identities.push(`${h.kind}:${key.join(':')}`);
+        page.bytes += Number(r.bytes);
+        page.assets.push(...objectRefs(h.kind, key.join(':'), r.row));
+      }
+      processed++; last = key;
     }
-    const more = rows.length > page.items.length;
-    page.next = more ? encode([t, ...last!]) : t < HISTORY.length - 1 ? encode([t + 1, '', '-1']) : null;
+    page.next = rows.length > processed ? encode([t, ...last!]) : t < HISTORY.length - 1 ? encode([t + 1, '', '-1']) : null;
     return page;
   }
   return { items: [], identities: [], bytes: 0, next: null, keys: [], assets: [] };
@@ -190,6 +200,13 @@ async function assetsPage(exportId: string, viewer: Awaited<ReturnType<typeof vi
   return page;
 }
 
+/** Takes the workspace clock's share lock (so no authority change can commit while this page is built) and fails closed, before any
+ * data is read, if the authority the session was pinned to has changed. A revoked channel or membership change therefore ends the
+ * session: an earlier cursor is never a capability, replay included. */
+async function assertAuthorityUnchanged(session: any, workspaceId: string, sql: Db) {
+  const [clock] = await sql`SELECT epoch,access_revision::text AS access_revision FROM flightdeck_pg_record_clock WHERE workspace_id=${workspaceId} FOR SHARE`;
+  if (!clock || clock.epoch !== session.clock_epoch || String(clock.access_revision) !== String(session.access_revision)) throw new HostingError(409, 'export_invalidated');
+}
 export async function readWorkspaceExportPage(workspaceId: string, exportId: string, actorNpub: string, input: { section: unknown; cursor?: string | null; limit?: unknown }, db: Db = getDb()) {
   if (typeof input.section !== 'string' || !(SECTIONS as readonly string[]).includes(input.section)) throw new HostingError(400, 'invalid_section');
   const section = input.section as ExportSection;
@@ -201,6 +218,7 @@ export async function readWorkspaceExportPage(workspaceId: string, exportId: str
     const viewer = await viewerFor(workspaceId, actorNpub, sql);
     const row = await ownedSession(exportId, workspaceId, actorNpub, sql, true);
     if (row.finalized_at) throw new HostingError(409, 'export_finalized');
+    await assertAuthorityUnchanged(row, workspaceId, sql);
     const state = row.state as ExportState;
     const mine = state.sections[section];
     const firstOpen = SECTIONS.findIndex(s => !state.sections[s].done);
@@ -210,7 +228,7 @@ export async function readWorkspaceExportPage(workspaceId: string, exportId: str
     const replaying = !advancing && mine.through !== null && cursor === mine.prev;
     if (!advancing && !replaying) throw new HostingError(409, 'cursor_invalid');
     const page = section === 'records' ? await recordsPage(exportId, workspaceId, viewer, cursor, limit, sql)
-      : section === 'history' ? await historyPage(exportId, workspaceId, cursor, limit, sql)
+      : section === 'history' ? await historyPage(exportId, workspaceId, viewer, cursor, limit, sql)
       : await assetsPage(exportId, viewer, cursor, sql);
     if (page.keys.length) await sql`INSERT INTO workspace_export_keys(export_id,workspace_id,family,id) SELECT ${exportId},${workspaceId},f,i FROM unnest(${page.keys.map(k => k.family)}::text[],${page.keys.map(k => k.id)}::text[]) AS t(f,i) ON CONFLICT DO NOTHING`;
     if (page.assets.length) await sql`INSERT INTO workspace_export_assets(export_id,workspace_id,object_id,ref_family,ref_id,role)
@@ -260,12 +278,14 @@ export async function finalizeWorkspaceExport(workspaceId: string, exportId: str
     const state = row.state as ExportState;
     if (SECTIONS.some(s => !state.sections[s].done)) throw new HostingError(409, 'export_not_traversed');
     const clock = await clockOf(workspaceId, sql);
-    const consistent = String(clock.position) === String(row.clock_position) && clock.epoch === row.clock_epoch && String(clock.access_revision) === String(row.access_revision);
+    const authorityChanged = clock.epoch !== row.clock_epoch || String(clock.access_revision) !== String(row.access_revision);
+    const consistent = String(clock.position) === String(row.clock_position) && !authorityChanged;
     const dangling = await danglingEdges(exportId, workspaceId, sql);
     const coverage = exportCoverage();
     const assetIssueCount = Object.values(state.assetIssues).reduce((a, b) => a + b, 0);
     const reasons = [
-      ...(consistent ? [] : ['writes_during_export']),
+      ...(authorityChanged ? ['access_changed'] : []),
+      ...(consistent || authorityChanged ? [] : ['writes_during_export']),
       ...(dangling.length ? ['dangling_relationships'] : []),
       ...(assetIssueCount ? ['asset_issues'] : []),
       ...(coverage.uncovered_required.length ? ['uncovered_content'] : []),

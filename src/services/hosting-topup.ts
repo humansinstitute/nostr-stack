@@ -5,13 +5,14 @@ import { issueTopupLightningQuote, lightningProvider, readTopupLightningQuote, r
 import { requireOnboardingEnabled } from './onboarding';
 
 type Db = ReturnType<typeof getDb>;
-/** The owner's shared USD account, but only once it backs a provisioned workspace. Top-ups never create an intent, workspace,
- * introduction or any other resource: a verified payment is one settlement and one ledger credit on this account. */
+/** The owner's shared USD account, but only once provisioning has completed: an activated peak-storage enrollment is written in the
+ * transaction that marks the intent provisioned, so a failed or partial setup (no workspace, a link without activation) is refused.
+ * Top-ups never create an intent, workspace, introduction or any other resource: a verified payment is one settlement and one ledger credit. */
 export async function ownerTopupAccount(ownerNpub: string, db: Db = getDb()) {
   const [account] = await db`SELECT a.id FROM hosting_accounts a JOIN flightdeck_pg_actors o ON o.id=a.owner_actor_id WHERE o.npub=${ownerNpub}`;
   if (!account) throw new HostingError(404, 'account_not_found');
-  const [linked] = await db`SELECT 1 FROM hosting_workspace_accounts WHERE account_id=${account.id} LIMIT 1`;
-  if (!linked) throw new HostingError(409, 'account_not_provisioned');
+  const [provisioned] = await db`SELECT 1 FROM hosting_storage_enrollments WHERE account_id=${account.id} AND activated_at IS NOT NULL LIMIT 1`;
+  if (!provisioned) throw new HostingError(409, 'account_not_provisioned');
   return account.id as string;
 }
 
