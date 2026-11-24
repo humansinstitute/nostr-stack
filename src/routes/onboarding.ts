@@ -3,7 +3,7 @@ import { requireNip98AuthResolved, verifyStrictNip98Mutation } from '../auth';
 import { HostingError } from '../services/hosting-billing';
 import { approvedCheckoutReturnUrls, createHostingCheckout, requestStripeRefund } from '../services/hosting-stripe';
 import { fundingReversalSummary } from '../services/hosting-funding';
-import { lightningAvailable, issueLightningQuote, readLightningQuote, reconcileOpenLightningQuotes, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
+import { lightningAvailable, issueLightningQuote, readLightningQuote, reconcileOpenLightningQuotes, reconcileReceiverBindingFeed, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
 import { getDb } from '../db';
 import { stripeAvailability } from '../services/hosting-billing';
 import { ONBOARDING_MAX_FUNDING_CENTS, ONBOARDING_MIN_FUNDING_CENTS, onboardingEnabled } from '../services/onboarding';
@@ -128,5 +128,6 @@ onboardingRouter.post('/admin/invites/:id/release-seat', guard(async c => {
 }));
 onboardingRouter.post('/admin/agent-offers', guard(async c => { const { actor, body } = await mutation(c); return c.json({ offer: await createAgentOffer(body, actor) }, 201); }));
 onboardingRouter.post('/admin/refunds', guard(async c => { const { actor, body } = await mutation(c); return c.json({ refund: await requestStripeRefund(body, actor) }, 201); }));
+onboardingRouter.post('/admin/lightning/receiver/bindings/reconcile', guard(async c => { const { actor } = await mutation(c); return c.json(await reconcileReceiverBindingFeed(actor)); }));
 onboardingRouter.post('/admin/lightning/reconcile', guard(async c => { const { actor } = await mutation(c); return c.json(await reconcileOpenLightningQuotes(actor)); }));
 onboardingRouter.post('/admin/lightning-refunds', guard(async c => { const { actor, body } = await mutation(c, 8192); return c.json({ refund: await requestLightningRefund(body, actor) }, 201); }));

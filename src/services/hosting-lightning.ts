@@ -6,6 +6,7 @@ import { requireIdentityBackup } from './hosted-identity-backup';
 import { applyAdjustment, availableRefundableUnits, missingFundingReserves, recordSettlement, refundableCents, UNITS_PER_CENT } from './hosting-funding';
 import { markOnboardingFunded, requireOnboardingEnabled } from './onboarding';
 import { TOPUP_MAX_CENTS, TOPUP_MIN_CENTS } from './hosting-topup-limits';
+import { reconcileBindingFeed, receiverPayeeRef, storeBinding, verifyIssuedBinding, verifyMintView, type BindingRecord, type ReceiverExpectation } from './hosting-lightning-receiver';
 
 type Db = ReturnType<typeof getDb>;
 const HASH = /^[0-9a-f]{64}$/;
@@ -17,14 +18,25 @@ const preimageMatches = (preimageHex: unknown, paymentHash: string) => typeof pr
 /** What NStack requires of a Lightning provider before it may fund USD credit. No production adapter exists: a real provider's
  * invoice, FX-quote and settlement contract has not been verified, so none is invented here. A future adapter is a trusted,
  * server-configured module that implements this port; callers can never supply settlement evidence themselves. */
+export type LightningEvidenceKind = 'preimage' | 'mint_redemption';
 export interface LightningProvider {
   readonly id: string;
+  /** Fixed by trusted provider registration, never by a response or request. A preimage can never credit a mint provider and vice versa. Default 'preimage'. */
+  readonly evidenceKind?: LightningEvidenceKind;
+  /** Mint-backed providers only: the trusted mint and treasury identity every binding and evidence record must name. Never read from a response. */
+  readonly mintBacked?: ReceiverExpectation;
+  /** Mint-backed providers only: one settlement pass for an order, returning the receiver's raw view (verified by NStack, never trusted). */
+  settleOrder?(orderRef: string): Promise<unknown>;
+  /** Mint-backed providers only: one page of the receiver's immutable binding feed (completeness check, never a credit path). */
+  bindingsPage?(after: number, limit: number): Promise<unknown>;
   /** Our receiving identity (node/account). Every issued invoice and every settlement must report exactly this. */
   readonly payeeRef: string;
   /** Idempotent per orderRef: a retry returns the same invoice. The provider converts USD to sats and reports its rate evidence. */
   issueInvoice(req: { orderRef: string; amountCents: number }): Promise<{
     invoice: string; paymentHash: string; amountSats: number; expiresAt: string; payeeRef: string;
     rate: { source: string; quotedAt: string; ref?: string };
+    /** Mint-backed providers: the immutable order binding, persisted with the quote before the invoice becomes visible. */
+    binding?: unknown; lockPubkey?: string;
   }>;
   /** Authoritative provider state for one invoice. The preimage is checked locally against the payment hash. */
   lookupInvoice(paymentHash: string): Promise<{
@@ -122,9 +134,25 @@ export async function readTopupLightningQuote(quoteId: string, accountId: string
 }
 
 /** The provider call is idempotent per quote id, so a crash between issue and record is repaired by replaying the same request. */
+const kindOf = (p: { evidenceKind?: LightningEvidenceKind }): LightningEvidenceKind => p.evidenceKind ?? 'preimage';
 async function completeIssuance(held: any, db: Db, p: LightningProvider) {
   const issued = await p.issueInvoice({ orderRef: held.id, amountCents: held.amount_cents });
-  validateIssued(issued, p, new Date());
+  const now = new Date();
+  validateIssued(issued, p, now);
+  if (kindOf(p) === 'mint_redemption') {
+    if (!p.mintBacked || p.payeeRef !== receiverPayeeRef(p.mintBacked)) throw new HostingError(503, 'lightning_unavailable');
+    // The binding is verified and stored in the SAME transaction that opens the quote, so an invoice is never visible without its durable backing record.
+    const binding = verifyIssuedBinding(issued.binding, held, { invoice: issued.invoice, paymentHash: issued.paymentHash, amountSats: issued.amountSats, expiresAt: issued.expiresAt, lockPubkey: issued.lockPubkey }, p.mintBacked, now);
+    return db.begin(async transaction => {
+      const tx = transaction as unknown as Db;
+      const [current] = await tx`SELECT * FROM hosting_lightning_quotes WHERE id=${held.id} FOR UPDATE`;
+      if (current!.state !== 'issuing') { await storeBinding(tx, held.id, binding); return current; }
+      await storeBinding(tx, held.id, binding);
+      const [opened] = await tx`UPDATE hosting_lightning_quotes SET state='open',provider=${p.id},payee_ref=${p.payeeRef},evidence_kind='mint_redemption',invoice=${issued.invoice},payment_hash=${issued.paymentHash},amount_sats=${issued.amountSats},
+        rate_source=${issued.rate.source},rate_ref=${issued.rate.ref ?? null},rate_quoted_at=${issued.rate.quotedAt},expires_at=${issued.expiresAt},updated_at=now() WHERE id=${held.id} AND state='issuing' RETURNING *`;
+      return opened;
+    });
+  }
   const [row] = await db`UPDATE hosting_lightning_quotes SET state='open',provider=${p.id},payee_ref=${p.payeeRef},invoice=${issued.invoice},payment_hash=${issued.paymentHash},amount_sats=${issued.amountSats},
     rate_source=${issued.rate.source},rate_ref=${issued.rate.ref ?? null},rate_quoted_at=${issued.rate.quotedAt},expires_at=${issued.expiresAt},updated_at=now() WHERE id=${held.id} AND state='issuing' RETURNING *`;
   return row ?? (await db`SELECT * FROM hosting_lightning_quotes WHERE id=${held.id}`)[0];
@@ -136,8 +164,16 @@ export async function resolveLightningQuote(quoteId: string, db: Db = getDb(), p
   const [peek] = await db`SELECT * FROM hosting_lightning_quotes WHERE id=${quoteId}`;
   if (!peek) throw new HostingError(404, 'quote_not_found');
   if (!['open', 'late_payment', 'mismatch'].includes(peek.state)) return quoteView(peek);
-  let info = await p.lookupInvoice(peek.payment_hash);
-  if (info.status === 'pending' && p.cancelInvoice && (cancel || new Date(peek.expires_at).getTime() <= now().getTime())) {
+  const mintKind = kindOf(p) === 'mint_redemption';
+  // Evidence kinds never cross: a quote issued under one kind is only ever settled by a provider of the same trusted kind.
+  if (mintKind !== (peek.evidence_kind === 'mint_redemption')) return quoteView(peek);
+  let view: unknown = null;
+  if (mintKind) {
+    if (!p.settleOrder || !p.mintBacked) throw new HostingError(503, 'lightning_unavailable');
+    view = await p.settleOrder(peek.id);
+  }
+  let info = (mintKind ? { status: 'pending', paymentHash: peek.payment_hash, payeeRef: peek.payee_ref } : await p.lookupInvoice(peek.payment_hash)) as Awaited<ReturnType<LightningProvider['lookupInvoice']>>;
+  if (!mintKind && info.status === 'pending' && p.cancelInvoice && (cancel || new Date(peek.expires_at).getTime() <= now().getTime())) {
     // Cancelling (or an invoice past its stated expiry) is made unpayable at the provider before the hold is released.
     try { info = { ...info, ...(await p.cancelInvoice(peek.payment_hash)) }; } catch { /* stays unresolved */ }
   }
@@ -146,6 +182,20 @@ export async function resolveLightningQuote(quoteId: string, db: Db = getDb(), p
     const [q] = await tx`SELECT * FROM hosting_lightning_quotes WHERE id=${quoteId} FOR UPDATE`;
     if (!['open', 'late_payment', 'mismatch'].includes(q!.state)) return quoteView(q);
     const note = async (state: string, evidence: Record<string, unknown>) => quoteView((await tx`UPDATE hosting_lightning_quotes SET state=${state},evidence=${tx.json({ ...q!.evidence, ...evidence } as any)},updated_at=now() WHERE id=${q!.id} RETURNING *`)[0]);
+    if (mintKind) {
+      const [stored] = await tx`SELECT record FROM hosting_lightning_bindings WHERE quote_id=${q!.id}`;
+      if (!stored) return note('mismatch', { reason: 'binding_missing', observed_at: now().toISOString() });
+      const out = verifyMintView(view, q as any, stored.record as BindingRecord, p.mintBacked!);
+      if (out.kind === 'pending') return quoteView(q);
+      if (out.kind === 'mismatch') return note('mismatch', { reason: out.reason, observed_at: now().toISOString() });
+      if (out.kind === 'late') return note('late_payment', { settled_at: out.settledAt?.toISOString() ?? null, receiver_evidence: out.evidence, observed_at: now().toISOString() });
+      const [intent] = await tx`SELECT id,account_id FROM onboarding_intents WHERE id=${q!.intent_id}`;
+      const settled = await recordSettlement(tx, { accountId: q!.account_id, method: 'lightning', providerRef: q!.payment_hash, orderId: q!.id, intentId: q!.intent_id, amountCents: q!.amount_cents, ledgerKind: 'lightning',
+        reason: 'Verified Lightning payment (mint redemption)', evidence: { provider: q!.provider, evidence_kind: 'mint_redemption', payee_ref: q!.payee_ref, amount_sats: Number(q!.amount_sats), rate_source: q!.rate_source, settled_at: out.settledAt.toISOString(), receiver_evidence: out.evidence, receiver_evidence_digest: out.evidenceDigest } });
+      if (intent) await markOnboardingFunded({ id: q!.id, intent_id: q!.intent_id, account_id: q!.account_id, amount_cents: q!.amount_cents }, settled.settlement.id, tx, null);
+      const [done] = await tx`UPDATE hosting_lightning_quotes SET state='settled',settled_at=${out.settledAt},evidence=${tx.json({ ...q!.evidence, receiver_evidence_digest: out.evidenceDigest } as any)},updated_at=now() WHERE id=${q!.id} RETURNING *`;
+      return quoteView(done);
+    }
     if (info.paymentHash !== q!.payment_hash || info.payeeRef !== q!.payee_ref) return note('mismatch', { reason: 'identity', observed_at: now().toISOString() });
     if (info.status === 'expired' || info.status === 'cancelled') return note(info.status, { observed_at: now().toISOString() });
     if (info.status !== 'settled') return quoteView(q);
@@ -195,6 +245,13 @@ export async function reconcileOpenLightningQuotes(actorNpub: string, db: Db = g
   const out: Record<string, number> = {};
   for (const q of quotes) { try { const r = await resolveLightningQuote(q.id, db, p); out[r.state] = (out[r.state] ?? 0) + 1; } catch { out.error = (out.error ?? 0) + 1; } }
   return { checked: quotes.length, states: out };
+}
+
+/** Administrator-triggered completeness check of the receiver's binding journal against our stored bindings (gap-free chain, orphans, conflicts). */
+export async function reconcileReceiverBindingFeed(actorNpub: string, db: Db = getDb(), p: LightningProvider = lightningProvider()) {
+  if (!config.adminNpub || actorNpub !== config.adminNpub) throw new HostingError(403, 'platform_admin_required');
+  if (kindOf(p) !== 'mint_redemption' || !p.bindingsPage || !p.mintBacked) throw new HostingError(503, 'lightning_unavailable');
+  return reconcileBindingFeed(db, p.bindingsPage.bind(p), p.mintBacked);
 }
 
 // ---- Support-assisted refund to a verified customer invoice --------------------------------------------------------
