@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { config } from '../config';
 import { getDb } from '../db';
 import { HostingError } from './hosting-billing';
+import { requireIdentityBackup } from './hosted-identity-backup';
 import { applyAdjustment, availableRefundableUnits, missingFundingReserves, recordSettlement, refundableCents, UNITS_PER_CENT } from './hosting-funding';
 import { markOnboardingFunded, requireOnboardingEnabled } from './onboarding';
 import { TOPUP_MAX_CENTS, TOPUP_MIN_CENTS } from './hosting-topup-limits';
@@ -82,6 +83,7 @@ export async function issueLightningQuote(intentId: string, ownerNpub: string, b
       return prior;
     }
     if (intent.status !== 'open') throw new HostingError(409, 'intent_not_open');
+    await requireIdentityBackup(intent, ownerNpub, tx);
     const [row] = await tx`INSERT INTO hosting_lightning_quotes(account_id,intent_id,idempotency_key,request_sha256,amount_cents) VALUES(${intent.account_id},${intent.id},${b.idempotency_key},${digest},${intent.funding_cents}) RETURNING *`;
     return row!;
   });

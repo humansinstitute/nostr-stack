@@ -4,6 +4,7 @@ import { getDb } from '../db';
 import { resolveOrCreateFlightDeckPgActor } from './flightdeck-pg-authorization';
 import { generatedFlightDeckPgWorkspaceServiceNpub, setupFlightDeckPgDevWorkspace } from './flightdeck-pg-setup';
 import { HostingError, unitsUsd } from './hosting-billing';
+import { requireIdentityBackup } from './hosted-identity-backup';
 import { netFundedCents } from './hosting-funding';
 import { activatePeakStorage, enrollPeakStorage, takeStorageAnchor } from './hosting-storage';
 import { resolveCheckoutOrders } from './hosting-stripe';
@@ -206,7 +207,7 @@ async function view(row: any, sql: Db) {
     workspace_name: row.workspace_name as string, agent,
     // Selecting an agent does not provision one: a later stage adds an 'agent' step. Workspace readiness never implies an agent exists.
     agent_state: (row.agent_offer_id ? (row.steps.agent ? 'provisioned' : 'selected_not_provisioned') : 'none') as 'none' | 'selected_not_provisioned' | 'provisioned',
-    funding_cents: row.funding_cents as number, return_state: row.return_state as string | null,
+    identity_origin: (row.identity_origin ?? 'existing') as 'new' | 'existing', funding_cents: row.funding_cents as number, return_state: row.return_state as string | null,
     funded: row.funded_at !== null, funded_at: row.funded_at as string | null,
     funding_reversed: row.funded_settlement_id ? (await netFundedCents(sql, row.funded_settlement_id)) < row.funding_cents : false,
     steps: Object.fromEntries(Object.entries(row.steps as Record<string, any>).map(([k, v]) => [k, { completed_at: v.completed_at as string }])),
@@ -219,10 +220,12 @@ export type OnboardingIntentView = Awaited<ReturnType<typeof view>>;
 
 export async function createIntent(ownerNpub: string, body: any, db: Db = getDb()) {
   requireOnboardingEnabled();
-  exact(body, ['client_request_key', 'invite_code', 'workspace_name', 'funding_cents'], ['agent_offer_id', 'agent_daily_cap_cents', 'return_state']);
+  exact(body, ['client_request_key', 'invite_code', 'workspace_name', 'funding_cents'], ['agent_offer_id', 'agent_daily_cap_cents', 'return_state', 'identity_origin']);
+  if ('identity_origin' in body && !['new', 'existing'].includes(body.identity_origin)) throw bad('invalid_identity_origin');
+  const identityOrigin: 'new' | 'existing' = body.identity_origin === 'new' ? 'new' : 'existing';
   if (typeof body.client_request_key !== 'string' || !KEY.test(body.client_request_key)) throw bad('invalid_client_request_key');
   const workspaceName = validateName(body.workspace_name), funding = validateFunding(body.funding_cents), returnState = validateReturnState(body.return_state);
-  const digest = sha(JSON.stringify([body.invite_code, workspaceName, funding, body.agent_offer_id ?? null, body.agent_daily_cap_cents ?? null, returnState]));
+  const digest = sha(JSON.stringify([body.invite_code, workspaceName, funding, body.agent_offer_id ?? null, body.agent_daily_cap_cents ?? null, returnState, ...(identityOrigin === 'new' ? [identityOrigin] : [])]));
   return db.begin(async tx => {
     const sql = tx as unknown as Db;
     const { owner, account } = await ensureOwnerAccount(ownerNpub, sql);
@@ -237,8 +240,8 @@ export async function createIntent(ownerNpub: string, body: any, db: Db = getDb(
     if (open >= MAX_OPEN_INTENTS) throw new HostingError(429, 'too_many_open_intents');
     const { offer, cap } = await resolveAgent(body.agent_offer_id, body.agent_daily_cap_cents, sql);
     const inviteId = await reserveSeat(body.invite_code, owner.id, sql);
-    const [row] = await sql`INSERT INTO onboarding_intents(owner_actor_id,account_id,client_request_key,request_sha256,invite_id,workspace_name,workspace_name_key,agent_offer_id,agent_daily_cap_cents,funding_cents,return_state)
-      VALUES(${owner.id},${account.id},${body.client_request_key},${digest},${inviteId},${workspaceName},${key},${offer?.id ?? null},${cap},${funding},${returnState}) RETURNING *`;
+    const [row] = await sql`INSERT INTO onboarding_intents(owner_actor_id,account_id,client_request_key,request_sha256,invite_id,workspace_name,workspace_name_key,agent_offer_id,agent_daily_cap_cents,funding_cents,return_state,identity_origin)
+      VALUES(${owner.id},${account.id},${body.client_request_key},${digest},${inviteId},${workspaceName},${key},${offer?.id ?? null},${cap},${funding},${returnState},${identityOrigin}) RETURNING *`;
     return { intent: await view(row, sql), replayed: false };
   });
 }
@@ -312,6 +315,7 @@ export async function intentForCheckout(id: string, ownerNpub: string, db: Db = 
   requireOnboardingEnabled();
   const row = await ownedIntent(id, ownerNpub, db);
   if (row.status !== 'open') throw new HostingError(409, 'intent_not_open');
+  await requireIdentityBackup(row, ownerNpub, db);
   return { accountId: row.account_id as string, amountCents: row.funding_cents as number, intentId: row.id as string };
 }
 

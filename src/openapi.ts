@@ -8,6 +8,7 @@ import { buildNstackConsoleHtml } from './nstack-console';
 import { hostingPaths, hostingSchemas } from './hosting-openapi';
 import { onboardingPaths, onboardingSchemas } from './onboarding-openapi';
 import { agentHoldsPaths, agentHoldsSchemas } from './agent-holds-openapi';
+import { identityBackupPaths, identityBackupSchemas } from './identity-backup-openapi';
 import { orgDataPaths, orgDataSchemas } from './org-data-openapi';
 import { contextTreePaths, contextTreeSchemas } from './context-tree-openapi';
 import { notificationPaths, notificationSchemas } from './notifications-openapi';
@@ -2552,6 +2553,7 @@ export function buildOpenApiDocument(origin: string) {
         ...hostingSchemas,
         ...onboardingSchemas,
         ...agentHoldsSchemas,
+        ...identityBackupSchemas,
         ...feedReaderSchemas,
         ...contextTreeSchemas,
         ...notificationSchemas,
@@ -4436,6 +4438,7 @@ export function buildOpenApiDocument(origin: string) {
       ...hostingPaths,
       ...onboardingPaths,
       ...agentHoldsPaths,
+      ...identityBackupPaths,
       '/{sha256}': {
         get: { security: [{}, { nip98: [] }, { blossom: [] }], tags: ['Storage'], summary: 'Retrieve verified Blossom blob (BUD-01)', description: 'Root SHA-256 path accepts optional extension. Public objects are anonymous; private objects require BUD-11 get or NIP-98 authorization with existing storage ACLs. Range and If-Range are supported. No listing, upload or delete Blossom endpoints.', parameters: [{ name: 'sha256', in: 'path', required: true, schema: { type: 'string', pattern: '^[0-9a-f]{64}(\\.[a-zA-Z0-9]+)?$' } }, { name: 'Range', in: 'header', schema: { type: 'string' } }], responses: { '200': { description: 'Exact verified blob bytes' }, '206': { description: 'Single byte range' }, '401': { description: 'Missing or invalid authorization; anonymous negatives do not reveal private existence' }, '404': { description: 'Unavailable to authenticated caller' }, '416': { description: 'Unsatisfiable or unsupported range' } } },
         head: { security: [{}, { nip98: [] }, { blossom: [] }], tags: ['Storage'], summary: 'Retrieve Blossom headers without a body', parameters: [{ name: 'sha256', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Content-Type, Content-Length, ETag and Accept-Ranges' }, '401': { description: 'Authorization required or unavailable' }, '404': { description: 'Unavailable' } } },
