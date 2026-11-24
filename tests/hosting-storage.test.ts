@@ -13,8 +13,8 @@ import { USD_UNITS, auditHostingHour, grantHostingCredit, hostingWriteBlock, run
 import { availableRefundableUnits, registerFundingReserve } from '../src/services/hosting-funding';
 import { enrollWorkspaceBilling } from '../src/services/hosting-workspace-billing';
 import {
-  GB, accountStorageSummary, activatePeakStorage, enrollPeakStorage, ensureBoundary, forwardWindowUnits, hourlyCharge, isIntroHour, measureStorage,
-  registerStorageProtectionReserve, runStoragePeakTick, runwayHours, settleStorageHours, storageProtectedUnits, takeStorageAnchor,
+  GB, accountStorageSummary, activatePeakStorage, enrollPeakStorage, ensureBoundary, forwardWindowUnits, hourEvidence, hourlyCharge, isIntroHour, measureStorage,
+  missingStorageCategories, registerMeteredStorageCategory, registerStorageProtectionReserve, runStoragePeakTick, runwayHours, settleStorageHours, storageProtectedUnits, takeStorageAnchor,
 } from '../src/services/hosting-storage';
 import { openOwnerAccount } from '../src/services/onboarding';
 
@@ -221,10 +221,9 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     const [{ net: net2 }] = await db`SELECT COALESCE(sum(delta_bytes),0)::text AS net FROM hosting_storage_deltas WHERE workspace_id=${id}`;
     const end = await measureStorage(id, db as any);
     expect(BigInt(net2)).toBe(end.postgres_bytes + end.object_bytes - before.postgres_bytes - before.object_bytes);
-    expect((await db`SELECT 1 FROM hosting_storage_observations WHERE workspace_id=${id}`).length).toBeGreaterThanOrEqual(3);
   });
 
-  test('a delete inside the hour cannot erase the peak; ordinary hour is charged at the pre-delete peak', async () => {
+  test('a delete inside the hour cannot erase the peak; ordinary hour is charged at the replayed peak', async () => {
     const { id, h } = await workspace();
     await real(id);
     const start = await measureStorage(id, db as any);
@@ -236,7 +235,7 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     expect((await settleStorageHours(id, db as any, clock)).settled).toBe(1);
     const [row] = await hours(id);
     expect(row!.peak_bytes).toBe((base + 3_000_000_000n).toString());
-    expect(row!.observed_peak_bytes).toBe((base + 3_000_000_000n).toString());
+    expect(row!.intrahour_peak_bytes).toBe((base + 3_000_000_000n).toString());
     expect(row!.end_bytes).toBe(base.toString());
     expect(row!.intro).toBe(false);
     expect(row!.due_units).toBe((base + 3_000_000_000n).toString());
@@ -271,7 +270,7 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     await settleStorageHours(id, db as any, () => new Date(h + HOUR + 10 * 60_000));
     const [row] = await hours(id);
     expect(row!.peak_bytes).toBe((b.postgres_bytes + b.object_bytes + 4_000_000_000n).toString());
-    expect(row!.observed_peak_bytes).toBeNull();
+    expect(row!.intrahour_peak_bytes).toBe(row!.peak_bytes);
   });
 
   test('the peak and the debit survive a process restart: every fact lives in committed rows', async () => {
@@ -297,12 +296,12 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     const first = await anchorAt(id, h + HOUR + 1_000);
     const boundary = new Date(h + HOUR);
     const total = await ensureBoundary(db as any, id, boundary);
-    expect(total).toBe(BigInt(first!.total_bytes));
+    expect(total).toMatchObject({ state: 'ok', total: BigInt(first!.total_bytes) });
     await objectRow(id, 777);
     await anchorAt(id, h + HOUR + 120_000);
-    expect(await ensureBoundary(db as any, id, boundary)).toBe(total);
+    expect(await ensureBoundary(db as any, id, boundary)).toEqual(total);
     // No anchor yet after a later boundary: unknown, never guessed.
-    expect(await ensureBoundary(db as any, id, new Date(h + 5 * HOUR))).toBeNull();
+    expect(await ensureBoundary(db as any, id, new Date(h + 5 * HOUR))).toEqual({ state: 'pending', reason: 'no_anchor' });
   });
 
   test('exact intro boundary: waiver is base-only, excess is charged, and the next hour is ordinary', async () => {
@@ -355,12 +354,13 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     expect(BigInt(sum!.total)).toBe((await balance()).paid + (await balance()).promo);
   });
 
-  test('hours settle only after the delay, and not while their closing measurement is missing', async () => {
+  test('an hour needs a closing anchor after its end; until then it stays pending and nothing is guessed', async () => {
     const { id, h } = await workspace();
     await real(id);
+    const clock = () => new Date(h + 3 * HOUR);
+    expect(await settleStorageHours(id, db as any, clock)).toEqual({ settled: 0, pending: 'no_anchor' });
     await anchorAt(id, h + HOUR + 30_000);
-    expect((await settleStorageHours(id, db as any, () => new Date(h + HOUR + 60_000))).settled).toBe(0);
-    expect((await settleStorageHours(id, db as any, () => new Date(h + 3 * HOUR))).settled).toBe(1); // hour h+1 still lacks its closing anchor
+    expect(await settleStorageHours(id, db as any, clock)).toEqual({ settled: 1, pending: 'no_anchor' }); // hour h+1 still lacks its closing anchor
     expect((await hours(id)).length).toBe(1);
   });
 
@@ -384,7 +384,9 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     expect(Date.parse(block.grace_ends_at) - Date.parse(a!.depleted_at)).toBe(30 * 86400000);
     // Reversal debt (negative purchased balance) is explicit and non-spendable.
     await db`UPDATE hosting_accounts SET paid_units=-5 WHERE id=${acct}`;
+    const unregisterGit = registerMeteredStorageCategory('git');
     const summary = await accountStorageSummary(db as any, acct);
+    unregisterGit();
     expect(summary.balances).toMatchObject({ purchased_units: '0', reversal_debt_units: '5', spendable_units: '0', agent_available_units: '0' });
     expect(summary.admission).toMatchObject({ agent_spend_allowed: false, reason: 'reversal_debt' });
     await db`UPDATE hosting_accounts SET paid_units=10000000000,depleted_at=NULL WHERE id=${acct}`; // top-up
@@ -395,7 +397,7 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     expect((await hours(id)).length).toBe(4); // earlier unfunded hours stay unfunded: no retroactive back-charge
   });
 
-  test('rolled-back writes leave no journal or pre-image; parallel writers journal exactly what they store', async () => {
+  test('rolled-back writes leave no journal; parallel writers journal exactly what they store', async () => {
     const { id } = await workspace();
     await real(id);
     const before = await measureStorage(id, db as any);
@@ -405,7 +407,6 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
       throw new Error('abort');
     })).rejects.toThrow('abort');
     expect((await db`SELECT 1 FROM hosting_storage_deltas WHERE workspace_id=${id}`).length).toBe(0);
-    expect((await db`SELECT 1 FROM hosting_storage_observations WHERE workspace_id=${id}`).length).toBe(0);
     await Promise.all(Array.from({ length: 24 }, (_, i) => i % 3 === 0 ? objectRow(id, 1_000_000 + i) : setRow(id, `p${i}`.repeat(40 + i))));
     await db`DELETE FROM managed_storage_sets WHERE workspace_id=${id} AND membership_digest='d' AND metadata_bytes=1 AND total_count=1 AND id IN (SELECT id FROM managed_storage_sets WHERE workspace_id=${id} LIMIT 3)`;
     const after = await measureStorage(id, db as any);
@@ -413,7 +414,7 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     expect(BigInt(net)).toBe(after.postgres_bytes + after.object_bytes - before.postgres_bytes - before.object_bytes);
   });
 
-  test('managed S3 objects are billable until physical deletion is confirmed, then drop with a pre-image', async () => {
+  test('managed S3 objects are billable until physical deletion is confirmed, and the peak keeps them', async () => {
     const { id } = await workspace();
     await real(id);
     const before = await measureStorage(id, db as any);
@@ -428,8 +429,11 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     expect(shrunk.object_bytes).toBe(before.object_bytes);
     const [{ net }] = await db`SELECT COALESCE(sum(delta_bytes),0)::text AS net FROM hosting_storage_deltas WHERE workspace_id=${id}`;
     expect(BigInt(net)).toBe(shrunk.postgres_bytes + shrunk.object_bytes - before.postgres_bytes - before.object_bytes);
-    const [obs] = await db`SELECT max(bytes)::text AS peak FROM hosting_storage_observations WHERE workspace_id=${id}`;
-    expect(BigInt(obs!.peak)).toBeGreaterThanOrEqual(before.postgres_bytes + before.object_bytes + 8_000_000n);
+    const h = Math.floor(Date.now() / HOUR) * HOUR;
+    await anchorAt(id, h + HOUR + 60_000);
+    const ev = await hourEvidence(db as any, id, new Date(h));
+    expect(ev.state).toBe('ready');
+    if (ev.state === 'ready') expect(ev.intrahour).toBeGreaterThanOrEqual(before.postgres_bytes + before.object_bytes + 8_000_000n);
   });
 
   test('a failed measurement leaves hours pending, never zero; a later anchor settles them from the journal', async () => {
@@ -445,6 +449,118 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     expect(rows.length).toBe(2); // both closed hours are derived from the one later anchor and the retained journal
     expect(BigInt(rows[0]!.peak_bytes)).toBeGreaterThanOrEqual(2_000_000_000n);
     expect(rows[0]!.peak_bytes).toBe(rows[1]!.peak_bytes);
+  });
+
+  test('adversarial: a transaction straddling the hour boundary holds the hour open; it settles with that transaction included', async () => {
+    const { id, h } = await workspace();
+    await real(id);
+    const base = await measureStorage(id, db as any);
+    const level = base.postgres_bytes + base.object_bytes;
+    const clock = () => new Date(h + 3 * HOUR);
+    const other = postgres({ ...conn, database: name });
+    let release!: () => void; const gate = new Promise<void>(r => { release = r; });
+    let started!: () => void; const open = new Promise<void>(r => { started = r; });
+    // Journal row stamped INSIDE the hour, written by a transaction that commits only after the closing anchor was taken.
+    const straddler = other.begin(async t => {
+      await t`INSERT INTO hosting_storage_deltas(workspace_id,category,delta_bytes,at) VALUES(${id},'objects',5000000000,${new Date(h + HOUR - 1000)})`;
+      started(); await gate;
+    });
+    try {
+      await open;
+      await anchorAt(id, h + HOUR + 30_000);
+      expect(await settleStorageHours(id, db as any, clock)).toEqual({ settled: 0, pending: 'in_flight_transactions' });
+      expect((await hours(id)).length).toBe(0);
+      release(); await straddler;
+      await anchorAt(id, h + HOUR + 60_000);
+      expect((await settleStorageHours(id, db as any, clock)).settled).toBe(1);
+      const [row] = await hours(id);
+      expect(row!.intrahour_peak_bytes).toBe((level + 5_000_000_000n).toString());
+      expect(row!.peak_bytes).toBe((level + 5_000_000_000n).toString());
+    } finally { release(); await straddler.catch(() => null); await other.end(); }
+  });
+
+  test('inconsistent journal/measurement is recorded unavailable, never clamped to zero or charged', async () => {
+    const { id, h } = await workspace();
+    await db`INSERT INTO hosting_storage_deltas(workspace_id,category,delta_bytes,at) VALUES(${id},'objects',9000000000,${new Date(h + 1000)})`; // committed journal row no measurement ever reflects
+    await real(id);
+    await anchorAt(id, h + HOUR + 30_000);
+    const before = await balance();
+    expect((await settleStorageHours(id, db as any, () => new Date(h + 3 * HOUR))).settled).toBe(1);
+    const [row] = await hours(id);
+    expect(row).toMatchObject({ status: 'unavailable', reason: 'inconsistent_boundary', ledger_id: null, peak_bytes: null, due_units: null, charged_units: '0' });
+    expect((await db`SELECT status,total_bytes FROM hosting_storage_boundaries WHERE workspace_id=${id} AND boundary=${new Date(h)}`)[0]).toMatchObject({ status: 'inconsistent', total_bytes: null });
+    expect(await balance()).toEqual(before);
+  });
+
+  test('a decreasing statement in a REPEATABLE READ writer still sees other transactions\' committed growth (journal replay, no stale snapshot)', async () => {
+    const { id, h } = await workspace();
+    await real(id);
+    const base = await measureStorage(id, db as any);
+    const level = base.postgres_bytes + base.object_bytes;
+    const old = await objectRow(id, 1_000_000_000);
+    const writer = postgres({ ...conn, database: name });
+    try {
+      await writer.begin('isolation level repeatable read', async t => {
+        await t`SELECT count(*) FROM v4_storage_objects`; // fixes the snapshot before the other writer commits
+        await objectRow(id, 3_000_000_000); // committed by another connection
+        await t`DELETE FROM v4_storage_objects WHERE id=${old[0]!.id}`;
+      });
+    } finally { await writer.end(); }
+    await anchorAt(id, h + HOUR + 30_000);
+    await settleStorageHours(id, db as any, () => new Date(h + 3 * HOUR));
+    const [row] = await hours(id);
+    // +1GB, +3GB (other connection), -1GB: simultaneous maximum is 4GB above the start, not 1GB and not the final 3GB.
+    expect(row!.intrahour_peak_bytes).toBe((level + 4_000_000_000n).toString());
+    expect(row!.end_bytes).toBe((level + 3_000_000_000n).toString());
+  });
+
+  test('the peak is the simultaneous maximum across categories, not a sum of separately peaked categories', async () => {
+    const { id, h } = await workspace();
+    await real(id);
+    const base = await measureStorage(id, db as any);
+    const level = base.postgres_bytes + base.object_bytes;
+    const big = await objectRow(id, 3_000_000_000);
+    await db`DELETE FROM v4_storage_objects WHERE id=${big[0]!.id}`;
+    const managed = randomUUID();
+    await db`INSERT INTO managed_app_storage_objects(id,workspace_id,delegation_id,installation_id,app_id,app_npub,idempotency_key,size_bytes,sha256_hex,publisher_receipt,receipt_bytes,state)
+      VALUES(${managed},${id},${randomUUID()},'i','a','npub',${randomUUID()},8000000,${'b'.repeat(64)},${db.json({ r: 1 })},10,'complete')`;
+    await db`UPDATE managed_app_storage_objects SET physical_absent=true WHERE id=${managed}`;
+    await anchorAt(id, h + HOUR + 30_000);
+    await settleStorageHours(id, db as any, () => new Date(h + 3 * HOUR));
+    const [row] = await hours(id);
+    const peak = BigInt(row!.peak_bytes);
+    expect(peak).toBeGreaterThanOrEqual(level + 3_000_000_000n);
+    expect(peak).toBeLessThan(level + 3_000_000_000n + 8_000_000n); // never 3GB + 8MB added together
+  });
+
+  test('stored-size accuracy: large compressible values are journaled at stored size on insert, update and delete', async () => {
+    const { id } = await workspace();
+    await real(id);
+    const before = await measureStorage(id, db as any);
+    const level = (m: { postgres_bytes: bigint; object_bytes: bigint }) => m.postgres_bytes + m.object_bytes;
+    const net = async () => BigInt((await db`SELECT COALESCE(sum(delta_bytes),0)::text AS n FROM hosting_storage_deltas WHERE workspace_id=${id}`)[0]!.n);
+    const row = await setRow(id, 'a'.repeat(300_000));
+    let after = await measureStorage(id, db as any);
+    expect(after.postgres_bytes - before.postgres_bytes).toBeLessThan(10_000n); // compressed: far below the 300KB raw tuple
+    expect(await net()).toBe(level(after) - level(before));
+    await db`UPDATE managed_storage_sets SET metadata=${db.json({ p: 'z'.repeat(500_000) })} WHERE id=${row[0]!.id}`;
+    after = await measureStorage(id, db as any);
+    expect(await net()).toBe(level(after) - level(before));
+    await db`DELETE FROM managed_storage_sets WHERE id=${row[0]!.id}`;
+    after = await measureStorage(id, db as any);
+    expect(await net()).toBe(level(after) - level(before));
+  });
+
+  test('structural exclusion: service replicas, queues and logs carry no trigger and journal nothing', async () => {
+    const excluded = Object.keys(EXCLUDED_STORAGE_TABLES);
+    const triggered = await db`SELECT DISTINCT c.relname FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid WHERE t.tgname LIKE 'hosting_storage_track_%' AND c.relname=ANY(${excluded})`;
+    expect(triggered.map(r => r.relname)).toEqual([]);
+    const { id } = await workspace();
+    await real(id);
+    await db`INSERT INTO flightdeck_pg_record_current(workspace_id,family,id,row) VALUES(${id},'f','x',${db.json({ big: 'z'.repeat(5000) })})`;
+    await db`INSERT INTO flightdeck_pg_outbox_events(workspace_id,event_type,payload) VALUES(${id},'t',${db.json({ big: 'z'.repeat(5000) })})`;
+    await db`DELETE FROM flightdeck_pg_record_current WHERE workspace_id=${id}`;
+    expect((await db`SELECT 1 FROM hosting_storage_deltas WHERE workspace_id=${id}`).length).toBe(0);
   });
 
   test('failed setup consumes nothing: a pre-activation enrollment journals bytes but never charges', async () => {
@@ -477,44 +593,79 @@ describe.skipIf(!port || port === 5432)('peak storage meter on disposable Postgr
     try { await expect(enrollWorkspaceBilling(id, ownerActor, true, db as any)).rejects.toThrow('workspace_peak_billing_active'); } finally { delete process.env.HOSTING_WORKSPACE_BILLING_ENABLED; }
   });
 
-  test('storage_protection aggregates every linked workspace, protects refunds, and fails closed when unmeasured', async () => {
-    const acct = (await db`INSERT INTO hosting_accounts(owner_actor_id,opened_by,promo_units) VALUES(${(await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${stranger},'human') RETURNING id`)[0]!.id},'onboarding',0) RETURNING id`)[0]!.id as string;
+  test('Git is required billable storage: incomplete coverage fails the reserve closed and never unlocks refunds or agent spend', async () => {
+    const acct = (await db`INSERT INTO hosting_accounts(owner_actor_id,opened_by,promo_units,paid_units) VALUES(${(await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${stranger},'human') RETURNING id`)[0]!.id},'onboarding',0,${(100n * USD_UNITS).toString()}) RETURNING id`)[0]!.id as string;
     const now = new Date();
-    const first = await workspace({ accountId: acct, introEndsAt: h => h + 100 * HOUR });
-    const second = await workspace({ accountId: acct, introEndsAt: h => h - HOUR });
-    // Unmeasured, activated workspace: reserve cannot be sized.
-    await expect(storageProtectedUnits(db as any, acct, now)).rejects.toThrow('storage_reserve_unavailable');
-    await real(first.id); await real(second.id);
-    await objectRow(second.id, 2_000_000_000);
-    const a = BigInt((await db`SELECT hosting_storage_estimate(${first.id}) AS b`)[0]!.b), b = BigInt((await db`SELECT hosting_storage_estimate(${second.id}) AS b`)[0]!.b);
-    const expected = forwardWindowUnits(a, new Date(first.h + 100 * HOUR), now) + forwardWindowUnits(b, new Date(second.h - HOUR), now);
-    expect(await storageProtectedUnits(db as any, acct, now)).toBe(expected);
-    // Refund gating: purchased credit minus the aggregate reserve (agent_holds stand-in registered by this test only).
+    const ws = await workspace({ accountId: acct });
+    await real(ws.id);
+    expect(missingStorageCategories()).toEqual(['git']);
+    await expect(storageProtectedUnits(db as any, acct, now)).rejects.toMatchObject({ code: 'storage_coverage_incomplete', status: 503 });
     registerStorageProtectionReserve();
-    const unregister = registerFundingReserve('agent_holds', async () => 0n);
+    const unregisterHolds = registerFundingReserve('agent_holds', async () => 0n); // stand-in for the agent slice, this test only
     try {
-      const paid = expected + 12_345n;
-      await db`UPDATE hosting_accounts SET paid_units=${paid.toString()} WHERE id=${acct}`;
-      expect(await availableRefundableUnits(db as any, acct)).toBe(12_345n);
-      await db`UPDATE hosting_accounts SET paid_units=${(expected - 1n).toString()} WHERE id=${acct}`;
-      expect(await availableRefundableUnits(db as any, acct)).toBe(0n);
-    } finally { unregister(); }
-    // Growth raises the protected amount immediately, from the write-path journal alone.
-    await db`UPDATE hosting_accounts SET paid_units=${(expected * 2n).toString()} WHERE id=${acct}`;
-    await objectRow(second.id, 1_000_000_000);
-    expect(await storageProtectedUnits(db as any, acct, now)).toBe(expected + 720n * 1_000_000_000n);
+      await expect(availableRefundableUnits(db as any, acct)).rejects.toMatchObject({ code: 'storage_coverage_incomplete' });
+    } finally { unregisterHolds(); }
     const summary = await accountStorageSummary(db as any, acct, now);
-    expect(summary.balances.protected_storage_units).toBe((expected + 720n * 1_000_000_000n).toString());
-    expect(BigInt(summary.balances.agent_available_units)).toBe(expected * 2n - BigInt(summary.balances.protected_storage_units));
-    expect(summary.balances.agent_holds).toEqual({ registered: false, units: null });
-    expect(summary.coverage.complete).toBe(false);
-    expect(summary.coverage.unmetered.map((c: any) => c.id)).toEqual(['git', 'graph', 'legacy_namespaces']);
+    expect(summary.coverage).toMatchObject({ complete: false, missing: ['git'] });
+    expect(summary.coverage.unmetered.find((c: any) => c.id === 'git')).toMatchObject({ required: true });
+    expect(summary.coverage.unmetered.find((c: any) => c.id === 'graph')).toMatchObject({ required: false });
+    expect(summary.balances).toMatchObject({ agent_available_units: '0', protected_is_lower_bound: true });
+    expect(BigInt(summary.balances.spendable_units)).toBeGreaterThan(0n);
+    expect(summary.admission).toEqual({ agent_spend_allowed: false, reason: 'storage_coverage_incomplete' });
     expect(summary.runway.upper_bound).toBe(true);
-    // Funded growth may reduce runway and stop agent admission; the storage write itself was never blocked.
-    await db`UPDATE hosting_accounts SET paid_units=${(expected / 2n).toString()} WHERE id=${acct}`;
-    const tight = await accountStorageSummary(db as any, acct, now);
-    expect(tight.admission).toMatchObject({ agent_spend_allowed: false, reason: 'storage_reserve_not_covered' });
-    expect(tight.balances.agent_available_units).toBe('0');
+  });
+
+  test('storage_protection aggregates every linked workspace, protects refunds, and fails closed when unmeasured (Git metered)', async () => {
+    const unregisterGit = registerMeteredStorageCategory('git'); // stand-in for the Git slice, this test only
+    try {
+      const acct = (await db`INSERT INTO hosting_accounts(owner_actor_id,opened_by,promo_units) VALUES(${(await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${'npub1' + 'q'.repeat(58)},'human') RETURNING id`)[0]!.id},'onboarding',0) RETURNING id`)[0]!.id as string;
+      const now = new Date();
+      const first = await workspace({ accountId: acct, introEndsAt: h => h + 100 * HOUR });
+      const second = await workspace({ accountId: acct, introEndsAt: h => h - HOUR });
+      // Unmeasured, activated workspace: reserve cannot be sized.
+      await expect(storageProtectedUnits(db as any, acct, now)).rejects.toThrow('storage_reserve_unavailable');
+      await real(first.id); await real(second.id);
+      await objectRow(second.id, 2_000_000_000);
+      const a = BigInt((await db`SELECT hosting_storage_estimate(${first.id}) AS b`)[0]!.b), b = BigInt((await db`SELECT hosting_storage_estimate(${second.id}) AS b`)[0]!.b);
+      const expected = forwardWindowUnits(a, new Date(first.h + 100 * HOUR), now) + forwardWindowUnits(b, new Date(second.h - HOUR), now);
+      expect(await storageProtectedUnits(db as any, acct, now)).toBe(expected);
+      // Refund gating: purchased credit minus the aggregate reserve (agent_holds stand-in registered by this test only).
+      registerStorageProtectionReserve();
+      const unregister = registerFundingReserve('agent_holds', async () => 0n);
+      try {
+        const paid = expected + 12_345n;
+        await db`UPDATE hosting_accounts SET paid_units=${paid.toString()} WHERE id=${acct}`;
+        expect(await availableRefundableUnits(db as any, acct)).toBe(12_345n);
+        await db`UPDATE hosting_accounts SET paid_units=${(expected - 1n).toString()} WHERE id=${acct}`;
+        expect(await availableRefundableUnits(db as any, acct)).toBe(0n);
+      } finally { unregister(); }
+      // Growth raises the protected amount immediately, from the write-path journal alone.
+      await db`UPDATE hosting_accounts SET paid_units=${(expected * 2n).toString()} WHERE id=${acct}`;
+      await objectRow(second.id, 1_000_000_000);
+      expect(await storageProtectedUnits(db as any, acct, now)).toBe(expected + 720n * 1_000_000_000n);
+      const summary = await accountStorageSummary(db as any, acct, now);
+      expect(summary.coverage.complete).toBe(true);
+      expect(summary.balances.protected_storage_units).toBe((expected + 720n * 1_000_000_000n).toString());
+      expect(BigInt(summary.balances.agent_available_units)).toBe(expected * 2n - BigInt(summary.balances.protected_storage_units));
+      expect(summary.balances.agent_holds).toEqual({ registered: false, units: null });
+      expect(summary.runway.upper_bound).toBe(false);
+      // Funded growth may reduce runway and stop agent admission; the storage write itself was never blocked.
+      await db`UPDATE hosting_accounts SET paid_units=${(expected / 2n).toString()} WHERE id=${acct}`;
+      const tight = await accountStorageSummary(db as any, acct, now);
+      expect(tight.admission).toMatchObject({ agent_spend_allowed: false, reason: 'storage_reserve_not_covered' });
+      expect(tight.balances.agent_available_units).toBe('0');
+      // Reference-only objects are measured but not journaled: the policy is flagged incomplete instead of pretending to agree.
+      const linked = await workspace({ accountId: acct });
+      const loose = await db`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,content_type,size_bytes,storage_path,completed_at) VALUES(${owner},${owner},'x',640,${`ref/${randomUUID()}`},now()) RETURNING id`;
+      await db`INSERT INTO flightdeck_pg_storage_links(workspace_id,scope_id,channel_id,entity_type,storage_object_id) SELECT ${linked.id},gen_random_uuid(),gen_random_uuid(),'t',${loose[0]!.id} WHERE false`;
+      await db`INSERT INTO flightdeck_pg_app_storage_objects(storage_object_id,workspace_id,app_npub,actor_id) VALUES(${loose[0]!.id},${linked.id},'npub-app',${ownerActor})`;
+      await real(linked.id);
+      const attributed = await measureStorage(linked.id, db as any);
+      expect(attributed.reference_only_bytes).toBe(640n);
+      expect(attributed.evidence).toMatchObject({ categories: { objects: 'measured_reference_only_untracked' } });
+      await expect(storageProtectedUnits(db as any, acct, now)).rejects.toMatchObject({ code: 'storage_coverage_incomplete' });
+      expect((await accountStorageSummary(db as any, acct, now)).admission.reason).toBe('storage_coverage_incomplete');
+    } finally { unregisterGit(); }
   });
 
   test('owner routes expose balances; workspace managers see workspace scope only; strangers are refused', async () => {

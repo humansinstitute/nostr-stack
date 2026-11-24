@@ -35,10 +35,13 @@ workspace UUID.
 Every public table with a UUID `workspace_id` must be classified exactly once; a test fails when
 a new table is added unclassified, so the meter cannot silently grow or shrink.
 
-**Unmetered categories (reported, never counted as zero):** Git/Forgejo repository bytes (no
-repository-to-workspace byte provider), Graph (owner-npub attribution only), legacy encrypted
-records and WApp namespaces. The owner summary lists them under `coverage.unmetered` and marks
-the runway an upper bound (`runway.upper_bound`). Required categories (PostgreSQL and objects)
+**Git is required billable customer storage and is not yet metered.** Until a real provider is
+registered (`registerMeteredStorageCategory('git')`) the policy is **incomplete**: the
+`storage_protection` source throws `503 storage_coverage_incomplete` (refunds fail closed), the owner
+summary reports `coverage.complete=false`, `protected_is_lower_bound`, `runway.upper_bound`, and
+`agent_available_units` is `0` with `admission.reason=storage_coverage_incomplete`. Graph and legacy
+encrypted-record/WApp namespaces are explicitly unsupported (not billed) in this version and listed
+under `coverage.unmetered` with `required:false`. Required categories (PostgreSQL and objects)
 failing to measure leaves hours **pending** (never zero, never substituted by today's bytes) and
 makes the reserve fail closed.
 
@@ -48,29 +51,39 @@ Sampling once an hour cannot see a delete that follows an increase, so peak capt
 of the customer write itself, in the same transaction:
 
 1. **Journal.** Statement triggers (`AFTER INSERT/UPDATE/DELETE`, transition tables) on every
-   billable table append the net signed byte change per workspace to `hosting_storage_deltas`.
-   `v4_storage_objects` and managed objects have dedicated object-aware triggers (dedupe by path,
-   size changes on completion, deletes). Triggers fire for any code path, route, job, FK cascade
-   or SQL console, and roll back with the transaction. They do nothing for workspaces without an
-   enrollment, and are not installed at all until `ONBOARDING_ENABLED=true` or an enrollment exists.
-2. **Pre-image.** Before recording any *decrease*, the trigger stores the estimated total before
-   the statement (`latest anchor + deltas that anchor did not see`, an MVCC snapshot test) in
-   `hosting_storage_observations`. A delete therefore cannot erase the peak it removes from.
-3. **Anchors.** Each hour the runner measures the workspace exactly (REPEATABLE READ) and stores the
-   level with its `pg_snapshot`. A UTC **boundary total** is the first anchor taken at/after the
-   boundary minus the journaled deltas after the boundary that the anchor saw; boundaries are immutable.
-4. **Peak.** `peak(hour) = max(total at hour start, total at hour end, every pre-image inside the hour)`.
-   Between decreases the total only rises, so this is the true maximum of the stored total.
-5. **Settlement.** An hour settles five minutes after it closes, in one transaction: lock the
-   account row, recompute from the immutable evidence, insert the unique `storage_peak` ledger
-   entry (`storage-peak:<workspace>:<hour>`), update balances and write `hosting_storage_hours`
-   (primary key workspace+hour). Concurrent workers, retries and restarts therefore debit once.
-   Missed ticks are recovered from the journal and a later anchor; nothing is back-filled from
-   current bytes without that evidence.
+   billable table append the net signed byte change per workspace to `hosting_storage_deltas`
+   (stamped with statement time and the writer's xid). New rows are re-read from the stored heap row
+   by primary key, because a transition table carries the pre-TOAST tuple (a 300 KB compressible
+   value would otherwise be journaled at 300 KB while it is stored at 2 KB); old rows and the
+   measurement use stored sizes. `v4_storage_objects` and managed objects have object-aware triggers
+   (dedupe by path, size on completion, deletes). Triggers fire for any code path, route, job, FK
+   cascade or SQL console, roll back with the transaction, are independent of the writer's isolation
+   level, and do nothing for workspaces without an enrollment. They are not installed at all until
+   `ONBOARDING_ENABLED=true` or an enrollment exists.
+2. **Anchors.** Each hour the runner measures the workspace exactly (REPEATABLE READ) and stores the
+   level with its `pg_snapshot` and a `watermark_xid` (next xid when recorded; a snapshot's own xmax is
+   not such a bound).
+3. **Boundary total** at a UTC hour boundary B: the first anchor A1 taken at/after B names W =
+   `A1.watermark_xid`. Every transaction that journaled a row stamped before B has xid < W. The boundary
+   is fixed only by an anchor whose snapshot `xmin >= W`, i.e. once all of those transactions finished;
+   until then the hour is **pending** (fail closed, a fresh anchor is retried every 30 s) however long a
+   straddling transaction lasts. total = anchor total minus journaled deltas stamped after B that the
+   anchor saw. A negative reconstruction is journal/measurement disagreement: it is stored as
+   `inconsistent` and the hour is recorded `unavailable` (no charge, reason shown), never clamped.
+4. **Peak.** The hour is replayed from the committed journal in statement-time order, starting at the
+   start boundary, over all categories and all transactions together: `peak = max(start, end, start +
+   every running total)`. This is the simultaneous maximum, never a sum of separately peaked categories.
+   A negative running total or a committed in-hour row the closing anchor did not see makes the hour
+   `unavailable` (`negative_running_total` / `journal_incomplete`); the end-vs-replay `drift_bytes` is recorded.
+   There is no estimate taken at write time, so a REPEATABLE READ or concurrent writer cannot under-record.
+5. **Settlement.** One transaction per hour: lock the account row, recompute from the immutable
+   evidence, insert the unique `storage_peak` ledger entry (`storage-peak:<workspace>:<hour>`), update
+   balances and write `hosting_storage_hours` (primary key workspace+hour). Concurrent workers, retries
+   and restarts debit once. Missed ticks are recovered from the journal and a later anchor.
 
-Evidence retained per hour: start/end boundary totals, observed pre-image peak, peak,
-billable bytes, due/charged/uncollected units and the basis version. Redundant journal rows
-(already seen by the latest anchor and older than the latest boundary) and settled pre-images are pruned.
+Evidence retained per hour: start/end boundary totals, intra-hour peak, drift, peak, billable bytes,
+due/charged/uncollected units and the basis version. Journal rows already seen by the latest anchor and
+older than the last settled boundary are pruned.
 
 ### Write and delete path inventory
 
@@ -79,7 +92,7 @@ billable bytes, due/charged/uncollected units and the basis version. Redundant j
 | Any INSERT/UPDATE/DELETE on a billable table (HTTP routes, jobs, FK cascades, admin SQL) | statement triggers |
 | Object prepare/complete/size change/delete (`v4_storage_objects`, `pg_workspace_id`) | object triggers |
 | Managed object completion and `physical_absent` after confirmed S3 delete | managed-object trigger |
-| Objects attributed only by reference (no `pg_workspace_id`) | **anchors only** (hourly); an in-hour create/delete is not seen |
+| Objects counted only because a billable row references them (no `pg_workspace_id`) | **anchors only**; measured separately (`reference_only_bytes`) and the policy is flagged incomplete (reserve fails closed, agent spend blocked) while any exists. Modern workspace uploads always set `pg_workspace_id` |
 | S3 provider-side deletion/lifecycle with no metadata change | not observable (metadata is the meter) |
 | `TRUNCATE`, `session_replication_role=replica` bulk loads | not journaled; the next anchor corrects the level but not an unseen intra-hour peak |
 | Git/Forgejo, Graph, legacy namespaces | unmetered (see above) |
@@ -126,6 +139,8 @@ The shared account owner (or platform administrator) sees account balances. Work
 from membership.
 
 ## Gates and gaps
+
+Git is unmetered, so reserve/refunds/agent spend stay closed by design; this task is NOT complete.
 
 Source and disposable-database tests only; live rollout is closed (`ONBOARDING_ENABLED`, no restart,
 no deployment performed). Open before launch: complete export of records, files and retained history

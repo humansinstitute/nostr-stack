@@ -46,7 +46,7 @@ export const EXCLUDED_STORAGE_TABLES: Record<string, string> = {
   hosting_workspace_settlements: 'accounting', hosting_workspace_wallets: 'accounting', onboarding_intents: 'accounting',
   flightdeck_pg_hosted_signups: 'accounting',
   hosting_storage_enrollments: 'accounting', hosting_storage_deltas: 'accounting', hosting_storage_anchors: 'accounting',
-  hosting_storage_boundaries: 'accounting', hosting_storage_observations: 'accounting', hosting_storage_hours: 'accounting',
+  hosting_storage_boundaries: 'accounting', hosting_storage_hours: 'accounting',
   // Sync projection: trigger-maintained JSON copies of the entity tables above. Counting them would bill the same content twice.
   flightdeck_pg_record_current: 'service_replica', flightdeck_pg_record_heads: 'service_replica',
   flightdeck_pg_record_journal: 'service_replica', flightdeck_pg_record_clock: 'service_replica',
@@ -74,7 +74,10 @@ export const STORAGE_CLASSIFIED_TABLES: ReadonlySet<string> = new Set([...BILLAB
 
 /** Customer storage that the meter cannot attribute to a workspace. Reported to owners; never silently counted as zero. */
 export const UNMETERED_STORAGE_CATEGORIES = [
-  { id: 'git', label: 'Git / Forgejo repositories', reason: 'Forgejo owns repository bytes; no authoritative repository-to-workspace byte provider exists yet.' },
-  { id: 'graph', label: 'Graph', reason: 'Graph rows are attributed by owner npub, not workspace UUID; no workspace byte counter exists.' },
-  { id: 'legacy_namespaces', label: 'Legacy encrypted records and WApp namespaces', reason: 'Not attributed to a workspace UUID.' },
+  { id: 'git', label: 'Git / Forgejo repositories', required: true, reason: 'Forgejo owns repository bytes; no authoritative repository-to-workspace byte provider exists yet. Billable customer storage: until measured the policy is incomplete and the reserve fails closed.' },
+  { id: 'graph', label: 'Graph', required: false, reason: 'Graph rows are attributed by owner npub, not workspace UUID; explicitly unsupported (not billed) in this version.' },
+  { id: 'legacy_namespaces', label: 'Legacy encrypted records and WApp namespaces', required: false, reason: 'Not attributed to a workspace UUID; explicitly unsupported (not billed) in this version.' },
 ] as const;
+
+/** Categories a complete customer meter must cover. Reserve, refunds and agent admission fail closed while any is unmetered. */
+export const REQUIRED_STORAGE_CATEGORIES = ['postgres', 'objects', 'git'] as const;

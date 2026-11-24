@@ -121,7 +121,8 @@ payout outcome was unknown) but still must decode to the same payment hash.
   no-op registration: the agent slice must supply a real one.
   - `storage_protection` (registered): the exact next-720-hour storage charge of every activated peak-metered workspace linked to the
     account (remaining introductory waiver honoured), from the write-path journal. Throws `503 storage_reserve_unavailable` (refund fails
-    closed) when an activated workspace has no measurement; it is never silently zero.
+    closed) when an activated workspace has no measurement, and `503 storage_coverage_incomplete` while Git (required billable storage) is
+    unmetered or reference-only objects exist; it is never silently zero.
   - `agent_holds`: units held for agent work already admitted but not yet metered (agent runtime slice).
   - Contract for each source: `async (sql, accountId) => bigint`, evaluated inside the refund transaction under the
     account lock, returning a non-negative bigint (`0n` when nothing is reserved). A negative or non-bigint value,

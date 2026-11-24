@@ -4,10 +4,11 @@ import { BILLABLE_STORAGE_TABLES } from '../services/hosting-storage-classificat
 /** Peak-storage meter v1 (approved onboarding policy only; legacy accounts are never enrolled).
  *
  * Durable peak capture: PostgreSQL statement triggers on every billable table (and objects) append signed byte deltas to
- * `hosting_storage_deltas`, and every DECREASING statement first records the pre-image total in `hosting_storage_observations`.
- * Hourly anchors (exact measurements with their MVCC snapshot) fix absolute levels; boundary totals are anchor minus the deltas
- * committed after the boundary. Hour peak = max(start boundary, end boundary, pre-images inside the hour), so a delete can never erase
- * a peak and a restart loses nothing: all of it is committed in the same transaction as the customer write. */
+ * `hosting_storage_deltas` inside the customer's own transaction. Hourly anchors (exact measurements with their MVCC snapshot) fix
+ * absolute levels; a boundary total is anchor minus the deltas after the boundary that anchor saw. An hour's peak is replayed from the
+ * committed journal in statement-time order: max(start, every running total). Nothing depends on the isolation level of the writer, on
+ * a sampling instant, or on a guessed settle delay: an hour closes only once no transaction that could still hold journal rows from
+ * before its end remains in flight (xid watermark), and otherwise stays pending. */
 export const hostingStoragePeakV1Sql = `
 CREATE TABLE IF NOT EXISTS hosting_storage_enrollments (
  workspace_id UUID PRIMARY KEY REFERENCES flightdeck_pg_workspaces(id),
@@ -33,49 +34,49 @@ CREATE TABLE IF NOT EXISTS hosting_storage_anchors (
  workspace_id UUID NOT NULL REFERENCES hosting_storage_enrollments(workspace_id),
  taken_at TIMESTAMPTZ NOT NULL,
  snapshot PG_SNAPSHOT NOT NULL,
+ watermark_xid XID8 NOT NULL, -- next xid at/after the snapshot: every transaction that wrote before the snapshot has xid < watermark_xid
  postgres_bytes NUMERIC(40,0) NOT NULL CHECK(postgres_bytes>=0),
  object_bytes NUMERIC(40,0) NOT NULL CHECK(object_bytes>=0),
  total_bytes NUMERIC(40,0) NOT NULL CHECK(total_bytes=postgres_bytes+object_bytes),
+ reference_only_bytes NUMERIC(40,0) NOT NULL DEFAULT 0 CHECK(reference_only_bytes>=0 AND reference_only_bytes<=object_bytes),
  evidence JSONB NOT NULL,
  UNIQUE(workspace_id,taken_at)
 );
 CREATE TABLE IF NOT EXISTS hosting_storage_boundaries (
  workspace_id UUID NOT NULL REFERENCES hosting_storage_enrollments(workspace_id),
  boundary TIMESTAMPTZ NOT NULL,
- total_bytes NUMERIC(40,0) NOT NULL CHECK(total_bytes>=0),
+ status TEXT NOT NULL DEFAULT 'ok' CHECK(status IN ('ok','inconsistent')),
+ total_bytes NUMERIC(40,0),
+ reconstructed_bytes NUMERIC(40,0) NOT NULL,
  anchor_id UUID NOT NULL REFERENCES hosting_storage_anchors(id),
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  PRIMARY KEY(workspace_id,boundary),
- CHECK(date_trunc('hour',boundary AT TIME ZONE 'UTC')=boundary AT TIME ZONE 'UTC')
+ CHECK(date_trunc('hour',boundary AT TIME ZONE 'UTC')=boundary AT TIME ZONE 'UTC'),
+ CHECK((status='ok' AND total_bytes IS NOT NULL AND total_bytes>=0 AND total_bytes=reconstructed_bytes) OR (status='inconsistent' AND total_bytes IS NULL AND reconstructed_bytes<0))
 );
-CREATE TABLE IF NOT EXISTS hosting_storage_observations (
- id BIGSERIAL PRIMARY KEY,
- workspace_id UUID NOT NULL,
- at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
- bytes NUMERIC(40,0) NOT NULL CHECK(bytes>=0),
- source TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS hosting_storage_observations_at ON hosting_storage_observations(workspace_id,at);
 CREATE TABLE IF NOT EXISTS hosting_storage_hours (
  workspace_id UUID NOT NULL REFERENCES hosting_storage_enrollments(workspace_id),
  hour TIMESTAMPTZ NOT NULL,
  account_id UUID NOT NULL REFERENCES hosting_accounts(id),
- status TEXT NOT NULL CHECK(status IN ('charged','underfunded')),
+ status TEXT NOT NULL CHECK(status IN ('charged','underfunded','unavailable')),
  intro BOOLEAN NOT NULL,
- start_bytes NUMERIC(40,0) NOT NULL CHECK(start_bytes>=0),
- end_bytes NUMERIC(40,0) NOT NULL CHECK(end_bytes>=0),
- observed_peak_bytes NUMERIC(40,0) CHECK(observed_peak_bytes IS NULL OR observed_peak_bytes>=0),
- peak_bytes NUMERIC(40,0) NOT NULL CHECK(peak_bytes>=0),
- billable_bytes NUMERIC(40,0) NOT NULL CHECK(billable_bytes>=0),
- due_units NUMERIC(40,0) NOT NULL CHECK(due_units>=0),
- charged_units NUMERIC(40,0) NOT NULL CHECK(charged_units>=0 AND charged_units<=due_units),
- uncollected_units NUMERIC(40,0) NOT NULL CHECK(uncollected_units=due_units-charged_units),
+ start_bytes NUMERIC(40,0) CHECK(start_bytes>=0),
+ end_bytes NUMERIC(40,0) CHECK(end_bytes>=0),
+ intrahour_peak_bytes NUMERIC(40,0) CHECK(intrahour_peak_bytes>=0),
+ drift_bytes NUMERIC(40,0),
+ peak_bytes NUMERIC(40,0) CHECK(peak_bytes>=0),
+ billable_bytes NUMERIC(40,0) CHECK(billable_bytes>=0),
+ due_units NUMERIC(40,0) CHECK(due_units>=0),
+ charged_units NUMERIC(40,0) NOT NULL DEFAULT 0 CHECK(charged_units>=0),
+ uncollected_units NUMERIC(40,0) CHECK(uncollected_units>=0),
  ledger_id UUID UNIQUE REFERENCES hosting_ledger(id),
+ reason TEXT,
  basis TEXT NOT NULL, evidence JSONB NOT NULL,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  PRIMARY KEY(workspace_id,hour),
  CHECK(date_trunc('hour',hour AT TIME ZONE 'UTC')=hour AT TIME ZONE 'UTC'),
- CHECK((charged_units>0)=(ledger_id IS NOT NULL))
+ CHECK(status='unavailable' OR (peak_bytes IS NOT NULL AND billable_bytes IS NOT NULL AND due_units IS NOT NULL AND charged_units<=due_units AND uncollected_units=due_units-charged_units AND (charged_units>0)=(ledger_id IS NOT NULL))),
+ CHECK(status<>'unavailable' OR (peak_bytes IS NULL AND due_units IS NULL AND charged_units=0 AND ledger_id IS NULL AND reason IS NOT NULL))
 );
 ALTER TABLE hosting_ledger DROP CONSTRAINT IF EXISTS hosting_ledger_kind_check;
 ALTER TABLE hosting_ledger ADD CONSTRAINT hosting_ledger_kind_check CHECK(kind IN ('welcome','usage','admin','stripe','promo_expiry','workspace_allocation','workspace_usage','lightning','refund','dispute','storage_peak'));
@@ -105,14 +106,8 @@ CREATE OR REPLACE FUNCTION hosting_storage_estimate(ws UUID) RETURNS NUMERIC LAN
  FROM hosting_storage_anchors a WHERE a.workspace_id=ws ORDER BY a.taken_at DESC LIMIT 1
 $$;
 CREATE OR REPLACE FUNCTION hosting_storage_record(ws UUID, cat TEXT, delta BIGINT) RETURNS void LANGUAGE plpgsql AS $$
-DECLARE est NUMERIC;
 BEGIN
  IF ws IS NULL OR delta=0 OR NOT EXISTS(SELECT 1 FROM hosting_storage_enrollments WHERE workspace_id=ws) THEN RETURN; END IF;
- -- Pre-image BEFORE the delta exists: the state this decrease is about to remove from.
- IF delta<0 THEN
-  est:=hosting_storage_estimate(ws);
-  IF est IS NOT NULL THEN INSERT INTO hosting_storage_observations(workspace_id,bytes,source) VALUES(ws,GREATEST(est,0),cat); END IF;
- END IF;
  INSERT INTO hosting_storage_deltas(workspace_id,category,delta_bytes) VALUES(ws,cat,delta);
 END;
 $$;
@@ -131,9 +126,15 @@ $$;
 export const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 export const bytesOf = (alias: string, columns: string[]) => columns.map(c => `COALESCE(pg_column_size(${alias}.${quote(c)}),0)::bigint`).join('+');
 
-function trackerFunction(table: string, op: 'i' | 'd' | 'u', columns: string[], marker: string) {
+/** New-row sizes are re-read from the stored heap row by primary key: a statement trigger's NEW TABLE carries the tuple before TOAST
+ * compression, which can overstate a large compressible value by orders of magnitude. OLD rows and the measurement use stored sizes. */
+function trackerFunction(table: string, op: 'i' | 'd' | 'u', columns: string[], pk: string[], marker: string) {
+  const stored = (alias: string, cols: string[]) => cols.map(c => `COALESCE(pg_column_size(r.${quote(c)}),pg_column_size(${alias}.${quote(c)}),0)::bigint`).join('+');
+  const newRows = pk.length
+    ? `SELECT n.workspace_id AS ws,${stored('n', columns)} AS b FROM new_rows n LEFT JOIN public.${quote(table)} r ON ${pk.map(c => `r.${quote(c)}=n.${quote(c)}`).join(' AND ')}`
+    : `SELECT n.workspace_id AS ws,${bytesOf('n', columns)} AS b FROM new_rows n`;
   const parts: string[] = [];
-  if (op !== 'd') parts.push(`SELECT n.workspace_id AS ws,${bytesOf('n', columns)} AS b FROM new_rows n`);
+  if (op !== 'd') parts.push(newRows);
   if (op !== 'i') parts.push(`SELECT o.workspace_id AS ws,-(${bytesOf('o', columns)}) AS b FROM old_rows o`);
   const extra: string[] = [];
   if (table === 'managed_app_storage_objects' && ['state', 'size_bytes', 'physical_absent'].every(c => columns.includes(c))) {
@@ -143,11 +144,11 @@ function trackerFunction(table: string, op: 'i' | 'd' | 'u', columns: string[], 
     if (op !== 'i') extra.push(`SELECT o.workspace_id AS ws,-(${obj('o')})::bigint AS b FROM old_rows o`);
   }
   const loop = (selects: string[], category: string) => `
-  FOR r IN SELECT x.ws,sum(x.b)::bigint AS net FROM (${selects.join(' UNION ALL ')}) x GROUP BY x.ws HAVING sum(x.b)<>0 LOOP
-   PERFORM hosting_storage_record(r.ws,'${category}',r.net);
+  FOR rec IN SELECT x.ws,sum(x.b)::bigint AS net FROM (${selects.join(' UNION ALL ')}) x GROUP BY x.ws HAVING sum(x.b)<>0 LOOP
+   PERFORM hosting_storage_record(rec.ws,'${category}',rec.net);
   END LOOP;`;
   return `CREATE OR REPLACE FUNCTION hst_${table}_${op}() RETURNS trigger LANGUAGE plpgsql AS $fn$
-DECLARE r RECORD;
+DECLARE rec RECORD;
 BEGIN
  -- ${marker}
  IF NOT EXISTS(SELECT 1 FROM hosting_storage_enrollments) THEN RETURN NULL; END IF;${loop(parts, 'postgres')}${extra.length ? loop(extra, 'objects') : ''}
@@ -185,16 +186,19 @@ const triggerSql = (table: string) => [
 
 export type SqlLike = { unsafe: (query: string, params?: any[]) => PromiseLike<any[]> };
 const OBJECT_MARKER = 'v4_storage_objects:peak-v1';
-const colsMarker = (columns: string[]) => `cols:${createHash('sha256').update(columns.join(',')).digest('hex').slice(0, 16)}`;
+const colsMarker = (t: BillableTable) => `cols:${createHash('sha256').update(`${t.columns.join(',')}|${t.pk.join(',')}`).digest('hex').slice(0, 16)}`;
 
-export async function billableColumns(sql: SqlLike): Promise<Map<string, string[]>> {
+export type BillableTable = { columns: string[]; pk: string[] };
+export async function billableColumns(sql: SqlLike): Promise<Map<string, BillableTable>> {
   const rows = await sql.unsafe(`SELECT c.relname AS name,
-     ARRAY(SELECT a.attname::text FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum) AS columns
+     ARRAY(SELECT a.attname::text FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum) AS columns,
+     COALESCE((SELECT array_agg(a.attname::text ORDER BY k.ord) FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum,ord)
+        JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=k.attnum WHERE i.indrelid=c.oid AND i.indisprimary),'{}') AS pk
    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
    WHERE n.nspname='public' AND c.relkind='r' AND NOT c.relispartition AND c.relname = ANY($1::text[])
      AND EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname='workspace_id' AND a.atttypid='uuid'::regtype AND NOT a.attisdropped)`,
     [BILLABLE_STORAGE_TABLES as unknown as string[]]);
-  return new Map(rows.map((r: any) => [r.name as string, r.columns as string[]]));
+  return new Map(rows.map((r: any) => [r.name as string, { columns: r.columns as string[], pk: r.pk as string[] }]));
 }
 
 /** Installs the statement triggers. Rollout gate: only when the approved onboarding policy is enabled or an enrollment already
@@ -205,9 +209,9 @@ export async function installStorageTracking(sql: SqlLike, options: { force?: bo
   if (!options.force && process.env.ONBOARDING_ENABLED !== 'true' && !enrolled) return { installed: 0, skipped: true as const };
   const tables = await billableColumns(sql);
   let installed = 0;
-  for (const [table, columns] of tables) {
-    const marker = colsMarker(columns);
-    await sql.unsafe([...(['i', 'u', 'd'] as const).map(op => trackerFunction(table, op, columns, marker)), triggerSql(table)].join('\n'));
+  for (const [table, shape] of tables) {
+    const marker = colsMarker(shape);
+    await sql.unsafe([...(['i', 'u', 'd'] as const).map(op => trackerFunction(table, op, shape.columns, shape.pk, marker)), triggerSql(table)].join('\n'));
     installed++;
   }
     await sql.unsafe([...(['i', 'u', 'd'] as const).map(op => objectTrackerFunction(op, OBJECT_MARKER)), triggerSql('v4_storage_objects')].join('\n'));
@@ -222,7 +226,7 @@ export async function missingStorageTracking(sql: SqlLike): Promise<string[]> {
     WHERE NOT t.tgisinternal AND t.tgname LIKE 'hosting_storage_track_%' GROUP BY c.relname`) as any[];
   const byTable = new Map<string, { triggers: string[]; sources: string[] }>(have.map(r => [r.name, r]));
   const missing: string[] = [];
-  const expected: [string, string][] = [...tables].map(([table, columns]) => [table, colsMarker(columns)]);
+  const expected: [string, string][] = [...tables].map(([table, shape]) => [table, colsMarker(shape)]);
   expected.push(['v4_storage_objects', OBJECT_MARKER]);
   for (const [table, marker] of expected) {
     const row = byTable.get(table);

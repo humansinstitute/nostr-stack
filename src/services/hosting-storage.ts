@@ -1,7 +1,7 @@
 import { getDb } from '../db';
 import { HostingError, lockedAccount, USD_UNITS, unitsUsd } from './hosting-billing';
 import { registerFundingReserve } from './hosting-funding';
-import { BILLABLE_STORAGE_TABLES, STORAGE_BASIS_VERSION, UNMETERED_STORAGE_CATEGORIES } from './hosting-storage-classification';
+import { BILLABLE_STORAGE_TABLES, REQUIRED_STORAGE_CATEGORIES, STORAGE_BASIS_VERSION, UNMETERED_STORAGE_CATEGORIES } from './hosting-storage-classification';
 import { billableColumns, bytesOf, missingStorageTracking, quote } from '../schema/hosting-storage-peak-v1';
 
 type Db = ReturnType<typeof getDb>;
@@ -12,12 +12,12 @@ const ceilHourMs = (date: Date) => Math.ceil(date.getTime() / HOUR) * HOUR;
 export const GB = 1_000_000_000n;
 export const MONTH_HOURS = 720;
 export const INTRO_HOURS = 720;
-/** An hour settles only after this delay so transactions that straddle the boundary have committed their journal rows. */
-export const SETTLE_DELAY_MS = 5 * 60_000;
 const ROW_LIMIT = 1_000_000;
 const OBJECT_LIMIT = 100_000;
 const SETTLE_BATCH = 744;
 const LOCK_KEY = 1440000723;
+/** While an hour is blocked by an in-flight transaction the runner takes a fresh anchor at most this often. */
+const RETRY_ANCHOR_MS = 30_000;
 
 /** Exact billing of one hour: ordinary hours pay for max(1GB, peak); introductory hours waive the 1GB base only. */
 export function hourlyCharge(peakBytes: bigint, intro: boolean) {
@@ -30,9 +30,20 @@ export function hourlyCharge(peakBytes: bigint, intro: boolean) {
  * provisioning instant yields exactly 720 introductory hours. */
 export const isIntroHour = (hour: Date, introEndsAt: Date) => hour.getTime() < introEndsAt.getTime();
 
+// ---- Coverage policy -----------------------------------------------------------------------------------------------
+
+const metered = new Set<string>(['postgres', 'objects']);
+export const missingStorageCategories = () => REQUIRED_STORAGE_CATEGORIES.filter(id => !metered.has(id));
+/** Trusted startup hook for a category whose bytes a real provider can attribute to a workspace (the Git slice). Returns unregister. */
+export function registerMeteredStorageCategory(id: (typeof REQUIRED_STORAGE_CATEGORIES)[number]) {
+  if (!(REQUIRED_STORAGE_CATEGORIES as readonly string[]).includes(id)) throw new HostingError(500, 'storage_category_invalid');
+  metered.add(id);
+  return () => { if (id !== 'postgres' && id !== 'objects') metered.delete(id); };
+}
+
 // ---- Measurement ---------------------------------------------------------------------------------------------------
 
-export type StorageMeasurement = { postgres_bytes: bigint; object_bytes: bigint; snapshot: string; taken_at: Date; evidence: Record<string, unknown> };
+export type StorageMeasurement = { postgres_bytes: bigint; object_bytes: bigint; reference_only_bytes: bigint; snapshot: string; taken_at: Date; evidence: Record<string, unknown> };
 
 /** Absolute billable bytes inside one REPEATABLE READ snapshot. Fails (never zero) when a bound is exceeded. */
 export async function measureStorage(workspaceId: string, db: Db): Promise<StorageMeasurement> {
@@ -45,32 +56,41 @@ export async function measureStorage(workspaceId: string, db: Db): Promise<Stora
     if (!tables.size) throw new HostingError(503, 'storage_measurement_unavailable');
     const counts = await sql.unsafe(`SELECT count(*)::text AS rows FROM (${[...tables.keys()].map(t => `SELECT 1 FROM public.${quote(t)} WHERE workspace_id=$1::uuid`).join(' UNION ALL ')} LIMIT ${ROW_LIMIT + 1}) bounded`, [workspaceId]);
     if (Number(counts[0]!.rows) > ROW_LIMIT) throw new HostingError(503, 'storage_measurement_too_large');
-    const sums = await sql.unsafe([...tables].map(([t, cols]) => `SELECT '${t}' AS table_name,COALESCE(sum(${bytesOf('r', cols)}),0)::text AS bytes FROM public.${quote(t)} r WHERE r.workspace_id=$1::uuid`).join(' UNION ALL '), [workspaceId]);
+    const sums = await sql.unsafe([...tables].map(([t, shape]) => `SELECT '${t}' AS table_name,COALESCE(sum(${bytesOf('r', shape.columns)}),0)::text AS bytes FROM public.${quote(t)} r WHERE r.workspace_id=$1::uuid`).join(' UNION ALL '), [workspaceId]);
     const postgres_bytes = sums.reduce((s: bigint, r: any) => s + BigInt(r.bytes), 0n);
-    // Object bytes: completed v4 metadata attributed by pg_workspace_id or referenced by a billable table, one count per storage path.
+    // Objects: completed v4 metadata, one count per storage path. Objects owned by pg_workspace_id are tracked by the write-path journal;
+    // objects counted only because a billable row references them are not, so they are measured separately and flagged.
+    const [bound] = await sql`SELECT count(*)::text AS n FROM (SELECT 1 FROM v4_storage_objects WHERE pg_workspace_id=${workspaceId} LIMIT ${OBJECT_LIMIT + 1}) bounded`;
+    if (Number(bound!.n) > OBJECT_LIMIT) throw new HostingError(503, 'storage_measurement_too_large');
     const refs = await sql.unsafe(`SELECT c.relname AS table_name,a.attname AS column_name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid
       WHERE n.nspname='public' AND c.relkind='r' AND c.relname=ANY($1::text[]) AND a.attname IN ('storage_object_id','head_storage_object_id') AND a.atttypid='uuid'::regtype AND NOT a.attisdropped`, [BILLABLE_STORAGE_TABLES as unknown as string[]]);
     const refSelects = refs.map((r: any) => ` UNION SELECT ${quote(r.column_name)} AS id FROM public.${quote(r.table_name)} WHERE workspace_id=$1::uuid`).join('');
-    const [objects] = await sql.unsafe(`WITH refs AS MATERIALIZED (
-        (SELECT id FROM v4_storage_objects WHERE pg_workspace_id=$1::uuid LIMIT ${OBJECT_LIMIT + 1})${refSelects}
-      ), objects AS MATERIALIZED (
-        SELECT o.storage_path,o.size_bytes FROM v4_storage_objects o JOIN refs r ON r.id=o.id WHERE o.completed_at IS NOT NULL LIMIT ${OBJECT_LIMIT + 1}
-      ), paths AS (SELECT storage_path,min(size_bytes) AS bytes,count(DISTINCT size_bytes) AS sizes FROM objects GROUP BY storage_path)
-      SELECT (SELECT count(*) FROM objects)::text AS objects,COALESCE((SELECT sum(bytes) FROM paths),0)::text AS bytes,
-        (SELECT count(*) FROM paths WHERE sizes<>1 OR bytes<0)::text AS conflicts`, [workspaceId]);
-    if (Number(objects!.objects) > OBJECT_LIMIT) throw new HostingError(503, 'storage_measurement_too_large');
+    const [objects] = await sql.unsafe(`WITH attributed AS MATERIALIZED (
+        SELECT storage_path,min(size_bytes) AS bytes,count(DISTINCT size_bytes) AS sizes FROM v4_storage_objects
+        WHERE pg_workspace_id=$1::uuid AND completed_at IS NOT NULL GROUP BY storage_path
+      ), refs AS MATERIALIZED (SELECT NULL::uuid AS id WHERE false${refSelects}),
+      referenced AS (
+        SELECT o.storage_path,min(o.size_bytes) AS bytes,count(DISTINCT o.size_bytes) AS sizes FROM v4_storage_objects o JOIN refs r ON r.id=o.id
+        WHERE o.completed_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM attributed a WHERE a.storage_path=o.storage_path) GROUP BY o.storage_path
+      )
+      SELECT ((SELECT count(*) FROM attributed)+(SELECT count(*) FROM referenced))::text AS paths,
+        COALESCE((SELECT sum(bytes) FROM attributed),0)::text AS attributed_bytes,
+        COALESCE((SELECT sum(bytes) FROM referenced),0)::text AS reference_only_bytes,
+        ((SELECT count(*) FROM attributed WHERE sizes<>1 OR bytes<0)+(SELECT count(*) FROM referenced WHERE sizes<>1 OR bytes<0))::text AS conflicts`, [workspaceId]);
+    if (Number(objects!.paths) > OBJECT_LIMIT) throw new HostingError(503, 'storage_measurement_too_large');
     let managed = 0n;
     if (tables.has('managed_app_storage_objects')) {
       const [m] = await sql`SELECT COALESCE(sum(size_bytes),0)::text AS bytes FROM managed_app_storage_objects WHERE workspace_id=${workspaceId} AND state='complete' AND NOT physical_absent`;
       managed = BigInt(m!.bytes);
     }
-    const v4 = BigInt(objects!.bytes);
+    const attributed = BigInt(objects!.attributed_bytes), referenceOnly = BigInt(objects!.reference_only_bytes);
     return {
-      postgres_bytes, object_bytes: v4 + managed, snapshot: clock!.snapshot as string, taken_at: clock!.taken_at as Date,
+      postgres_bytes, object_bytes: attributed + referenceOnly + managed, reference_only_bytes: referenceOnly,
+      snapshot: clock!.snapshot as string, taken_at: clock!.taken_at as Date,
       evidence: {
-        basis: STORAGE_BASIS_VERSION, tables_measured: tables.size, object_references: Number(objects!.objects), object_size_conflicts: Number(objects!.conflicts),
-        v4_object_bytes: v4.toString(), managed_object_bytes: managed.toString(),
-        categories: { postgres: 'measured', objects: 'measured', ...Object.fromEntries(UNMETERED_STORAGE_CATEGORIES.map(c => [c.id, 'unmetered'])) },
+        basis: STORAGE_BASIS_VERSION, tables_measured: tables.size, object_paths: Number(objects!.paths), object_size_conflicts: Number(objects!.conflicts),
+        attributed_object_bytes: attributed.toString(), reference_only_object_bytes: referenceOnly.toString(), managed_object_bytes: managed.toString(),
+        categories: { postgres: 'measured', objects: referenceOnly > 0n ? 'measured_reference_only_untracked' : 'measured', ...Object.fromEntries(UNMETERED_STORAGE_CATEGORIES.map(c => [c.id, 'unmetered'])) },
       },
     };
   });
@@ -80,8 +100,8 @@ export async function measureStorage(workspaceId: string, db: Db): Promise<Stora
 export async function takeStorageAnchor(workspaceId: string, db: Db = getDb(), measure: typeof measureStorage = measureStorage) {
   const m = await measure(workspaceId, db);
   const total = m.postgres_bytes + m.object_bytes;
-  const [row] = await db`INSERT INTO hosting_storage_anchors(workspace_id,taken_at,snapshot,postgres_bytes,object_bytes,total_bytes,evidence)
-    VALUES(${workspaceId},${m.taken_at},${m.snapshot}::pg_snapshot,${m.postgres_bytes.toString()},${m.object_bytes.toString()},${total.toString()},${db.json(JSON.parse(JSON.stringify(m.evidence)))})
+  const [row] = await db`INSERT INTO hosting_storage_anchors(workspace_id,taken_at,snapshot,watermark_xid,postgres_bytes,object_bytes,total_bytes,reference_only_bytes,evidence)
+    VALUES(${workspaceId},${m.taken_at},${m.snapshot}::pg_snapshot,pg_current_xact_id(),${m.postgres_bytes.toString()},${m.object_bytes.toString()},${total.toString()},${m.reference_only_bytes.toString()},${db.json(JSON.parse(JSON.stringify(m.evidence)))})
     ON CONFLICT(workspace_id,taken_at) DO NOTHING RETURNING *`;
   return row ?? null;
 }
@@ -109,19 +129,69 @@ export async function activatePeakStorage(sql: Db, workspaceId: string) {
 
 // ---- Boundaries, peaks and settlement ------------------------------------------------------------------------------
 
-/** Total at a UTC hour boundary: the first anchor taken at/after it minus every journaled delta after the boundary that the anchor saw. */
-export async function ensureBoundary(sql: Db, workspaceId: string, boundary: Date): Promise<bigint | null> {
-  const [prior] = await sql`SELECT total_bytes FROM hosting_storage_boundaries WHERE workspace_id=${workspaceId} AND boundary=${boundary}`;
-  if (prior) return BigInt(prior.total_bytes);
+export type Boundary =
+  | { state: 'ok'; total: bigint; anchorId: string }
+  | { state: 'inconsistent'; reconstructed: bigint; anchorId: string }
+  | { state: 'pending'; reason: 'no_anchor' | 'in_flight_transactions' };
+
+/** Total at a UTC hour boundary B.
+ *
+ * Completeness watermark: let A1 be the first anchor taken at/after B and W its `watermark_xid` (the next xid when it was recorded; a snapshot's
+ * own xmax is NOT such a bound because running transactions above the latest completed xid are unlisted). Every transaction that wrote a
+ * journal row stamped before B was assigned its xid before A1's snapshot, so xid < W. The boundary is only fixed by an anchor whose snapshot xmin >= W,
+ * i.e. when all of those transactions have finished; until then it stays pending (fail closed), however long that takes.
+ * total = anchor total - committed deltas stamped after B that the anchor saw. A negative result is journal/measurement disagreement:
+ * it is recorded as `inconsistent`, never clamped to zero. */
+export async function ensureBoundary(sql: Db, workspaceId: string, boundary: Date): Promise<Boundary> {
+  const [prior] = await sql`SELECT status,total_bytes::text AS total,reconstructed_bytes::text AS reconstructed,anchor_id FROM hosting_storage_boundaries WHERE workspace_id=${workspaceId} AND boundary=${boundary}`;
+  if (prior) return prior.status === 'ok' ? { state: 'ok', total: BigInt(prior.total), anchorId: prior.anchor_id } : { state: 'inconsistent', reconstructed: BigInt(prior.reconstructed), anchorId: prior.anchor_id };
+  const [first] = await sql`SELECT id FROM hosting_storage_anchors WHERE workspace_id=${workspaceId} AND taken_at>=${boundary} ORDER BY taken_at LIMIT 1`;
+  if (!first) return { state: 'pending', reason: 'no_anchor' };
   const [row] = await sql`SELECT a.id,a.total_bytes::text AS total,
       COALESCE((SELECT sum(d.delta_bytes) FROM hosting_storage_deltas d WHERE d.workspace_id=a.workspace_id AND d.at>${boundary} AND pg_visible_in_snapshot(d.xid,a.snapshot)),0)::text AS later
-    FROM hosting_storage_anchors a WHERE a.workspace_id=${workspaceId} AND a.taken_at>=${boundary} ORDER BY a.taken_at LIMIT 1`;
-  if (!row) return null;
-  let total = BigInt(row.total) - BigInt(row.later);
-  if (total < 0n) total = 0n;
-  await sql`INSERT INTO hosting_storage_boundaries(workspace_id,boundary,total_bytes,anchor_id) VALUES(${workspaceId},${boundary},${total.toString()},${row.id}) ON CONFLICT DO NOTHING`;
-  const [stored] = await sql`SELECT total_bytes FROM hosting_storage_boundaries WHERE workspace_id=${workspaceId} AND boundary=${boundary}`;
-  return BigInt(stored!.total_bytes);
+    FROM hosting_storage_anchors a WHERE a.workspace_id=${workspaceId} AND a.taken_at>=${boundary}
+      AND pg_snapshot_xmin(a.snapshot)>=(SELECT f.watermark_xid FROM hosting_storage_anchors f WHERE f.id=${first.id})
+    ORDER BY a.taken_at LIMIT 1`;
+  if (!row) return { state: 'pending', reason: 'in_flight_transactions' };
+  const reconstructed = BigInt(row.total) - BigInt(row.later);
+  if (reconstructed < 0n) {
+    await sql`INSERT INTO hosting_storage_boundaries(workspace_id,boundary,status,total_bytes,reconstructed_bytes,anchor_id) VALUES(${workspaceId},${boundary},'inconsistent',NULL,${reconstructed.toString()},${row.id}) ON CONFLICT DO NOTHING`;
+  } else {
+    await sql`INSERT INTO hosting_storage_boundaries(workspace_id,boundary,status,total_bytes,reconstructed_bytes,anchor_id) VALUES(${workspaceId},${boundary},'ok',${reconstructed.toString()},${reconstructed.toString()},${row.id}) ON CONFLICT DO NOTHING`;
+  }
+  return ensureBoundary(sql, workspaceId, boundary);
+}
+
+type HourEvidence =
+  | { state: 'pending'; reason: string }
+  | { state: 'unavailable'; reason: string; evidence: Record<string, unknown> }
+  | { state: 'ready'; start: bigint; end: bigint; intrahour: bigint; peak: bigint; drift: bigint; evidence: Record<string, unknown> };
+
+/** Replays the hour from the committed journal in statement-time order, starting at the start boundary. Combined across every
+ * category and every transaction, so the peak is the maximum of the simultaneous total, never a sum of separate category peaks. */
+export async function hourEvidence(sql: Db, workspaceId: string, hour: Date): Promise<HourEvidence> {
+  const next = new Date(hour.getTime() + HOUR);
+  const start = await ensureBoundary(sql, workspaceId, hour);
+  const end = await ensureBoundary(sql, workspaceId, next);
+  if (start.state === 'pending') return { state: 'pending', reason: start.reason };
+  if (end.state === 'pending') return { state: 'pending', reason: end.reason };
+  if (start.state === 'inconsistent' || end.state === 'inconsistent') {
+    return { state: 'unavailable', reason: 'inconsistent_boundary', evidence: { start: start.state, end: end.state, note: 'journal and measurement disagree; no charge is fabricated' } };
+  }
+  const [replay] = await sql`SELECT count(*)::text AS n,COALESCE(max(run),0)::text AS high,COALESCE(min(run),0)::text AS low,COALESCE(sum(delta_bytes),0)::text AS net FROM (
+      SELECT d.at,d.id,d.delta_bytes,sum(d.delta_bytes) OVER (ORDER BY d.at,d.id) AS run FROM hosting_storage_deltas d JOIN hosting_storage_anchors a ON a.id=${end.anchorId}
+      WHERE d.workspace_id=${workspaceId} AND d.at>${hour} AND d.at<=${next} AND pg_visible_in_snapshot(d.xid,a.snapshot)) x`;
+  // A committed row stamped inside the hour that the closing anchor did not see would mean the watermark was violated.
+  const [late] = await sql`SELECT count(*)::text AS n FROM hosting_storage_deltas d JOIN hosting_storage_anchors a ON a.id=${end.anchorId}
+    WHERE d.workspace_id=${workspaceId} AND d.at>${hour} AND d.at<=${next} AND NOT pg_visible_in_snapshot(d.xid,a.snapshot)`;
+  if (Number(late!.n) > 0) return { state: 'unavailable', reason: 'journal_incomplete', evidence: { unseen_rows: Number(late!.n) } };
+  const high = BigInt(replay!.high), low = BigInt(replay!.low), net = BigInt(replay!.net);
+  const rows = Number(replay!.n);
+  if (rows > 0 && start.total + low < 0n) return { state: 'unavailable', reason: 'negative_running_total', evidence: { start: start.total.toString(), lowest_running_delta: low.toString() } };
+  const intrahour = rows > 0 && high > 0n ? start.total + high : start.total;
+  let peak = intrahour;
+  if (end.total > peak) peak = end.total;
+  return { state: 'ready', start: start.total, end: end.total, intrahour, peak, drift: end.total - (start.total + net), evidence: { journal_rows: rows } };
 }
 
 /** Settles one closed hour atomically: peak, ledger debit, balances and evidence commit together or not at all. */
@@ -132,17 +202,17 @@ async function chargeHour(db: Db, enrollment: any, hour: Date, clock: () => Date
     await sql`SELECT 1 FROM hosting_storage_enrollments WHERE workspace_id=${enrollment.workspace_id} FOR SHARE`;
     const account = await lockedAccount(enrollment.account_id, sql, now);
     const [prior] = await sql`SELECT * FROM hosting_storage_hours WHERE workspace_id=${enrollment.workspace_id} AND hour=${hour}`;
-    if (prior) return prior;
-    const next = new Date(hour.getTime() + HOUR);
-    const start = await ensureBoundary(sql, enrollment.workspace_id, hour);
-    const end = await ensureBoundary(sql, enrollment.workspace_id, next);
-    if (start === null || end === null) return null;
-    const [obs] = await sql`SELECT max(bytes)::text AS peak,count(*)::int AS observations FROM hosting_storage_observations WHERE workspace_id=${enrollment.workspace_id} AND at>=${hour} AND at<${next}`;
-    const observed = obs!.peak === null ? null : BigInt(obs!.peak);
-    let peak = start > end ? start : end;
-    if (observed !== null && observed > peak) peak = observed;
+    if (prior) return { row: prior, pending: null as string | null };
     const intro = isIntroHour(hour, new Date(enrollment.intro_ends_at));
-    const { billable_bytes, due_units } = hourlyCharge(peak, intro);
+    const ev = await hourEvidence(sql, enrollment.workspace_id, hour);
+    if (ev.state === 'pending') return { row: null, pending: ev.reason };
+    const meta = { intro_ends_at: new Date(enrollment.intro_ends_at).toISOString() };
+    if (ev.state === 'unavailable') {
+      const [row] = await sql`INSERT INTO hosting_storage_hours(workspace_id,hour,account_id,status,intro,reason,basis,evidence)
+        VALUES(${enrollment.workspace_id},${hour},${account.id},'unavailable',${intro},${ev.reason},${STORAGE_BASIS_VERSION},${sql.json({ ...meta, ...ev.evidence } as any)}) RETURNING *`;
+      return { row: row!, pending: null };
+    }
+    const { billable_bytes, due_units } = hourlyCharge(ev.peak, intro);
     const promo = BigInt(account.promo_units), paid = BigInt(account.paid_units);
     const spendable = promo + (paid > 0n ? paid : 0n);
     const charged = due_units < spendable ? due_units : spendable;
@@ -153,46 +223,45 @@ async function chargeHour(db: Db, enrollment: any, hour: Date, clock: () => Date
       const [entry] = await sql`INSERT INTO hosting_ledger(account_id,workspace_id,kind,amount_units,paid_after_units,promo_after_units,idempotency_key,reason,metadata)
         VALUES(${account.id},${enrollment.workspace_id},'storage_peak',${(-charged).toString()},${nextPaid.toString()},${nextPromo.toString()},${`storage-peak:${enrollment.workspace_id}:${hour.toISOString()}`},
           ${intro ? 'Introductory hour: 1GB base waived; excess at $5/GB-month' : 'Hourly peak storage, 1GB minimum, $5/GB-month'},
-          ${sql.json({ hour: hour.toISOString(), peak_bytes: peak.toString(), billable_bytes: billable_bytes.toString(), intro, basis: STORAGE_BASIS_VERSION })}) RETURNING id`;
+          ${sql.json({ hour: hour.toISOString(), peak_bytes: ev.peak.toString(), billable_bytes: billable_bytes.toString(), intro, basis: STORAGE_BASIS_VERSION })}) RETURNING id`;
       ledgerId = entry!.id;
     }
-    if (charged > 0n || due_units > 0n) {
+    if (due_units > 0n) {
       await sql`UPDATE hosting_accounts SET paid_units=${nextPaid.toString()},promo_units=${nextPromo.toString()},
         depleted_at=CASE WHEN ${nextPromo.toString()}::numeric+${nextPaid.toString()}::numeric<=0 THEN COALESCE(depleted_at,${now}) ELSE depleted_at END WHERE id=${account.id}`;
     }
-    const [row] = await sql`INSERT INTO hosting_storage_hours(workspace_id,hour,account_id,status,intro,start_bytes,end_bytes,observed_peak_bytes,peak_bytes,billable_bytes,due_units,charged_units,uncollected_units,ledger_id,basis,evidence)
-      VALUES(${enrollment.workspace_id},${hour},${account.id},${charged === due_units ? 'charged' : 'underfunded'},${intro},${start.toString()},${end.toString()},${observed?.toString() ?? null},${peak.toString()},
+    const [row] = await sql`INSERT INTO hosting_storage_hours(workspace_id,hour,account_id,status,intro,start_bytes,end_bytes,intrahour_peak_bytes,drift_bytes,peak_bytes,billable_bytes,due_units,charged_units,uncollected_units,ledger_id,basis,evidence)
+      VALUES(${enrollment.workspace_id},${hour},${account.id},${charged === due_units ? 'charged' : 'underfunded'},${intro},${ev.start.toString()},${ev.end.toString()},${ev.intrahour.toString()},${ev.drift.toString()},${ev.peak.toString()},
         ${billable_bytes.toString()},${due_units.toString()},${charged.toString()},${(due_units - charged).toString()},${ledgerId},${STORAGE_BASIS_VERSION},
-        ${sql.json({ observations: obs!.observations, intro_ends_at: new Date(enrollment.intro_ends_at).toISOString(), debt: 'none: shortfall is recorded as uncollected, never as negative balance' })}) RETURNING *`;
-    return row!;
+        ${sql.json({ ...meta, ...ev.evidence, debt: 'none: shortfall is recorded as uncollected, never as negative balance' } as any)}) RETURNING *`;
+    return { row: row!, pending: null };
   });
 }
 
-/** Settles every closed, measurable hour for one workspace in order; stops at the first hour lacking a measurement (never guesses). */
+/** Settles every closed hour whose evidence is complete, in order; stops at the first hour that is not (never guesses). */
 export async function settleStorageHours(workspaceId: string, db: Db = getDb(), clock: () => Date = () => new Date()) {
   const now = clock();
   const [enrollment] = await db`SELECT * FROM hosting_storage_enrollments WHERE workspace_id=${workspaceId} AND activated_at IS NOT NULL`;
-  if (!enrollment) return { settled: 0 };
-  const limit = hourMs(new Date(now.getTime() - SETTLE_DELAY_MS));
+  if (!enrollment) return { settled: 0, pending: null as string | null };
+  const limit = hourMs(now);
   const [last] = await db`SELECT max(hour) AS hour FROM hosting_storage_hours WHERE workspace_id=${workspaceId}`;
   let next = last?.hour ? new Date(last.hour).getTime() + HOUR : ceilHourMs(new Date(enrollment.activated_at));
-  let settled = 0;
+  let settled = 0, pending: string | null = null;
   for (let n = 0; n < SETTLE_BATCH && next + HOUR <= limit; n++, next += HOUR) {
-    const row = await chargeHour(db, enrollment, new Date(next), clock);
-    if (!row) break;
+    const result = await chargeHour(db, enrollment, new Date(next), clock);
+    if (!result.row) { pending = result.pending; break; }
     settled++;
   }
-  return { settled };
+  return { settled, pending };
 }
 
-/** Compacts evidence the settled history no longer needs. Deltas an anchor has seen and boundaries already fixed are redundant. */
+/** Compacts evidence the settled history no longer needs: journal rows an anchor has seen and that precede the last settled boundary. */
 export async function pruneStorageEvidence(workspaceId: string, db: Db = getDb()) {
-  const [latest] = await db`SELECT max(boundary) AS boundary FROM hosting_storage_boundaries WHERE workspace_id=${workspaceId}`;
-  const [anchor] = await db`SELECT snapshot::text AS snapshot FROM hosting_storage_anchors WHERE workspace_id=${workspaceId} ORDER BY taken_at DESC LIMIT 1`;
-  if (!latest?.boundary || !anchor) return;
-  await db`DELETE FROM hosting_storage_deltas d WHERE d.workspace_id=${workspaceId} AND d.at<=${latest.boundary} AND pg_visible_in_snapshot(d.xid,${anchor.snapshot}::pg_snapshot)`;
   const [settled] = await db`SELECT max(hour) AS hour FROM hosting_storage_hours WHERE workspace_id=${workspaceId}`;
-  if (settled?.hour) await db`DELETE FROM hosting_storage_observations WHERE workspace_id=${workspaceId} AND at<${new Date(new Date(settled.hour).getTime() + HOUR)}`;
+  const [anchor] = await db`SELECT snapshot::text AS snapshot FROM hosting_storage_anchors WHERE workspace_id=${workspaceId} ORDER BY taken_at DESC LIMIT 1`;
+  if (!settled?.hour || !anchor) return;
+  const through = new Date(new Date(settled.hour).getTime() + HOUR);
+  await db`DELETE FROM hosting_storage_deltas d WHERE d.workspace_id=${workspaceId} AND d.at<=${through} AND pg_visible_in_snapshot(d.xid,${anchor.snapshot}::pg_snapshot)`;
 }
 
 export async function runStoragePeakTick(db: Db = getDb(), clock: () => Date = () => new Date(), measure: typeof measureStorage = measureStorage) {
@@ -206,9 +275,14 @@ export async function runStoragePeakTick(db: Db = getDb(), clock: () => Date = (
     let workspaces = 0;
     for (const e of enrollments) {
       try {
-        const [anchor] = await db`SELECT max(taken_at) AS taken_at FROM hosting_storage_anchors WHERE workspace_id=${e.workspace_id}`;
-        if (!anchor?.taken_at || new Date(anchor.taken_at).getTime() < hourMs(clock())) await takeStorageAnchor(e.workspace_id, db, measure).catch(() => null);
-        await settleStorageHours(e.workspace_id, db, clock);
+        const latest = async () => { const [a] = await db`SELECT max(taken_at) AS taken_at FROM hosting_storage_anchors WHERE workspace_id=${e.workspace_id}`; return a?.taken_at ? new Date(a.taken_at).getTime() : 0; };
+        if (await latest() < hourMs(clock())) await takeStorageAnchor(e.workspace_id, db, measure).catch(() => null);
+        let result = await settleStorageHours(e.workspace_id, db, clock);
+        // An in-flight transaction (or a missing closing anchor) holds the hour open: look again with a fresh anchor, never settle on a guess.
+        if (result.pending && clock().getTime() - await latest() >= RETRY_ANCHOR_MS) {
+          await takeStorageAnchor(e.workspace_id, db, measure).catch(() => null);
+          result = await settleStorageHours(e.workspace_id, db, clock);
+        }
         await pruneStorageEvidence(e.workspace_id, db);
         workspaces++;
       } catch { /* One workspace failing never blocks the others; the next tick resumes. */ }
@@ -236,18 +310,25 @@ export function forwardWindowUnits(bytes: bigint, introEndsAt: Date | null, now:
   return BigInt(introHours) * hourlyCharge(bytes, true).due_units + BigInt(hours - introHours) * hourlyCharge(bytes, false).due_units;
 }
 
-type ReserveRow = { workspace_id: string; intro_ends_at: Date; bytes: bigint };
-async function activeWorkspaces(sql: Db, accountId: string): Promise<ReserveRow[]> {
-  const rows = await sql`SELECT e.workspace_id,e.intro_ends_at,hosting_storage_estimate(e.workspace_id)::text AS bytes FROM hosting_storage_enrollments e WHERE e.account_id=${accountId} AND e.activated_at IS NOT NULL ORDER BY e.workspace_id`;
-  // A billed workspace without a measurement can't be sized: fail closed instead of protecting zero.
-  if (rows.some(r => r.bytes === null)) throw new HostingError(503, 'storage_reserve_unavailable');
-  return rows.map(r => ({ workspace_id: r.workspace_id, intro_ends_at: new Date(r.intro_ends_at), bytes: BigInt(r.bytes) < 0n ? 0n : BigInt(r.bytes) }));
+type Sized = { workspace_id: string; intro_ends_at: Date; bytes: bigint };
+async function activatedRows(sql: Db, accountId: string) {
+  return sql`SELECT e.workspace_id,e.activated_at,e.intro_ends_at,hosting_storage_estimate(e.workspace_id)::text AS bytes,
+      (SELECT reference_only_bytes::text FROM hosting_storage_anchors a WHERE a.workspace_id=e.workspace_id ORDER BY a.taken_at DESC LIMIT 1) AS reference_only,
+      (SELECT max(h.hour) FROM hosting_storage_hours h WHERE h.workspace_id=e.workspace_id) AS settled_hour
+    FROM hosting_storage_enrollments e WHERE e.account_id=${accountId} ORDER BY e.workspace_id`;
 }
 
-/** Units of purchased credit that must stay funded for the next 30 days of storage across the whole account. */
+/** Units of purchased credit that must stay funded for the next 30 days of storage across the whole account.
+ * Fails closed (never zero) while any required category is unmetered, a workspace is unmeasured, or objects are counted without journal coverage. */
 export async function storageProtectedUnits(sql: Db, accountId: string, now = new Date()): Promise<bigint> {
+  const missing = missingStorageCategories();
+  if (missing.length) throw new HostingError(503, 'storage_coverage_incomplete');
   let total = 0n;
-  for (const w of await activeWorkspaces(sql, accountId)) total += forwardWindowUnits(w.bytes, w.intro_ends_at, now);
+  for (const r of (await activatedRows(sql, accountId)).filter(r => r.activated_at)) {
+    if (r.bytes === null) throw new HostingError(503, 'storage_reserve_unavailable');
+    if (r.reference_only !== null && BigInt(r.reference_only) > 0n) throw new HostingError(503, 'storage_coverage_incomplete');
+    total += forwardWindowUnits(BigInt(r.bytes) < 0n ? 0n : BigInt(r.bytes), new Date(r.intro_ends_at), now);
+  }
   return total;
 }
 
@@ -283,40 +364,52 @@ export async function accountStorageSummary(db: Db, accountId: string, now = new
   const paid = BigInt(account.paid_units);
   const purchased = paid > 0n ? paid : 0n, debt = paid < 0n ? -paid : 0n;
   const spendable = purchased + promo;
-  const rows = await db`SELECT e.workspace_id,e.activated_at,e.intro_ends_at,hosting_storage_estimate(e.workspace_id)::text AS bytes FROM hosting_storage_enrollments e WHERE e.account_id=${accountId} ORDER BY e.workspace_id`;
+  const rows = await activatedRows(db, accountId);
   const active = rows.filter(r => r.activated_at);
   const unmeasured = active.filter(r => r.bytes === null).map(r => r.workspace_id as string);
-  const sized = active.filter(r => r.bytes !== null).map(r => ({ workspace_id: r.workspace_id as string, intro_ends_at: new Date(r.intro_ends_at), bytes: BigInt(r.bytes) < 0n ? 0n : BigInt(r.bytes) }));
+  const referenceOnly = active.filter(r => r.reference_only !== null && BigInt(r.reference_only) > 0n).map(r => r.workspace_id as string);
+  const sized: Sized[] = active.filter(r => r.bytes !== null).map(r => ({ workspace_id: r.workspace_id as string, intro_ends_at: new Date(r.intro_ends_at), bytes: BigInt(r.bytes) < 0n ? 0n : BigInt(r.bytes) }));
+  const missing = missingStorageCategories();
   const measurable = unmeasured.length === 0;
+  const complete = missing.length === 0 && measurable && referenceOnly.length === 0;
   const protectedUnits = sized.reduce((sum, w) => sum + forwardWindowUnits(w.bytes, w.intro_ends_at, now), 0n);
   const hours = measurable ? runwayHours(spendable, sized, now) : null;
   const fundedUntil = hours === null ? null : new Date(hourMs(now) + Number(hours) * HOUR).toISOString();
   const days = hours === null ? null : Number(hours) / 24;
   const warning = days === null ? null : days <= 1 ? 1 : days <= 7 ? 7 : days <= 30 ? 30 : null;
-  const agentAvailable = measurable && debt === 0n && spendable > protectedUnits ? spendable - protectedUnits : 0n;
+  // Incomplete coverage never unlocks agent spend: the reserve would understate what storage needs.
+  const agentAvailable = complete && debt === 0n && spendable > protectedUnits ? spendable - protectedUnits : 0n;
   const asUnits = (v: bigint) => v.toString();
-  const unmetered = [...UNMETERED_STORAGE_CATEGORIES];
+  const reason = missing.length ? 'storage_coverage_incomplete' : !measurable ? 'storage_measurement_unavailable' : referenceOnly.length ? 'storage_coverage_incomplete' : debt > 0n ? 'reversal_debt' : agentAvailable > 0n ? null : 'storage_reserve_not_covered';
   return {
     version: 1 as const, account_id: accountId, currency: 'USD' as const, units_per_usd: USD_UNITS.toString(), as_of: now.toISOString(), basis: STORAGE_BASIS_VERSION,
     balances: {
       purchased_units: asUnits(purchased), purchased_usd: unitsUsd(purchased), promo_units: asUnits(promo), spendable_units: asUnits(spendable), spendable_usd: unitsUsd(spendable),
       reversal_debt_units: asUnits(debt), reversal_debt_usd: unitsUsd(debt),
-      protected_storage_units: asUnits(protectedUnits), protected_storage_usd: unitsUsd(protectedUnits),
+      protected_storage_units: asUnits(protectedUnits), protected_storage_usd: unitsUsd(protectedUnits), protected_is_lower_bound: !complete,
       agent_available_units: asUnits(agentAvailable), agent_available_usd: unitsUsd(agentAvailable),
       agent_holds: { registered: false, units: null as string | null },
     },
     runway: {
       state: !measurable ? 'measurement_unavailable' : active.length === 0 ? 'no_billed_workspace' : hours === null ? 'unbounded' : spendable <= 0n ? 'depleted' : 'projected',
       hours: hours === null ? null : hours.toString(), funded_until: fundedUntil, warning_days: warning, assumes: 'current measured size stays constant; introductory waiver ends on schedule',
-      upper_bound: true, unmetered_categories_excluded: unmetered.map(c => c.id),
+      upper_bound: !complete, unmetered_categories_excluded: missing,
     },
-    admission: { agent_spend_allowed: agentAvailable > 0n, reason: !measurable ? 'storage_measurement_unavailable' : debt > 0n ? 'reversal_debt' : agentAvailable > 0n ? null : 'storage_reserve_not_covered' },
-    coverage: { complete: false, metered: ['postgres', 'objects'], unmetered, workspaces_unmeasured: unmeasured },
-    workspaces: rows.map(r => ({
-      workspace_id: r.workspace_id as string, activated: Boolean(r.activated_at), activated_at: r.activated_at ? new Date(r.activated_at).toISOString() : null,
-      intro_ends_at: r.intro_ends_at ? new Date(r.intro_ends_at).toISOString() : null, current_bytes: r.bytes === null ? null : (BigInt(r.bytes) < 0n ? 0n : BigInt(r.bytes)).toString(),
-      next_720_hours_units: r.activated_at && r.bytes !== null ? forwardWindowUnits(BigInt(r.bytes) < 0n ? 0n : BigInt(r.bytes), new Date(r.intro_ends_at), now).toString() : null,
-    })),
+    admission: { agent_spend_allowed: agentAvailable > 0n, reason },
+    coverage: {
+      complete, required: [...REQUIRED_STORAGE_CATEGORIES], metered: ['postgres', 'objects', ...[...metered].filter(c => c !== 'postgres' && c !== 'objects')], missing,
+      unmetered: [...UNMETERED_STORAGE_CATEGORIES], workspaces_unmeasured: unmeasured, workspaces_with_reference_only_objects: referenceOnly,
+    },
+    workspaces: rows.map(r => {
+      const bytes = r.bytes === null ? null : (BigInt(r.bytes) < 0n ? 0n : BigInt(r.bytes));
+      const closed = r.activated_at ? Math.max(0, Math.floor((hourMs(now) - (r.settled_hour ? new Date(r.settled_hour).getTime() + HOUR : ceilHourMs(new Date(r.activated_at)))) / HOUR)) : 0;
+      return {
+        workspace_id: r.workspace_id as string, activated: Boolean(r.activated_at), activated_at: r.activated_at ? new Date(r.activated_at).toISOString() : null,
+        intro_ends_at: r.intro_ends_at ? new Date(r.intro_ends_at).toISOString() : null, current_bytes: bytes === null ? null : bytes.toString(),
+        next_720_hours_units: r.activated_at && bytes !== null ? forwardWindowUnits(bytes, new Date(r.intro_ends_at), now).toString() : null,
+        unsettled_closed_hours: closed,
+      };
+    }),
   };
 }
 export type AccountStorageSummary = Awaited<ReturnType<typeof accountStorageSummary>>;
@@ -324,5 +417,5 @@ export type AccountStorageSummary = Awaited<ReturnType<typeof accountStorageSumm
 /** Owner-visible per-hour evidence for one workspace. */
 export async function workspaceStorageHours(db: Db, workspaceId: string, limit = 50) {
   const bound = Number.isSafeInteger(limit) ? Math.max(1, Math.min(200, limit)) : 50;
-  return db`SELECT hour,status,intro,start_bytes,end_bytes,observed_peak_bytes,peak_bytes,billable_bytes,due_units,charged_units,uncollected_units,basis FROM hosting_storage_hours WHERE workspace_id=${workspaceId} ORDER BY hour DESC LIMIT ${bound}`;
+  return db`SELECT hour,status,intro,start_bytes,end_bytes,intrahour_peak_bytes,drift_bytes,peak_bytes,billable_bytes,due_units,charged_units,uncollected_units,reason,basis FROM hosting_storage_hours WHERE workspace_id=${workspaceId} ORDER BY hour DESC LIMIT ${bound}`;
 }
