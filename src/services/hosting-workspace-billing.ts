@@ -49,6 +49,8 @@ export async function enrollWorkspaceBilling(workspaceId:string,actorId:string,c
     const [account]=await sql`SELECT id FROM hosting_accounts WHERE owner_actor_id=${actorId}`;
     if(!account)throw new HostingError(409,'existing_hosting_account_required');
     await sql`SELECT id FROM hosting_accounts WHERE id=${account.id} FOR UPDATE`;
+    const [peak]=await sql`SELECT 1 FROM hosting_storage_enrollments WHERE workspace_id=${workspaceId}`;
+    if(peak)throw new HostingError(409,'workspace_peak_billing_active');
     const [prior]=await sql`SELECT * FROM hosting_workspace_wallets WHERE workspace_id=${workspaceId}`;
     if(prior){if(prior.owner_actor_id!==actorId)throw new HostingError(409,'billing_owner_conflict');return {workspace_id:workspaceId,enabled_at:prior.enabled_at};}
     const [link]=await sql`SELECT account_id FROM hosting_workspace_accounts WHERE workspace_id=${workspaceId}`;

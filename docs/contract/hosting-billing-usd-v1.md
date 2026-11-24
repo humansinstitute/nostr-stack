@@ -28,6 +28,11 @@ account mutation/meter transaction; status excludes expired promo immediately.
 No Stripe Customer is created on reads; Checkout's local order and PaymentIntent
 provide the customer-account binding for this first pass.
 
+Workspaces enrolled by the approved invited-onboarding policy are metered by
+[hosting-storage-peak-v1.md](hosting-storage-peak-v1.md) (hourly peak, base-only introductory
+waiver, no-debt exhaustion); the legacy hourly sample below never charges them and is unchanged for every
+other workspace.
+
 ## Exact tariff and evidence
 
 One decimal GB is 1,000,000,000 bytes. One fixed month is 720 hours. $5 per GB per

@@ -120,6 +120,13 @@ export async function hostingStatus(workspaceId:string,db:Db=getDb(),now=new Dat
 }
 export function stripeAvailability(){return {configured:Boolean(process.env.STRIPE_SECRET_KEY&&process.env.STRIPE_WEBHOOK_SECRET&&process.env.HOSTING_STRIPE_RETURN_URLS),mode:process.env.HOSTING_STRIPE_MODE||'test',live_rollout_blocked:true};}
 export async function hostingWriteBlock(workspaceId:string, db:Db=getDb()) {
+  // Peak-metered workspaces (approved onboarding policy): read-only once funds are exhausted. No debt accrues, 30 days of free
+  // read-only export are granted, and nothing is ever deleted automatically.
+  const [peak]=await db`SELECT a.depleted_at,a.paid_units,a.promo_units,a.promo_expires_at FROM hosting_storage_enrollments e JOIN hosting_accounts a ON a.id=e.account_id WHERE e.workspace_id=${workspaceId} AND e.activated_at IS NOT NULL`;
+  if(peak){
+    const promo=new Date(peak.promo_expires_at)>new Date()?BigInt(peak.promo_units):0n;
+    return peak.depleted_at&&BigInt(peak.paid_units)+promo<=0n?{code:'hosting_balance_exhausted',error:'Hosting balance exhausted; workspace is read-only',status:402,grace_ends_at:new Date(new Date(peak.depleted_at).getTime()+30*86400000).toISOString(),automatic_deletion:false}:null;
+  }
   const [wallet]=await db`SELECT w.*,a.npub AS payer_npub,s.workspace_owner_npub FROM hosting_workspace_wallets w JOIN flightdeck_pg_actors a ON a.id=w.owner_actor_id JOIN flightdeck_pg_workspaces s ON s.id=w.workspace_id WHERE w.workspace_id=${workspaceId} AND w.enabled_at<=now()`;
   if(wallet){
     if(wallet.payer_npub!==wallet.workspace_owner_npub)return {code:'hosting_owner_changed',error:'Workspace billing owner requires explicit reconciliation',status:402,automatic_deletion:false};
@@ -138,7 +145,7 @@ export async function runHostingBillingTick(db:Db=getDb(),clock:Date|(()=>Date)=
     const [lock]=await connection`SELECT pg_try_advisory_lock(1440000720) AS acquired`;
     if(!lock?.acquired)return;
     const now=typeof clock==='function'?clock():clock;
-    const links=await db`SELECT l.*,max(h.hour) AS last_hour FROM hosting_workspace_accounts l LEFT JOIN hosting_usage_hours h USING(workspace_id) WHERE NOT EXISTS(SELECT 1 FROM hosting_workspace_wallets w WHERE w.workspace_id=l.workspace_id AND w.enabled_at<=${now}) GROUP BY l.workspace_id`;
+    const links=await db`SELECT l.*,max(h.hour) AS last_hour FROM hosting_workspace_accounts l LEFT JOIN hosting_usage_hours h USING(workspace_id) WHERE NOT EXISTS(SELECT 1 FROM hosting_workspace_wallets w WHERE w.workspace_id=l.workspace_id AND w.enabled_at<=${now}) AND NOT EXISTS(SELECT 1 FROM hosting_storage_enrollments p WHERE p.workspace_id=l.workspace_id) GROUP BY l.workspace_id`;
     for(const l of links) {
       const current=Math.floor(now.getTime()/3600000)*3600000;
       const start=l.last_hour?new Date(l.last_hour).getTime()+3600000:Math.floor(new Date(l.enabled_at).getTime()/3600000)*3600000;

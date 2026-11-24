@@ -22,7 +22,7 @@ export const hostingSchemas = {
   HostingAccountUsageMeasurement: object({ ...workspaceMeasurement, evidence: { type: 'object' } }),
   HostingUsageHour: object({ ...workspaceMeasurement, account_id: uuid, evidence: { type: 'object' }, collected_at: dateTime }),
   HostingWorkspaceLedgerEntry: object({ id: uuid, workspace_id: uuid, kind: { enum: ['usage','workspace_usage'] }, amount_units: amount, created_at: dateTime }),
-  HostingAccountLedgerEntry: object({ id: uuid, account_id: uuid, workspace_id: { type: ['string','null'], format: 'uuid' }, balance_scope: { enum: ['account','workspace'] }, kind: { enum: ['welcome','usage','admin','stripe','promo_expiry','workspace_allocation','workspace_usage'] }, amount_units: amount, paid_after_units: amount, promo_after_units: amount, idempotency_key: { type: 'string' }, reason: { type: 'string' }, actor_npub: { type: ['string','null'] }, created_at: dateTime, metadata: { type: 'object' }, snapshot_id: nullableUuid, rate_id: nullableUuid, duration_seconds: { type: ['integer','null'] } }),
+  HostingAccountLedgerEntry: object({ id: uuid, account_id: uuid, workspace_id: { type: ['string','null'], format: 'uuid' }, balance_scope: { enum: ['account','workspace'] }, kind: { enum: ['welcome','usage','admin','stripe','promo_expiry','workspace_allocation','workspace_usage','storage_peak'] }, amount_units: amount, paid_after_units: amount, promo_after_units: amount, idempotency_key: { type: 'string' }, reason: { type: 'string' }, actor_npub: { type: ['string','null'] }, created_at: dateTime, metadata: { type: 'object' }, snapshot_id: nullableUuid, rate_id: nullableUuid, duration_seconds: { type: ['integer','null'] } }),
   HostingLedgerEntry: { oneOf: [ref('HostingAccountLedgerEntry'), ref('HostingWorkspaceLedgerEntry')] },
   HostingWorkspaceBillingStatus: object({ can_top_up: { type: 'boolean' }, version: { const: 1 }, billing_mode: { const: 'usd_prepaid' }, workspace_id: uuid, financial_scope: { const: 'workspace' }, currency: { const: 'USD' }, measurements: { type: 'array', items: ref('HostingWorkspaceUsageMeasurement') }, stripe }, ['can_top_up']),
   HostingUnlinkedBillingStatus: object({ can_top_up: { type: 'boolean' }, version: { const: 1 }, billing_mode: { const: 'legacy_unlinked' }, workspace_id: uuid, stripe }, ['can_top_up']),
@@ -93,3 +93,30 @@ Object.assign(hostingSchemas, { HostingWorkspaceCosts: {
   },
 } });
 hostingPaths['/api/v4/hosting-billing/workspaces/{workspaceId}/costs'].get.responses['200'] = response({ $ref: '#/components/schemas/HostingWorkspaceCosts' });
+
+const units = { type: 'string', pattern: '^[0-9]+$', description: 'Exact tariff units (144000000000 per USD; one unit per byte-hour).' };
+Object.assign(hostingSchemas, {
+  HostingStorageSummary: { type: 'object', required: ['version','account_id','currency','units_per_usd','as_of','basis','balances','runway','admission','coverage','workspaces'], properties: {
+    version: { const: 1 }, account_id: uuid, currency: { const: 'USD' }, units_per_usd: { const: '144000000000' }, as_of: timestamp, basis: { const: 'peak-v1' }, workspace_id: uuid,
+    balances: { type: 'object', description: 'Authoritative balances. protected_storage_units is the exact next-720-hour storage charge across every activated linked workspace; agent_available_units is spendable funds above it. agent_holds is not integrated yet and is reported unregistered, never as zero.', properties: {
+      purchased_units: units, purchased_usd: decimal, promo_units: units, spendable_units: units, spendable_usd: decimal, reversal_debt_units: units, reversal_debt_usd: decimal,
+      protected_storage_units: units, protected_storage_usd: decimal, agent_available_units: units, agent_available_usd: decimal,
+      agent_holds: { type: 'object', properties: { registered: { const: false }, units: { type: ['string','null'] } } },
+    } },
+    runway: { type: 'object', description: 'Whole funded hours from the current UTC hour at the current measured size, honouring the remaining introduction. An upper bound: unmetered categories are excluded.', properties: {
+      state: { enum: ['projected','unbounded','depleted','no_billed_workspace','measurement_unavailable'] }, hours: { type: ['string','null'] }, funded_until: nullableTimestamp, warning_days: { enum: [30, 7, 1, null] },
+      assumes: { type: 'string' }, upper_bound: { const: true }, unmetered_categories_excluded: { type: 'array', items: { type: 'string' } },
+    } },
+    admission: { type: 'object', properties: { agent_spend_allowed: { type: 'boolean' }, reason: { enum: ['storage_measurement_unavailable','reversal_debt','storage_reserve_not_covered', null] } } },
+    coverage: { type: 'object', properties: { complete: { const: false }, metered: { type: 'array', items: { enum: ['postgres','objects'] } }, unmetered: { type: 'array', items: { type: 'object' } }, workspaces_unmeasured: { type: 'array', items: uuid } } },
+    workspaces: { type: 'array', items: { type: 'object', properties: { workspace_id: uuid, activated: { type: 'boolean' }, activated_at: nullableTimestamp, intro_ends_at: nullableTimestamp, current_bytes: { type: ['string','null'] }, next_720_hours_units: { type: ['string','null'] } } } },
+    hours: { type: 'array', maxItems: 200, items: { type: 'object' } },
+  } },
+  HostingWorkspaceStorageScope: object({ version: { const: 1 }, workspace_id: uuid, financial_scope: { const: 'workspace' }, activated_at: nullableTimestamp, intro_ends_at: nullableTimestamp, hours: { type: 'array', items: { type: 'object' } } }),
+});
+hostingPaths['/api/v4/hosting-billing/workspaces/{workspaceId}/storage'] = { get: {
+  tags: ['Billing'], summary: 'Peak storage balances, protection and runway', security: [{ nip98: [] }],
+  description: 'Peak-metered workspaces only (approved onboarding policy). The shared account owner (or platform administrator) receives the account-level purchased balance, protected storage, agent-available funds and runway with coverage gaps listed. Workspace membership or workspace.manage receives workspace scope only. Hours are peak-per-UTC-hour with exact integer units: ordinary hours bill max(1GB, peak); introductory hours waive only the first 1GB. Funded growth is never blocked by the reserve; it lowers runway and agent admission.',
+  parameters: [{ name: 'workspaceId', in: 'path', required: true, schema: uuid }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } }],
+  responses: { '200': response({ oneOf: [ref('HostingStorageSummary'), ref('HostingWorkspaceStorageScope')] }), ...errors },
+} };

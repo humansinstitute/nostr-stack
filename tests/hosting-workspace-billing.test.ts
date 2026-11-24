@@ -7,6 +7,7 @@ import { config } from '../src/config';
 import { setDb,closeDb } from '../src/db';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { hostingMeteringV1Sql } from '../src/schema/hosting-metering-v1';
+import { hostingStoragePeakV1Sql } from '../src/schema/hosting-storage-peak-v1';
 import { hostingWorkspaceBillingV2Sql } from '../src/schema/hosting-workspace-billing-v2';
 import { configureStorageRate,enrollWorkspaceBilling,allocateWorkspaceCredit,settleWorkspaceSnapshot,exactStorageCharge,readWorkspaceCosts,runWorkspaceBillingTick } from '../src/services/hosting-workspace-billing';
 import { auditHostingHour,runHostingBillingTick,hostingWriteBlock } from '../src/services/hosting-billing';
@@ -35,6 +36,7 @@ describe.skipIf(!port||port===5432)('workspace allocated billing on disposable P
     await db.unsafe(hostingMeteringV1Sql);
     await db.unsafe(hostingWorkspaceBillingV2Sql);
     await db.unsafe(hostingWorkspaceBillingV2Sql); // Idempotent runtime replay.
+    await db.unsafe(hostingStoragePeakV1Sql); // Additive peak-meter schema; legacy paths consult its enrollment table.
 
     const [owner]=await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES('owner-fixture','human') RETURNING id`;actor=owner!.id;
     const [o]=await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES('other-fixture','human') RETURNING id`;other=o!.id;

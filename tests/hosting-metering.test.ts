@@ -11,6 +11,7 @@ import { config } from '../src/config';
 import { setDb, closeDb } from '../src/db';
 import { splitSqlStatements } from '../src/schema/sql-statements';
 import { hostingMeteringV1Sql } from '../src/schema/hosting-metering-v1';
+import { hostingStoragePeakV1Sql } from '../src/schema/hosting-storage-peak-v1';
 import { collectMeteredStorage, meteredCoveredBytes, readStoredMetering, runStorageMeteringTick } from '../src/services/hosting-metering';
 import { createApp } from '../src/server';
 import type { FlightDeckPgWorkspaceStorage } from '../src/types';
@@ -42,6 +43,7 @@ describe.skipIf(!port || port === 5432)('stored metering on disposable PostgreSQ
     db = postgres({...options, database: name}); setDb(db);
     for (const statement of splitSqlStatements(readFileSync(new URL('../src/schema/001_init.sql', import.meta.url), 'utf8'))) await db.unsafe(statement);
     await db.unsafe(hostingMeteringV1Sql); // Runtime migration replay is idempotent.
+    await db.unsafe(hostingStoragePeakV1Sql); // Additive peak-meter schema; legacy paths consult its enrollment table.
     const ids=[];
     for (let i=0;i<keys.length;i++) {
       const [row]=await db`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${npubs[i]},${i===2?'agent':'human'}) RETURNING id`; ids.push(row!.id);
