@@ -45,6 +45,20 @@ export async function createHostingCheckout(accountId:string,body:unknown,db:Db=
   const session=await ensureCheckoutSession(order,client,db);
   return {order_id:order.id,checkout_url:session.url,mode:'test',amount_cents:order.amount_cents};
 }
+/** The exact return URLs a client may send, as configured by the operator: https (or loopback http) with no userinfo, query or
+ * fragment, which is the shape the native clients accept. Nothing else is ever listed; a client cannot add to it. */
+export function approvedCheckoutReturnUrls():string[] {
+  const out:string[]=[];
+  for(const raw of (process.env.HOSTING_STRIPE_RETURN_URLS||'').split(',').map(v=>v.trim()).filter(Boolean)){
+    try{
+      const u=new URL(raw);
+      const loopback=['localhost','127.0.0.1'].includes(u.hostname);
+      if(u.username||u.password||u.search||u.hash)continue;
+      if(u.protocol==='https:'||(u.protocol==='http:'&&loopback))out.push(raw);
+    }catch{/* an unparseable entry is never offered */}
+  }
+  return [...new Set(out)];
+}
 /** Creates (idempotently) or retrieves the provider session bound to a local order and records its id. */
 async function ensureCheckoutSession(order:any,client:Stripe,db:Db) {
   const session=order.session_id?await client.checkout.sessions.retrieve(order.session_id):await client.checkout.sessions.create({

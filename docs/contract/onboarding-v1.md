@@ -117,6 +117,15 @@ triggers are installed; they install at start-up when `ONBOARDING_ENABLED=true`.
   (the `storage_protection` source is registered) and live refund acceptance remain release gates; see
   [funding-reversals-v1.md](funding-reversals-v1.md).
 
+## Deployment configuration for clients
+
+`GET /api/v4/onboarding/config` (authenticated read) reports what this deployment can do now, so a client never has to guess or
+hard-code it: `onboarding_enabled`, `funding` bounds (including the top-up bounds), `card` (`available` only when onboarding is on,
+Stripe is configured in test mode and at least one return URL is approved; `return_urls` are exactly the operator's
+`HOSTING_STRIPE_RETURN_URLS` entries that are https, or loopback http, with no userinfo, query or fragment, the shape native clients
+accept) and `lightning.available` (enabled and a trusted provider configured). It contains no secret, key or provider detail and
+nothing a client can change; checkout still accepts only an exact allowlist member. No new environment variable is introduced.
+
 ## Repeat account top-ups
 
 After provisioning has completed (the account has an activated peak-storage enrollment, written in the transaction that marks the intent provisioned), the owner can add credit

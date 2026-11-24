@@ -1,10 +1,13 @@
 import { Hono } from 'hono';
 import { requireNip98AuthResolved, verifyStrictNip98Mutation } from '../auth';
 import { HostingError } from '../services/hosting-billing';
-import { createHostingCheckout, requestStripeRefund } from '../services/hosting-stripe';
+import { approvedCheckoutReturnUrls, createHostingCheckout, requestStripeRefund } from '../services/hosting-stripe';
 import { fundingReversalSummary } from '../services/hosting-funding';
-import { issueLightningQuote, readLightningQuote, reconcileOpenLightningQuotes, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
+import { lightningAvailable, issueLightningQuote, readLightningQuote, reconcileOpenLightningQuotes, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
 import { getDb } from '../db';
+import { stripeAvailability } from '../services/hosting-billing';
+import { ONBOARDING_MAX_FUNDING_CENTS, ONBOARDING_MIN_FUNDING_CENTS, onboardingEnabled } from '../services/onboarding';
+import { TOPUP_MAX_CENTS, TOPUP_MIN_CENTS } from '../services/hosting-topup-limits';
 import { createTopupCheckout, issueTopupQuote, listTopups, refreshTopupQuote } from '../services/hosting-topup';
 import { accountStorageSummary } from '../services/hosting-storage';
 import { accountLifecycle, acknowledgeLifecycleNotice, evaluateLifecycleNotices, listLifecycleNotices } from '../services/hosting-lifecycle';
@@ -37,6 +40,18 @@ const guard = (handler: (c: any) => Promise<Response>) => async (c: any) => {
 };
 
 onboardingRouter.get('/invites/:code', guard(async c => c.json(await inviteAvailability(c.req.param('code')))));
+/** What this deployment can actually do right now, for client gating. Operator configuration only: no secrets and nothing a client can alter. */
+onboardingRouter.get('/config', guard(async c => {
+  await reader(c);
+  const stripe = stripeAvailability();
+  const returnUrls = approvedCheckoutReturnUrls();
+  return c.json({
+    version: 1, onboarding_enabled: onboardingEnabled(),
+    funding: { min_cents: ONBOARDING_MIN_FUNDING_CENTS, max_cents: ONBOARDING_MAX_FUNDING_CENTS, topup_min_cents: TOPUP_MIN_CENTS, topup_max_cents: TOPUP_MAX_CENTS },
+    card: { available: onboardingEnabled() && stripe.configured && stripe.mode === 'test' && returnUrls.length > 0, mode: stripe.mode, live_rollout_blocked: stripe.live_rollout_blocked, return_urls: returnUrls },
+    lightning: { available: onboardingEnabled() && lightningAvailable() },
+  });
+}));
 onboardingRouter.get('/account', guard(async c => {
   const account = await readOwnerAccount(await reader(c));
   return c.json({ account, funding: account ? await fundingReversalSummary(getDb(), account.account_id) : null, storage: account ? await accountStorageSummary(getDb(), account.account_id) : null,

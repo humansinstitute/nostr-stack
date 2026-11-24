@@ -43,6 +43,8 @@ export interface LightningProvider {
 let provider: LightningProvider | null = null;
 /** Trusted startup/test hook only. No route, environment value or request can register a provider. */
 export function configureLightningProvider(next: LightningProvider | null) { provider = next; }
+/** Whether quotes can be issued right now: enabled by the operator AND a trusted provider is configured. Reveals no provider detail. */
+export const lightningAvailable = () => process.env.HOSTING_LIGHTNING_ENABLED === 'true' && provider !== null;
 export function lightningProvider(): LightningProvider {
   if (process.env.HOSTING_LIGHTNING_ENABLED !== 'true' || !provider) throw new HostingError(503, 'lightning_unavailable');
   return provider;

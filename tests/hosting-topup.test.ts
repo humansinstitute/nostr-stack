@@ -248,6 +248,33 @@ describe.skipIf(!port || port === 5432)('repeat account top-ups on disposable Po
     expect(BigInt(after!.paid_units)).toBe(-100n * USD_UNITS + 2600n * (USD_UNITS / 100n)); expect(after!.depleted_at).not.toBeNull();
   });
 
+  test('config: reports only operator-approved return URLs and real availability, never secrets', async () => {
+    // Built at runtime so no credential-bearing URL literal is tracked in source.
+    const credentialUrl = ['https://user', ':pw@example.test/x'].join('');
+    const saved = { urls: process.env.HOSTING_STRIPE_RETURN_URLS, key: process.env.STRIPE_SECRET_KEY, hook: process.env.STRIPE_WEBHOOK_SECRET };
+    expect((await call('GET', '/config', undefined)).status).toBe(401);
+    try {
+      process.env.HOSTING_STRIPE_RETURN_URLS = `${returnUrl}, ${credentialUrl}, https://example.test/x?y=1, https://example.test/x#f, ftp://example.test/y, http://localhost:3000/ret, http://example.test/plain, not a url, ${returnUrl}`;
+      delete process.env.STRIPE_SECRET_KEY; delete process.env.STRIPE_WEBHOOK_SECRET;
+      const off = await call('GET', '/config', bobKey);
+      expect(off.status).toBe(200);
+      expect(off.json.card.available).toBe(false); // Stripe itself is unconfigured
+      expect(off.json.card.return_urls).toEqual([returnUrl, 'http://localhost:3000/ret']);
+      process.env.STRIPE_SECRET_KEY = 'sk_test_fixture'; process.env.STRIPE_WEBHOOK_SECRET = 'whsec_fixture';
+      const on = await call('GET', '/config', bobKey);
+      expect(on.json).toMatchObject({ version: 1, onboarding_enabled: true, funding: { min_cents: 2100, topup_min_cents: 2100, topup_max_cents: 1_000_000 }, card: { available: true, mode: 'test', live_rollout_blocked: true }, lightning: { available: true } });
+      expect(JSON.stringify(on.json)).not.toContain('sk_test_fixture');
+      expect(JSON.stringify(on.json)).not.toContain('whsec_fixture');
+      process.env.HOSTING_STRIPE_RETURN_URLS = credentialUrl;
+      expect((await call('GET', '/config', bobKey)).json.card).toMatchObject({ available: false, return_urls: [] });
+      process.env.ONBOARDING_ENABLED = 'false';
+      expect((await call('GET', '/config', bobKey)).json).toMatchObject({ onboarding_enabled: false, lightning: { available: false } });
+    } finally {
+      process.env.ONBOARDING_ENABLED = 'true';
+      for (const [k, v] of [['HOSTING_STRIPE_RETURN_URLS', saved.urls], ['STRIPE_SECRET_KEY', saved.key], ['STRIPE_WEBHOOK_SECRET', saved.hook]] as const) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+  });
+
   test('HTTP: human direct signature only; rollout gate closed fails closed; owner reads only own', async () => {
     await provisioned(bob, 'Topup Bob Http');
     const quoteBody = { amount_cents: 2900, idempotency_key: key() };
