@@ -39,7 +39,7 @@ by this software; with no operator-appended tariff every reserve is refused.
 
 - Service routes (`/holds/*`): strict NIP-98 (`verifyStrictNip98Mutation`: exact URL, method, `payload` = sha256
   of the exact raw body, ≤ 60 s). Signer must equal a configured service npub **directly** (no workspace-key
-  delegation) and each request's event id is single use for mutations. The hold's grant `service_npub` must equal
+  delegation) Replays inside the NIP-98 window are harmless because every mutation is idempotent on `(account_id, call_id)`. The hold's grant `service_npub` must equal
   the signer. GET lookups use the same allowlist with ordinary NIP-98.
 - Payer routes (`/grants*`): strict NIP-98 signed directly by the account owner (`userNpub === signerNpub`).
 - Admin routes (`/tariffs`, `/blocks/.../clear`): direct signature by `ADMIN_NPUB`.
@@ -91,7 +91,7 @@ States: `held → dispatched → settled`; `held → released` (never dispatched
 
 Identity: `(account_id, call_id)`; `call_id` matches `[A-Za-z0-9_.:-]{1,128}` and is the stable idempotency key
 (reuse the same value for every retry of the same logical call). `account_id` is **required** on every request.
-An opaque `hold_id` is returned and may be used later in place of the pair.
+An opaque `hold_id` is returned; mutations are addressed by the `(account_id, call_id)` pair, and `GET /holds` also accepts `account_id`+`hold_id`.
 
 ### POST /api/v4/agent-holds/holds/reserve
 

@@ -7,6 +7,7 @@ import { buildAdvancedDashboardHtml } from './openapi';
 import { requireNip98AuthResolved } from './auth';
 import { hostingBillingRouter } from './routes/hosting-billing';
 import { onboardingRouter } from './routes/onboarding';
+import { agentHoldsRouter } from './routes/agent-holds';
 import { hostingWriteBlock, stripeAvailability } from './services/hosting-billing';
 import { blossomRouter } from './routes/blossom';
 import { driveRouter } from './routes/drive';
@@ -127,6 +128,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v4/wapp-activity/workspaces/:workspaceId/*', hostedWriteBoundary);
   app.route('/api/v4/hosting-billing', hostingBillingRouter);
   app.route('/api/v4/onboarding', onboardingRouter);
+  app.route('/api/v4/agent-holds', agentHoldsRouter);
   app.route('/api/v4/groups', groupsRouter);
   // Legacy Git authority and OIDC endpoints are retired. GRasp owns Git access.
   app.all('/api/v4/git/*', (c) => c.json({ error: 'retired', message: 'Use the configured GRasp Git and Nostr endpoints' }, 410));

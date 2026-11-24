@@ -33,6 +33,9 @@ startWorkspaceBillingRunner();
 // Peak-storage meter for the approved onboarding policy; a no-op until a workspace is enrolled and activated.
 const { startStoragePeakRunner, registerStorageProtectionReserve } = await import('./services/hosting-storage');
 registerStorageProtectionReserve();
+// Agent holds reserve: a real query over open holds (zero when none), so refunds and admission account for admitted agent work.
+const { registerAgentHoldsReserve } = await import('./services/hosting-agent-holds');
+registerAgentHoldsReserve();
 startStoragePeakRunner();
 // Durable 30/7/1-day runway and read-only notices (deduplicated per funding cycle; no deletion capability).
 const { startLifecycleNoticeRunner } = await import('./services/hosting-lifecycle');

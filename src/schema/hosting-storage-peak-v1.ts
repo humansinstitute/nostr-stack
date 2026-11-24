@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS hosting_storage_hours (
  CHECK(status<>'unavailable' OR (peak_bytes IS NULL AND due_units IS NULL AND charged_units=0 AND ledger_id IS NULL AND reason IS NOT NULL))
 );
 ALTER TABLE hosting_ledger DROP CONSTRAINT IF EXISTS hosting_ledger_kind_check;
-ALTER TABLE hosting_ledger ADD CONSTRAINT hosting_ledger_kind_check CHECK(kind IN ('welcome','usage','admin','stripe','promo_expiry','workspace_allocation','workspace_usage','lightning','refund','dispute','storage_peak'));
+ALTER TABLE hosting_ledger ADD CONSTRAINT hosting_ledger_kind_check CHECK(kind IN ('welcome','usage','admin','stripe','promo_expiry','workspace_allocation','workspace_usage','lightning','refund','dispute','storage_peak','agent_usage'));
 DROP TRIGGER IF EXISTS hosting_storage_boundary_immutable ON hosting_storage_boundaries;
 CREATE TRIGGER hosting_storage_boundary_immutable BEFORE UPDATE OR DELETE ON hosting_storage_boundaries FOR EACH ROW EXECUTE FUNCTION hosting_storage_snapshot_immutable();
 DROP TRIGGER IF EXISTS hosting_storage_anchor_immutable ON hosting_storage_anchors;

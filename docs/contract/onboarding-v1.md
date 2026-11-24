@@ -113,8 +113,8 @@ triggers are installed; they install at start-up when `ONBOARDING_ENABLED=true`.
 - Accounts opened here carry `opened_by='onboarding'`; the legacy
   `linkHostedAccount` no longer writes a welcome ledger entry for them (it would
   be an unbacked snapshot of a zero promotional balance).
-- Stripe live mode, a real Lightning provider adapter, the `agent_holds` reserve
-  (the `storage_protection` source is registered) and live refund acceptance remain release gates; see
+- Stripe live mode, a real Lightning provider adapter, the agent-holds feature flag, tariff and Git storage coverage
+  (the `storage_protection` and `agent_holds` sources are registered) and live refund acceptance remain release gates; see
   [funding-reversals-v1.md](funding-reversals-v1.md).
 
 ## Deployment configuration for clients

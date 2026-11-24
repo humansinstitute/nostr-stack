@@ -2,7 +2,7 @@
 // Additive over the shared USD ledger: every credit and every reversal is a ledger row; these tables bind it to provider evidence.
 export const hostingFundingV1Sql = `
 ALTER TABLE hosting_ledger DROP CONSTRAINT IF EXISTS hosting_ledger_kind_check;
-ALTER TABLE hosting_ledger ADD CONSTRAINT hosting_ledger_kind_check CHECK(kind IN ('welcome','usage','admin','stripe','promo_expiry','workspace_allocation','workspace_usage','lightning','refund','dispute'));
+ALTER TABLE hosting_ledger ADD CONSTRAINT hosting_ledger_kind_check CHECK(kind IN ('welcome','usage','admin','stripe','promo_expiry','workspace_allocation','workspace_usage','lightning','refund','dispute','storage_peak','agent_usage'));
 CREATE TABLE IF NOT EXISTS hosting_funding_settlements (
  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
  account_id UUID NOT NULL REFERENCES hosting_accounts(id),

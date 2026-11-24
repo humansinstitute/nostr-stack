@@ -117,13 +117,13 @@ payout outcome was unknown) but still must decode to the same payment hash.
 - **Refund routes are gated** (`503 refund_reserves_unregistered`) until EVERY named required reserve source
   is registered through `registerFundingReserve(name, source)`; any single source is not enough. An empty or
   partial registry is not proof that funds are unreserved. `storage_protection` is registered at start-up from
-  [hosting-storage-peak-v1.md](hosting-storage-peak-v1.md); `agent_holds` is not, so refunds stay gated. There is no
-  no-op registration: the agent slice must supply a real one.
+  [hosting-storage-peak-v1.md](hosting-storage-peak-v1.md); `agent_holds` is registered at start-up from
+  [hosting-agent-holds-v1.md](hosting-agent-holds-v1.md) (a real sum of open holds). There is no no-op registration.
   - `storage_protection` (registered): the exact next-720-hour storage charge of every activated peak-metered workspace linked to the
     account (remaining introductory waiver honoured), from the write-path journal. Throws `503 storage_reserve_unavailable` (refund fails
     closed) when an activated workspace has no measurement, and `503 storage_coverage_incomplete` while Git (required billable storage) is
     unmetered or reference-only objects exist; it is never silently zero.
-  - `agent_holds`: units held for agent work already admitted but not yet metered (agent runtime slice).
+  - `agent_holds`: (registered) units of open agent holds (`held`, `dispatched`, `pending_reconcile`) admitted but not yet settled; see [hosting-agent-holds-v1.md](hosting-agent-holds-v1.md).
   - Contract for each source: `async (sql, accountId) => bigint`, evaluated inside the refund transaction under the
     account lock, returning a non-negative bigint (`0n` when nothing is reserved). A negative or non-bigint value,
     or a throwing source, fails the refund closed (`503 refund_reserve_invalid`, or the source's error) and withholds

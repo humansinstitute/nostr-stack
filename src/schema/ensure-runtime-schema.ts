@@ -7,6 +7,7 @@ import { onboardingV1Sql } from './onboarding-v1';
 import { hostingFundingV1Sql } from './hosting-funding-v1';
 import { hostingStoragePeakV1Sql, installStorageTracking } from './hosting-storage-peak-v1';
 import { workspaceExportV1Sql } from './workspace-export-v1';
+import { hostingAgentHoldsV1Sql } from './hosting-agent-holds-v1';
 import { hostingLifecycleV1Sql } from './hosting-lifecycle-v1';
 import { driveV1Sql } from './drive-v1';
 import { learningV1Sql } from './learning-v1';
@@ -4450,6 +4451,7 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
   await sql.unsafe(hostingStoragePeakV1Sql);
   await sql.unsafe(workspaceExportV1Sql);
   await sql.unsafe(hostingLifecycleV1Sql);
+  await sql.unsafe(hostingAgentHoldsV1Sql);
   // Shared notification inbox: tables, sequence/hint functions, transactional intake and view-state bridge triggers.
   await sql.unsafe(readFileSync(new URL('./notifications-v1.sql', import.meta.url), 'utf8'));
   await sql.unsafe(readFileSync(new URL('./unread-mentions-v1.sql', import.meta.url), 'utf8'));

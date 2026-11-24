@@ -1,6 +1,6 @@
 import { getDb } from '../db';
 import { HostingError, lockedAccount, USD_UNITS, unitsUsd } from './hosting-billing';
-import { registerFundingReserve } from './hosting-funding';
+import { fundingReserveSource, registerFundingReserve } from './hosting-funding';
 import { BILLABLE_STORAGE_TABLES, REQUIRED_STORAGE_CATEGORIES, STORAGE_BASIS_VERSION, UNMETERED_STORAGE_CATEGORIES } from './hosting-storage-classification';
 import { billableColumns, bytesOf, missingStorageTracking, quote } from '../schema/hosting-storage-peak-v1';
 
@@ -387,7 +387,10 @@ export async function accountStorageSummary(db: Db, accountId: string, now = new
   const days = hours === null ? null : Number(hours) / 24;
   const warning = days === null ? null : days <= 1 ? 1 : days <= 7 ? 7 : days <= 30 ? 30 : null;
   // Incomplete coverage never unlocks agent spend: the reserve would understate what storage needs.
-  const agentAvailable = complete && debt === 0n && spendable > protectedUnits ? spendable - protectedUnits : 0n;
+  // Open agent holds are already promised to admitted calls, so they come off what is spendable; unregistered means unknown, never zero.
+  const holdsSource = fundingReserveSource('agent_holds');
+  const heldUnits = holdsSource ? await holdsSource(db, accountId) : null;
+  const agentAvailable = complete && debt === 0n && spendable > protectedUnits + (heldUnits ?? 0n) ? spendable - protectedUnits - (heldUnits ?? 0n) : 0n;
   const asUnits = (v: bigint) => v.toString();
   const reason = missing.length ? 'storage_coverage_incomplete' : !measurable ? 'storage_measurement_unavailable' : referenceOnly.length ? 'storage_coverage_incomplete' : debt > 0n ? 'reversal_debt' : agentAvailable > 0n ? null : 'storage_reserve_not_covered';
   return {
@@ -397,7 +400,7 @@ export async function accountStorageSummary(db: Db, accountId: string, now = new
       reversal_debt_units: asUnits(debt), reversal_debt_usd: unitsUsd(debt),
       protected_storage_units: asUnits(protectedUnits), protected_storage_usd: unitsUsd(protectedUnits), protected_is_lower_bound: !complete,
       agent_available_units: asUnits(agentAvailable), agent_available_usd: unitsUsd(agentAvailable),
-      agent_holds: { registered: false, units: null as string | null },
+      agent_holds: { registered: heldUnits !== null, units: heldUnits === null ? null : heldUnits.toString() as string | null },
     },
     runway: {
       state: !measurable ? 'measurement_unavailable' : active.length === 0 ? 'no_billed_workspace' : hours === null ? 'unbounded' : spendable <= 0n ? 'depleted' : 'projected',

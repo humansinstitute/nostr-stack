@@ -81,6 +81,8 @@ export function registerFundingReserve(name: ReserveSourceName, source: ReserveS
   reserveSources.set(name, source);
   return () => { if (reserveSources.get(name) === source) reserveSources.delete(name); };
 }
+/** Read-only access for projections (e.g. the storage summary subtracting open agent holds). Undefined while unregistered. */
+export const fundingReserveSource = (name: ReserveSourceName) => reserveSources.get(name);
 export const missingFundingReserves = () => REQUIRED_RESERVE_SOURCES.filter(name => !reserveSources.has(name));
 /** Support refunds stay gated until every required reserve (storage protection and agent holds) participates. */
 export const hasFundingReserves = () => missingFundingReserves().length === 0;

@@ -135,7 +135,7 @@ older than the last settled boundary are pruned.
   **exact next-720-hour charge** at each activated workspace's current measured size, honouring the
   remaining introductory hours, summed across every linked workspace. It is therefore never zero
   merely because the base is free during the introduction. Refund routes subtract it (plus
-  `agent_holds`, still unregistered, so refunds remain gated) from purchased credit.
+  `agent_holds`, registered from [hosting-agent-holds-v1.md](hosting-agent-holds-v1.md)) from purchased credit.
 - A workspace without a measurement makes the source throw `503 storage_reserve_unavailable`: refunds
   fail closed instead of protecting zero.
 - Funded growth is never blocked to preserve the reserve. It raises the reserve and shortens the
@@ -149,7 +149,7 @@ older than the last settled boundary are pruned.
 
 - `balances`: `purchased_units`, `promo_units`, `spendable_units`, `reversal_debt_units`,
   `protected_storage_units`, `agent_available_units` (= spendable above the reserve, 0 when in debt
-  or unmeasured), `agent_holds` (`registered:false`, never presented as zero).
+  or unmeasured), `agent_holds` (`registered:false, units:null` while no source is registered, never presented as zero; otherwise `{registered:true, units}` and `agent_available_units` is net of it).
 - `runway`: whole funded hours from the current UTC hour at the current size, `funded_until`,
   `warning_days` (30/7/1), state, `upper_bound:true`, excluded unmetered categories.
 - `coverage`, per-workspace current bytes and next-720-hour units, and recent settled hours.
