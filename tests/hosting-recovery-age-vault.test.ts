@@ -185,7 +185,7 @@ describe.skipIf(!have || !port || port === 5432)('age vault under the existing r
     expect((await verifyRecoveryRestore(copy.id, new Date(), db as any)).state).toBe('restore_verified');
     expect(await accountRecoveryState(db as any, account)).toMatchObject({ available: true, verified: true, promised: false });
     await db`UPDATE hosting_accounts SET paid_units=0,promo_units=0,depleted_at=${new Date(Date.now() - 31 * DAY)} WHERE id=${account}`;
-    expect(await removalGate(workspace, new Date(), db as any)).toEqual({ allowed: false, reasons: ['no_verified_recovery_copy'] });
+    expect(await removalGate(workspace, new Date(), db as any)).toEqual({ allowed: false, reasons: ['no_verified_recovery_copy', 'recovery_snapshot_unverified'] });
     await db`UPDATE hosting_accounts SET depleted_at=NULL WHERE id=${account}`;
   });
 

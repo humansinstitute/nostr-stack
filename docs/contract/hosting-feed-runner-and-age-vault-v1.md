@@ -34,6 +34,7 @@ quotes_without_binding` for alerting. Orphans are expected for orders with no lo
   follows or removes a symlink/directory and is idempotent. Bounded plaintext bytes (≤ 1 GiB hard, default 256 MiB), object count, and child timeout.
 - **Encrypt-only by itself.** `restoreIdentity` first verifies the stored ciphertext against its manifest, then needs an `isolatedRestore` decrypt
   port (e.g. `ageIdentityRestore`, intended for an isolated host that holds the identity). With none configured it fails closed and a copy cannot become `restore_verified`.
+- **It proves encrypted-byte integrity only and does not upgrade that claim.** The seam now keeps `promised` false and the gate closed (`recovery_snapshot_unverified`) for every vault.
 - **Provenance is permanently `test`.** A public recipient and a byte roundtrip do not prove that a complete workspace can be restored, so this
   adapter can never make `accountRecoveryState().promised` true or `removalGate()` allow.
 - `expireRecoveryCopies` now also destroys the sealed bytes of `failed` copies at their 30-day expiry (state stays `failed`; one `expired` event).

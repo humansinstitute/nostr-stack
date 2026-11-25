@@ -84,22 +84,22 @@ describe.skipIf(!port || port === 5432)('offline recovery seam on disposable Pos
     expect((await lifecycle()).offline_recovery).toMatchObject({ available: true, verified: true, promised: false });
     await db`UPDATE hosting_accounts SET paid_units=0,promo_units=0,depleted_at=${new Date(Date.now() - 31 * DAY)} WHERE id=${account}`;
     expect((await lifecycle()).state).toBe('removal_due');
-    expect(await removalGate(workspace, new Date(), db as any)).toEqual({ allowed: false, reasons: ['no_verified_recovery_copy'] });
+    expect(await removalGate(workspace, new Date(), db as any)).toEqual({ allowed: false, reasons: ['no_verified_recovery_copy', 'recovery_snapshot_unverified'] });
     expect(await liveRows()).toEqual(before); // sealing and verifying touched no live data
     await db`UPDATE hosting_accounts SET depleted_at=NULL WHERE id=${account}`;
   });
 
-  test('a production-vault copy that passes an isolated restore is promised until expiry; the removal gate needs both conditions', async () => {
+  test('a production-vault copy that passes a byte-identity restore is verified but NEVER promised, and the gate stays closed on recovery_snapshot_unverified', async () => {
     const vault = new FixtureVault('production'); configureRecoveryVault(vault);
     const copy = await sealRecoveryCopy({ workspaceId: workspace, manifest: manifest(), plaintext }, new Date(), db as any);
     expect((await lifecycle()).offline_recovery.promised).toBe(false); // sealed is not verified
     // Gate: neither condition holds, then only the copy, then both.
-    expect((await removalGate(workspace, new Date(), db as any)).reasons).toEqual(['read_only_period_not_ended', 'no_verified_recovery_copy']);
+    expect((await removalGate(workspace, new Date(), db as any)).reasons).toEqual(['read_only_period_not_ended', 'no_verified_recovery_copy', 'recovery_snapshot_unverified']);
     await verifyRecoveryRestore(copy.id, new Date(), db as any);
-    expect((await lifecycle()).offline_recovery).toMatchObject({ available: true, verified: true, promised: true });
-    expect(await removalGate(workspace, new Date(), db as any)).toEqual({ allowed: false, reasons: ['read_only_period_not_ended'] });
+    expect((await lifecycle()).offline_recovery).toMatchObject({ available: true, verified: true, promised: false });
+    expect(await removalGate(workspace, new Date(), db as any)).toEqual({ allowed: false, reasons: ['read_only_period_not_ended', 'recovery_snapshot_unverified'] });
     await db`UPDATE hosting_accounts SET paid_units=0,promo_units=0,depleted_at=${new Date(Date.now() - 31 * DAY)} WHERE id=${account}`;
-    expect(await removalGate(workspace, new Date(), db as any)).toEqual({ allowed: true, reasons: [] });
+    expect(await removalGate(workspace, new Date(), db as any)).toEqual({ allowed: false, reasons: ['recovery_snapshot_unverified'] }); // read-only period over, copy restore-verified, still not allowed
     // Another workspace's copy never opens this workspace's gate.
     const other = randomUUID();
     await db`INSERT INTO flightdeck_pg_workspaces(id,tower_service_npub,workspace_service_npub,workspace_owner_npub,app_npub,name) VALUES(${other},'tower',${other},${npub},'recovery-fixture','Other')`;
@@ -137,6 +137,43 @@ describe.skipIf(!port || port === 5432)('offline recovery seam on disposable Pos
     await expect(verifyRecoveryRestore(flaky.id, new Date(), db as any)).rejects.toMatchObject({ code: 'recovery_copy_not_verifiable' });
     await expect(db`UPDATE hosting_recovery_copies SET state='restore_verified',restore_verified_at=now() WHERE id=${flaky.id}`).rejects.toThrow(); // final
     expect((await accountRecoveryState(db as any, account)).promised).toBe(false);
+  });
+
+  test('regression: arbitrary partial bytes with an empty or self-serving manifest roundtrip from a production vault but can never authorize removal or a recovery promise', async () => {
+    const vault = new FixtureVault('production'); configureRecoveryVault(vault);
+    const partial = new TextEncoder().encode('hello');
+    const copy = await sealRecoveryCopy({ workspaceId: workspace, manifest: { workspace_id: workspace, taken_at: new Date().toISOString(), includes: [], excludes: ['all workspace data', 'git repositories', 'managed content'] }, plaintext: partial }, new Date(), db as any);
+    expect((await verifyRecoveryRestore(copy.id, new Date(), db as any)).state).toBe('restore_verified');
+    await db`UPDATE hosting_accounts SET paid_units=0,promo_units=0,depleted_at=${new Date(Date.now() - 31 * DAY)} WHERE id=${account}`;
+    expect((await lifecycle()).offline_recovery).toMatchObject({ available: true, verified: true, promised: false });
+    expect(await accountRecoveryState(db as any, account)).toMatchObject({ promised: false });
+    const gate = await removalGate(workspace, new Date(), db as any);
+    expect(gate.allowed).toBe(false); expect(gate.reasons).toContain('recovery_snapshot_unverified');
+    // A manifest claiming completeness changes nothing either.
+    const claim = await sealRecoveryCopy({ workspaceId: workspace, manifest: { ...manifest(), includes: ['everything', 'git', 'managed ciphertext'], excludes: [] }, plaintext: partial }, new Date(), db as any);
+    await verifyRecoveryRestore(claim.id, new Date(), db as any);
+    expect((await removalGate(workspace, new Date(), db as any)).allowed).toBe(false);
+    expect((await accountRecoveryState(db as any, account)).promised).toBe(false);
+    await db`UPDATE hosting_accounts SET depleted_at=NULL WHERE id=${account}`;
+  });
+
+  test('expiry racing a restore test can never record a false restore_verified or a failure event on an expired copy', async () => {
+    const vault = new FixtureVault('production'); configureRecoveryVault(vault);
+    const copy = await sealRecoveryCopy({ workspaceId: workspace, manifest: manifest(), plaintext }, new Date(), db as any);
+    const events = async () => (await db`SELECT count(*)::int AS n FROM hosting_recovery_events WHERE copy_id=${copy.id} AND kind IN ('restore_verified','restore_failed')`)[0]!.n;
+    // The copy expires (and is destroyed) while the vault is still performing the restore.
+    const later = new Date(Date.now() + 31 * DAY);
+    const slow = { ...vault, provenance: 'production' as const, seal: vault.seal.bind(vault), destroy: vault.destroy.bind(vault), restoreIdentity: async (ref: string) => { const r = await vault.restoreIdentity(ref); await expireRecoveryCopies(later, db as any); return r; } };
+    configureRecoveryVault(slow);
+    await expect(verifyRecoveryRestore(copy.id, new Date(), db as any)).rejects.toMatchObject({ code: 'recovery_copy_not_verifiable' });
+    expect((await db`SELECT state FROM hosting_recovery_copies WHERE id=${copy.id}`)[0]!.state).toBe('expired');
+    expect(await events()).toBe(0);
+    // Same for a mismatching restore that loses the race.
+    const copy2 = await sealRecoveryCopy({ workspaceId: workspace, manifest: manifest(), plaintext }, new Date(), db as any);
+    configureRecoveryVault({ provenance: 'production', seal: vault.seal.bind(vault), destroy: vault.destroy.bind(vault), restoreIdentity: async () => { await expireRecoveryCopies(later, db as any); return { plaintextSha256: sha('x'), plaintextBytes: 1 }; } });
+    await expect(verifyRecoveryRestore(copy2.id, new Date(), db as any)).rejects.toMatchObject({ code: 'recovery_copy_not_verifiable' });
+    expect((await db`SELECT state FROM hosting_recovery_copies WHERE id=${copy2.id}`)[0]!.state).toBe('expired');
+    expect((await db`SELECT count(*)::int AS n FROM hosting_recovery_events WHERE copy_id=${copy2.id} AND kind IN ('restore_verified','restore_failed')`)[0]!.n).toBe(0);
   });
 
   test('inputs and identity are guarded: bad manifests, empty or foreign workspaces, immutable rows, append-only events', async () => {

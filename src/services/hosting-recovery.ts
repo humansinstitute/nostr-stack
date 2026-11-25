@@ -6,7 +6,9 @@ import { HostingError } from './hosting-billing';
  * isolated restore test, support restore, and expiry. This module is deliberately inert:
  *  - it holds no key and produces no ciphertext itself; a trusted `RecoveryVault` does (and none is configured by default);
  *  - it never reads, copies, moves or removes live workspace data, and no route reaches it;
- *  - NOTHING is claimed recoverable until a copy built by a `production` vault has passed `verifyRecoveryRestore` and has not expired.
+ *  - NOTHING is claimed recoverable. Byte identity of an arbitrary blob (even from a `production` vault, even with an empty or self-serving manifest) is NOT proof of
+ *    a complete workspace snapshot, so `promised` is false and `removalGate` always carries `recovery_snapshot_unverified` until a separately implemented, trusted
+ *    full-workspace capture + isolated restore verifier exists and binds its attestation to the workspace and snapshot version. No flag, name or provenance label bypasses this.
  * Operator tooling that would remove live data must call `removalGate` and refuse unless it allows. */
 type Db = ReturnType<typeof getDb>;
 export const RECOVERY_COPY_DAYS = 30;
@@ -76,13 +78,15 @@ export async function verifyRecoveryRestore(copyId: string, now = new Date(), db
     const sql = tx as unknown as Db;
     if (failure === 'restore_unavailable') { await note(sql, copyId, 'restore_failed', { reason: failure }); throw new HostingError(502, 'recovery_restore_unavailable'); }
     if (failure) {
-      const [row] = await sql`UPDATE hosting_recovery_copies SET state='failed',failure=${failure} WHERE id=${copyId} AND state IN ('sealed','restore_verified') RETURNING *`;
+      const [row] = await sql`UPDATE hosting_recovery_copies SET state='failed',failure=${failure} WHERE id=${copyId} AND state IN ('sealed','restore_verified') AND expires_at>${now} RETURNING *`;
+      if (!row) throw new HostingError(409, 'recovery_copy_not_verifiable'); // expired or finalised while the restore ran: no event, no state change
       await note(sql, copyId, 'restore_failed', { reason: failure });
-      return row ?? (await sql`SELECT * FROM hosting_recovery_copies WHERE id=${copyId}`)[0]!;
+      return row;
     }
-    const [row] = await sql`UPDATE hosting_recovery_copies SET state='restore_verified',restore_verified_at=${now},restore_evidence=${sql.json({ plaintext_sha256: got!.plaintextSha256, plaintext_bytes: got!.plaintextBytes, vault_provenance: v.provenance } as any)} WHERE id=${copyId} AND state IN ('sealed','restore_verified') RETURNING *`;
+    const [row] = await sql`UPDATE hosting_recovery_copies SET state='restore_verified',restore_verified_at=${now},restore_evidence=${sql.json({ plaintext_sha256: got!.plaintextSha256, plaintext_bytes: got!.plaintextBytes, vault_provenance: v.provenance } as any)} WHERE id=${copyId} AND state IN ('sealed','restore_verified') AND expires_at>${now} RETURNING *`;
+    if (!row) throw new HostingError(409, 'recovery_copy_not_verifiable'); // expiry (or another transition) won the race: never record a false restore_verified
     await note(sql, copyId, 'restore_verified', { plaintext_sha256: got!.plaintextSha256 });
-    return row!;
+    return row;
   });
 }
 
@@ -106,15 +110,14 @@ export async function accountRecoveryState(db: Db, accountId: string, now = new 
   const rows = await db`SELECT state,provenance,expires_at,restore_verified_at,workspace_id FROM hosting_recovery_copies WHERE account_id=${accountId} AND state IN ('sealed','restore_verified') AND expires_at>${now}`;
   const available = rows.length > 0;
   const verified = rows.some(r => r.state === 'restore_verified');
-  const promised = rows.some(r => r.state === 'restore_verified' && r.provenance === 'production');
+  const promised = false; // see the module header: no complete-snapshot verifier exists, so no copy can yet earn a recoverability promise
   const latest = rows.map(r => new Date(r.expires_at).getTime()).sort((a, b) => b - a)[0] ?? null;
   return { available, verified, promised, expires_at: latest ? new Date(latest).toISOString() : null,
-    reason: promised ? 'A sealed offline copy passed an isolated restore test and has not expired.'
-      : 'No isolated, encrypted, expiring offline recovery copy has passed a restore test by a production vault. Live removal must not be described as erasure or as recoverable.' };
+    reason: 'No complete workspace snapshot has been captured and verified by an isolated restore. Live removal must not be described as erasure or as recoverable.' };
 }
 
-/** The activation gate for any future operator tool that would remove live data: both the free read-only period and a verified, unexpired,
- * production-vault recovery copy of THAT workspace are required. Allowing is not an instruction; nothing here removes anything. */
+/** The activation gate for any future operator tool that would remove live data. It requires the free read-only period to have ended, a restore-verified unexpired
+ * production-vault copy of THAT workspace AND a complete-snapshot attestation that does not exist yet, so it currently never allows. Nothing here removes anything. */
 export async function removalGate(workspaceId: string, now = new Date(), db: Db = getDb()) {
   const [link] = await db`SELECT account_id FROM hosting_storage_enrollments WHERE workspace_id=${workspaceId} UNION ALL SELECT account_id FROM hosting_workspace_accounts WHERE workspace_id=${workspaceId} LIMIT 1`;
   if (!link) return { allowed: false, reasons: ['workspace_not_billed'] };
@@ -124,5 +127,7 @@ export async function removalGate(workspaceId: string, now = new Date(), db: Db 
   if (!lifecycle.removal.due) reasons.push('read_only_period_not_ended');
   const [copy] = await db`SELECT 1 FROM hosting_recovery_copies WHERE workspace_id=${workspaceId} AND state='restore_verified' AND provenance='production' AND expires_at>${now} LIMIT 1`;
   if (!copy) reasons.push('no_verified_recovery_copy');
-  return { allowed: reasons.length === 0, reasons };
+  // A byte-identical restore of whatever was sealed says nothing about completeness. Until a trusted complete-snapshot verifier exists the gate stays closed.
+  reasons.push('recovery_snapshot_unverified');
+  return { allowed: false, reasons };
 }

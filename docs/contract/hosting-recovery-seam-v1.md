@@ -16,10 +16,13 @@ removes nothing.** Nothing may be described as recoverable until the gates below
   environment value or request can configure one (`configureRecoveryVault` is a trusted startup hook).
 - `sealRecoveryCopy`, `verifyRecoveryRestore` (a copy is `restore_verified` only when the vault recovers exactly the sealed identity; a mismatch
   marks it `failed`; an unreachable vault changes nothing), `expireRecoveryCopies` (destroys the sealed copy, retries on failure), and
-  `accountRecoveryState` which feeds `lifecycle.offline_recovery`: `promised` is true only for an unexpired `restore_verified` copy from a
-  `production` vault. A `test` vault can never produce a promise.
-- `removalGate(workspaceId)`: the check any future removal tool must call. It allows only when the free read-only period has ended **and** a
-  verified, unexpired, production-vault copy of that workspace exists. It never performs a removal.
+  `accountRecoveryState` which feeds `lifecycle.offline_recovery`: `promised` is always false for now.
+- `removalGate(workspaceId)`: the check any future removal tool must call. It **currently never allows**: besides the ended read-only period and a
+  restore-verified, unexpired, production-vault copy of that workspace, it always reports `recovery_snapshot_unverified`, because byte identity of
+  an arbitrary blob (even with an empty or self-serving manifest) is not proof of a complete workspace snapshot. Only a separately implemented,
+  trusted full-workspace capture + isolated restore verifier, binding its attestation to the workspace and snapshot version and proving rows,
+  history, objects, relationships and real Git/archive/managed coverage, may lift that reason. No flag, name or provenance label bypasses it.
+  `promised` is likewise false until then. A restore test racing expiry can never record `restore_verified`/`restore_failed` on an expired copy.
 
 ## Not built (activation requirements)
 
