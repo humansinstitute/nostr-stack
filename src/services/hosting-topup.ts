@@ -37,11 +37,13 @@ export async function listTopups(ownerNpub: string, db: Db = getDb()) {
   const accountId = await ownerTopupAccount(ownerNpub, db);
   const settlements = await db`SELECT id,method,amount_cents,amount_units,settled_at FROM hosting_funding_settlements WHERE account_id=${accountId} AND intent_id IS NULL ORDER BY settled_at DESC,id LIMIT 50`;
   const quotes = await db`SELECT id,state,amount_cents,amount_sats,invoice,payment_hash,expires_at,rate_source,rate_quoted_at FROM hosting_lightning_quotes WHERE account_id=${accountId} AND intent_id IS NULL AND state IN ('open','late_payment','mismatch') ORDER BY created_at DESC LIMIT 20`;
-  const orders = await db`SELECT id,amount_cents,created_at FROM hosting_checkout_orders WHERE account_id=${accountId} AND intent_id IS NULL AND fulfilled_at IS NULL AND terminal_at IS NULL ORDER BY created_at DESC LIMIT 20`;
+  // Fetch one beyond the display bound: absence from a truncated page is never proof that an order has ended.
+  const orders = await db`SELECT id,amount_cents,created_at FROM hosting_checkout_orders WHERE account_id=${accountId} AND intent_id IS NULL AND fulfilled_at IS NULL AND terminal_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 21`;
   const iso = (v: unknown) => (v ? new Date(v as string).toISOString() : null);
   return {
     credited: settlements.map(s => ({ settlement_id: s.id as string, method: s.method as string, amount_cents: s.amount_cents as number, amount_usd: unitsUsd(s.amount_units), settled_at: iso(s.settled_at) })),
     pending_lightning: quotes.map(q => ({ quote_id: q.id as string, state: q.state as string, amount_cents: q.amount_cents as number, amount_sats: q.amount_sats === null ? null : Number(q.amount_sats), invoice: q.invoice as string | null, payment_hash: q.payment_hash as string | null, expires_at: iso(q.expires_at) })),
-    pending_checkout: orders.map(o => ({ order_id: o.id as string, amount_cents: o.amount_cents as number, created_at: iso(o.created_at) })),
+    pending_checkout_complete: orders.length <= 20,
+    pending_checkout: orders.slice(0, 20).map(o => ({ order_id: o.id as string, amount_cents: o.amount_cents as number, created_at: iso(o.created_at) })),
   };
 }

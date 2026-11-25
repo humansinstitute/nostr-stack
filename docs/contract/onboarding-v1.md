@@ -133,6 +133,9 @@ without a new intent, workspace, invitation seat or introduction. Human direct-s
 `ONBOARDING_ENABLED`; amounts are the approved US$21 floor up to the US$10,000 processor bound (`amount_cents` 2100..1000000; the upper figure is a technical limit, not a product tier):
 
 - `GET /api/v4/onboarding/topups` — credited top-ups (settlements with no intent), open Lightning quotes, unfulfilled checkout orders.
+  `pending_checkout` is bounded to 20 entries. `pending_checkout_complete` is true only when the full pending set fits;
+  an absent order proves it is no longer pending only when this flag is explicitly true. A false or missing flag means unknown,
+  so clients retain the existing attempt and replay key rather than creating a second payable order.
 - `POST /topups/checkout` `{idempotency_key, return_url, amount_cents}` — Stripe Checkout (test mode) bound to the account; the order carries no `intent_id`.
 - `POST /topups/lightning/quote` `{idempotency_key, amount_cents}` and `POST /topups/lightning/quotes/{quoteId}/refresh` — same provider port and verification as intent quotes; the quote has `intent_id: null` (at most 5 open per account).
 

@@ -248,6 +248,31 @@ describe.skipIf(!port || port === 5432)('repeat account top-ups on disposable Po
     expect(BigInt(after!.paid_units)).toBe(-100n * USD_UNITS + 2600n * (USD_UNITS / 100n)); expect(after!.depleted_at).not.toBeNull();
   });
 
+  test('bounded pending checkout lists explicitly distinguish truncation from terminal absence', async () => {
+    const owner = nip19.npubEncode(getPublicKey(randomBytes(32)));
+    const ws = await provisioned(owner, 'Pending list fixture');
+    expect((await listTopups(owner, db as any)).pending_checkout_complete).toBe(true);
+    const created: string[] = [];
+    for (let i = 0; i < 21; i++) {
+      const order = await createTopupCheckout(owner, { amount_cents: 2100, idempotency_key: key(), return_url: returnUrl }, db as any, stripeDouble());
+      created.push(order.order_id as string);
+      if (i === 19) {
+        const full = await listTopups(owner, db as any);
+        expect(full.pending_checkout_complete).toBe(true); expect(full.pending_checkout).toHaveLength(20);
+      }
+    }
+    const truncated = await listTopups(owner, db as any);
+    expect(truncated.pending_checkout_complete).toBe(false); expect(truncated.pending_checkout).toHaveLength(20);
+    const omitted = created.find(id => !truncated.pending_checkout.some(o => o.order_id === id))!;
+    expect(omitted).toBeDefined(); // It is still payable despite being absent from this page.
+    const [row] = await db`SELECT * FROM hosting_checkout_orders WHERE id=${omitted}`;
+    expect(row!.fulfilled_at).toBeNull(); expect(row!.terminal_at).toBeNull();
+    await fulfillHostingCheckout(paid(omitted, ws.account_id, 2100, row!.session_id), db as any);
+    const complete = await listTopups(owner, db as any);
+    expect(complete.pending_checkout_complete).toBe(true); expect(complete.pending_checkout).toHaveLength(20);
+    expect(complete.pending_checkout.some(o => o.order_id === omitted)).toBe(false);
+  });
+
   test('config: reports only operator-approved return URLs and real availability, never secrets', async () => {
     // Built at runtime so no credential-bearing URL literal is tracked in source.
     const credentialUrl = ['https://user', ':pw@example.test/x'].join('');

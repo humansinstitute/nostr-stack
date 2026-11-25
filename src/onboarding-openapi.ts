@@ -35,7 +35,8 @@ onboardingSchemas.OnboardingTopupQuoteRequest = { type: 'object', additionalProp
 onboardingSchemas.OnboardingTopups = object({
   credited: { type: 'array', items: object({ settlement_id: uuid, method: { enum: ['stripe', 'lightning'] }, amount_cents: { type: 'integer' }, amount_usd: { type: 'string' }, settled_at: nullableDateTime }) },
   pending_lightning: { type: 'array', items: object({ quote_id: uuid, state: { type: 'string' }, amount_cents: { type: 'integer' }, amount_sats: { type: ['integer', 'null'] }, invoice: { type: ['string', 'null'] }, payment_hash: { type: ['string', 'null'] }, expires_at: nullableDateTime }) },
-  pending_checkout: { type: 'array', items: object({ order_id: uuid, amount_cents: { type: 'integer' }, created_at: nullableDateTime }) },
+  pending_checkout_complete: { type: 'boolean', description: 'True only when the full pending checkout set fits in the bounded list. False or absent means a missing order is not proof it ended.' },
+  pending_checkout: { type: 'array', maxItems: 20, items: object({ order_id: uuid, amount_cents: { type: 'integer' }, created_at: nullableDateTime }) },
 }) as any;
 const lifecycleNotice = object({ id: uuid, kind: { enum: ['runway_30d', 'runway_7d', 'runway_1d', 'read_only_entered', 'removal_due'] }, payload: { type: 'object' }, created_at: dateTime, acknowledged_at: nullableDateTime });
 onboardingSchemas.OnboardingLifecycle = object({
