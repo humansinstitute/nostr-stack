@@ -9,6 +9,7 @@ import { netFundedCents } from './hosting-funding';
 import { activatePeakStorage, enrollPeakStorage, takeStorageAnchor } from './hosting-storage';
 import { resolveCheckoutOrders } from './hosting-stripe';
 import { resolveIntentLightningQuotes } from './hosting-lightning';
+import { outstandingAttempts, paymentAttemptDto, paymentAttemptView } from './onboarding-payment-attempt';
 
 type Db = ReturnType<typeof getDb>;
 export const ONBOARDING_MIN_FUNDING_CENTS = 2100;
@@ -211,6 +212,8 @@ async function view(row: any, sql: Db) {
     funded: row.funded_at !== null, funded_at: row.funded_at as string | null,
     funding_reversed: row.funded_settlement_id ? (await netFundedCents(sql, row.funded_settlement_id)) < row.funding_cents : false,
     steps: Object.fromEntries(Object.entries(row.steps as Record<string, any>).map(([k, v]) => [k, { completed_at: v.completed_at as string }])),
+    // The one canonical outstanding payment attempt (owner-only; null when a new attempt may start). Lets any device resume after identity restore.
+    payment_attempt: await paymentAttemptView(row.id, sql),
     last_error: row.last_error as string | null, workspace_id: row.workspace_id as string | null,
     provisioned_at: row.provisioned_at as string | null, intro_ends_at: row.intro_ends_at as string | null,
     created_at: row.created_at as string, updated_at: row.updated_at as string,
@@ -269,6 +272,11 @@ export async function updateIntent(id: string, ownerNpub: string, body: any, db:
     if (row.revision !== body.expected_revision) throw new HostingError(409, 'stale_revision');
     if (!['open', 'funded'].includes(row.status)) throw new HostingError(409, 'intent_not_editable');
     if ('funding_cents' in body && row.status !== 'open') throw new HostingError(409, 'funding_locked');
+    // A payable order or quote is bound to the current amount: it cannot be edited until the provider has verified that attempt terminal.
+    if ('funding_cents' in body && body.funding_cents !== row.funding_cents) {
+      const attempts = await outstandingAttempts(row.id, sql);
+      if (attempts.length) throw new HostingError(409, 'payment_attempt_outstanding', { payment_attempt: paymentAttemptDto(attempts) });
+    }
     const name = 'workspace_name' in body ? validateName(body.workspace_name) : row.workspace_name;
     const funding = 'funding_cents' in body ? validateFunding(body.funding_cents) : row.funding_cents;
     const returnState = 'return_state' in body ? validateReturnState(body.return_state) : row.return_state;
@@ -281,6 +289,15 @@ export async function updateIntent(id: string, ownerNpub: string, body: any, db:
       agent_offer_id=${agent.offer?.id ?? null},agent_daily_cap_cents=${agent.cap},revision=revision+1,updated_at=now() WHERE id=${row.id} RETURNING *`;
     return view(updated, sql);
   });
+}
+/** Explicit owner request to settle the intent's outstanding payment attempt with the provider (for example to switch method): a paid one
+ * credits and funds the intent, an open one is expired/cancelled at the provider. Only provider-verified terminal state clears it; anything
+ * unverifiable stays outstanding and is reported in the returned intent's payment_attempt. */
+export async function releasePaymentAttempt(id: string, ownerNpub: string, db: Db = getDb(), resolver: CheckoutResolver = defaultResolver) {
+  requireOnboardingEnabled();
+  const row = await ownedIntent(id, ownerNpub, db);
+  await resolveIntentCheckouts([row.id as string], db, resolver);
+  return readIntent(id, ownerNpub, db);
 }
 /** Owner cancels before any verified funding. Releases the invitation seat; credit already paid is never touched. */
 export async function cancelIntent(id: string, ownerNpub: string, db: Db = getDb(), resolver: CheckoutResolver = defaultResolver) {

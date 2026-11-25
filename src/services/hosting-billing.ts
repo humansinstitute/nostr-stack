@@ -9,7 +9,7 @@ export function unitsUsd(value: string | bigint): string {
   // Display only. All ledger/balance arithmetic retains exact integer tariff units.
   return `${negative ? '-' : ''}${abs / USD_UNITS}.${((abs % USD_UNITS) * 1_000_000_000_000n / USD_UNITS).toString().padStart(12, '0')}`;
 }
-export class HostingError extends Error { constructor(public status: number, public code: string) { super(code); } }
+export class HostingError extends Error { constructor(public status: number, public code: string, public detail?: Record<string, unknown>) { super(code); } }
 export async function linkHostedAccount(workspaceId: string, ownerActorId: string, db: Db) {
   const [owner]=await db`SELECT w.workspace_owner_npub,a.npub FROM flightdeck_pg_workspaces w JOIN flightdeck_pg_actors a ON a.id=${ownerActorId} WHERE w.id=${workspaceId}`;
   if(!owner||owner.workspace_owner_npub!==owner.npub)throw new HostingError(409,'billing_owner_conflict');

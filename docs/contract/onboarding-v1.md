@@ -79,6 +79,35 @@ never undone). There is no credit-mint API. Live Stripe stays blocked
 state: [funding-reversals-v1.md](funding-reversals-v1.md). Credit above or beyond an
 intent (for example a payment landing after cancellation) remains in the account.
 
+## One canonical payment attempt per intent
+
+An intent has at most one **outstanding payment attempt** across all devices, idempotency keys and methods. Outstanding means a card
+order that is not fulfilled or provider-verified terminal, or a Lightning quote in `issuing`, `open`, `late_payment` or `mismatch`. An
+`issuing` attempt counts; a local clock, an unreachable provider or an unknown error never releases one. Only provider-verified settled
+or terminal state (paid, expired, cancelled) clears it. Intent-bound initial setup only: repeat account top-ups are independent and
+unlimited by this rule.
+
+Every intent response carries the additive, owner-only `payment_attempt` (null when none is outstanding):
+`{method: 'card'|'lightning'|null, state: 'issuing'|'open'|'needs_support'|'ambiguous', resume: 'checkout'|'lightning_quote'|'support',
+order_id, quote_id, amount_cents, created_at, quote, count}`. `quote` is the existing Lightning quote view. It holds no idempotency key,
+session secret or provider credential, so a device restored from the identity alone can resume without the original draft key.
+
+- `POST /intents/{id}/checkout` with a different key while a card order is outstanding returns that order (HTTP 200, `reused: true`);
+  a Lightning quote outstanding is `409 payment_attempt_outstanding` (body includes `payment_attempt`) before any Stripe call.
+- `POST /intents/{id}/lightning/quote` likewise returns the outstanding quote (HTTP 200, `reused: true`) or refuses a card order.
+- More than one outstanding row (legacy data) is `409 payment_attempt_ambiguous`: nothing is chosen or created; support resolves it.
+- Same key with a different body stays `409 idempotency_conflict`. Another identity gets the neutral 404.
+- A changed `funding_cents` while any attempt is outstanding is `409 payment_attempt_outstanding`; an unchanged amount or other edits pass.
+  The checkout re-checks the amount under the intent lock (`409 intent_amount_changed`).
+- `POST /intents/{id}/payment-attempt/release` asks the provider to settle the hold (paid: credit once and fund; open: expire or cancel
+  at the provider). Only verified terminal state clears `payment_attempt`; use it to switch method.
+- A reused order the provider reports paid is credited (`409 intent_not_open`); one it reports expired is recorded terminal and the
+  request proceeds with a new order. A reused quote past its stated expiry is verified with the provider before a replacement is issued.
+
+Lock order for creators and settlement is account, then intent; order and quote rows are read without locks while those are held
+(settlement locks order/quote before the account), so create, settle, edit and cancel cannot deadlock. Provider calls stay outside
+every transaction and are idempotent per order/quote id.
+
 ## Provisioning
 
 `POST /intents/{id}/provision` requires verified funding (`402 funding_required`).

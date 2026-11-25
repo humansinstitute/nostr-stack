@@ -5,6 +5,7 @@ import { HostingError } from './hosting-billing';
 import { requireIdentityBackup } from './hosted-identity-backup';
 import { applyAdjustment, availableRefundableUnits, missingFundingReserves, recordSettlement, refundableCents, UNITS_PER_CENT } from './hosting-funding';
 import { markOnboardingFunded, requireOnboardingEnabled } from './onboarding';
+import { OUTSTANDING_QUOTE_STATES, outstandingAttempts, reusableAttempt } from './onboarding-payment-attempt';
 import { TOPUP_MAX_CENTS, TOPUP_MIN_CENTS } from './hosting-topup-limits';
 import { reconcileBindingFeed, receiverPayeeRef, storeBinding, verifyIssuedBinding, verifyMintView, type BindingRecord, type ReceiverExpectation } from './hosting-lightning-receiver';
 
@@ -63,7 +64,7 @@ export function lightningProvider(): LightningProvider {
   return provider;
 }
 
-const quoteView = (q: any) => ({
+export const quoteView = (q: any) => ({
   id: q.id as string, intent_id: (q.intent_id ?? null) as string | null, state: q.state as string, amount_cents: q.amount_cents as number,
   amount_sats: q.amount_sats === null ? null : Number(q.amount_sats), invoice: q.invoice as string | null, payment_hash: q.payment_hash as string | null,
   expires_at: q.expires_at ? new Date(q.expires_at).toISOString() : null,
@@ -79,27 +80,48 @@ function validateIssued(issued: Awaited<ReturnType<LightningProvider['issueInvoi
     || Number.isNaN(expires.getTime()) || expires.getTime() <= now.getTime() || expires.getTime() <= quoted.getTime()) throw new HostingError(502, 'lightning_quote_invalid');
 }
 
-/** Issues (or replays) the Lightning quote for an open intent. The USD amount is the intent's server-held figure, never caller input. */
-export async function issueLightningQuote(intentId: string, ownerNpub: string, body: unknown, db: Db = getDb(), p: LightningProvider = lightningProvider()) {
+/** Issues (or replays) the Lightning quote for an open intent. The USD amount is the intent's server-held figure, never caller input.
+ * An intent has one canonical outstanding payment attempt across devices and keys: a different key reuses the outstanding quote, and an
+ * outstanding card order (or ambiguous legacy rows) is refused before any provider call. */
+export async function issueLightningQuoteResult(intentId: string, ownerNpub: string, body: unknown, db: Db = getDb(), p: LightningProvider = lightningProvider(), retried = false): Promise<{ quote: LightningQuoteView; reused: boolean }> {
   requireOnboardingEnabled();
   const b = body as any;
   if (!b || Object.keys(b).join(',') !== 'idempotency_key' || typeof b.idempotency_key !== 'string' || !KEY.test(b.idempotency_key)) throw new HostingError(400, 'invalid_quote_request');
   const digest = sha256(JSON.stringify([intentId, b.idempotency_key]));
+  if (!UUID.test(intentId)) throw new HostingError(404, 'intent_not_found');
+  const [peek] = await db`SELECT i.account_id FROM onboarding_intents i JOIN flightdeck_pg_actors a ON a.id=i.owner_actor_id WHERE i.id=${intentId} AND a.npub=${ownerNpub}`;
+  if (!peek) throw new HostingError(404, 'intent_not_found');
+  // Lock order account -> intent, as Stripe checkout and settlement. Quote rows are only read, never locked, while these are held.
   const held = await db.begin(async transaction => {
     const tx = transaction as unknown as Db;
+    await tx`SELECT id FROM hosting_accounts WHERE id=${peek.account_id} FOR UPDATE`;
     const [intent] = await tx`SELECT i.* FROM onboarding_intents i JOIN flightdeck_pg_actors a ON a.id=i.owner_actor_id WHERE i.id=${intentId} AND a.npub=${ownerNpub} FOR UPDATE OF i`;
     if (!intent) throw new HostingError(404, 'intent_not_found');
-    const [prior] = await tx`SELECT * FROM hosting_lightning_quotes WHERE account_id=${intent.account_id} AND idempotency_key=${b.idempotency_key} FOR UPDATE`;
+    const [prior] = await tx`SELECT * FROM hosting_lightning_quotes WHERE account_id=${intent.account_id} AND idempotency_key=${b.idempotency_key}`;
     if (prior) {
       if (prior.request_sha256 !== digest) throw new HostingError(409, 'idempotency_conflict');
-      return prior;
+      return { row: prior, reused: false };
     }
     if (intent.status !== 'open') throw new HostingError(409, 'intent_not_open');
+    const canonical = reusableAttempt(await outstandingAttempts(intent.id, tx), 'lightning');
+    if (canonical) return { row: canonical.row, reused: true };
     await requireIdentityBackup(intent, ownerNpub, tx);
     const [row] = await tx`INSERT INTO hosting_lightning_quotes(account_id,intent_id,idempotency_key,request_sha256,amount_cents) VALUES(${intent.account_id},${intent.id},${b.idempotency_key},${digest},${intent.funding_cents}) RETURNING *`;
-    return row!;
+    return { row: row!, reused: false };
   });
-  return quoteView(held.state === 'issuing' ? await completeIssuance(held, db, p) : held);
+  const row = held.row.state === 'issuing' ? await completeIssuance(held.row, db, p) : held.row;
+  // A reused quote past its stated expiry is verified with the provider (never released on the local clock): a verified terminal state lets the next quote proceed.
+  if (held.reused && !retried && row.state === 'open' && row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+    const resolved = await resolveLightningQuote(row.id, db, p).catch(() => null);
+    if (resolved && !OUTSTANDING_QUOTE_STATES.includes(resolved.state)) {
+      if (resolved.state === 'settled') throw new HostingError(409, 'intent_not_open');
+      return issueLightningQuoteResult(intentId, ownerNpub, body, db, p, true);
+    }
+  }
+  return { quote: quoteView(row), reused: held.reused };
+}
+export async function issueLightningQuote(intentId: string, ownerNpub: string, body: unknown, db: Db = getDb(), p: LightningProvider = lightningProvider()) {
+  return (await issueLightningQuoteResult(intentId, ownerNpub, body, db, p)).quote;
 }
 const MAX_OPEN_TOPUP_QUOTES = 5;
 /** Issues (or replays) a Lightning quote for a repeat top-up of the owner's account. Not tied to any intent: a verified settlement only
@@ -113,7 +135,7 @@ export async function issueTopupLightningQuote(accountId: string, body: unknown,
   const held = await db.begin(async transaction => {
     const tx = transaction as unknown as Db;
     await tx`SELECT id FROM hosting_accounts WHERE id=${accountId} FOR UPDATE`;
-    const [prior] = await tx`SELECT * FROM hosting_lightning_quotes WHERE account_id=${accountId} AND idempotency_key=${b.idempotency_key} FOR UPDATE`;
+    const [prior] = await tx`SELECT * FROM hosting_lightning_quotes WHERE account_id=${accountId} AND idempotency_key=${b.idempotency_key}`;
     if (prior) {
       if (prior.request_sha256 !== digest || prior.intent_id !== null) throw new HostingError(409, 'idempotency_conflict');
       return prior;

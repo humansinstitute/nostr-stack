@@ -4,6 +4,7 @@ import { getDb } from '../db';
 import { HostingError } from './hosting-billing';
 import { applyAdjustment, availableRefundableUnits, missingFundingReserves, recordFundingEvent, recordSettlement, refundableCents, UNITS_PER_CENT } from './hosting-funding';
 import { markOnboardingFunded, ONBOARDING_MIN_FUNDING_CENTS } from './onboarding';
+import { outstandingAttempts, reusableAttempt } from './onboarding-payment-attempt';
 import { TOPUP_MAX_CENTS, TOPUP_MIN_CENTS } from './hosting-topup-limits';
 type Db=ReturnType<typeof getDb>;
 export function hostingStripeClient() {
@@ -15,7 +16,7 @@ export function hostingStripeClient() {
   if(!key.startsWith('sk_test_')&&!key.startsWith('rk_test_'))throw new HostingError(503,'stripe_mode_mismatch');
   return new Stripe(key,{maxNetworkRetries:2,timeout:15000});
 }
-export async function createHostingCheckout(accountId:string,body:unknown,db:Db=getDb(),client=hostingStripeClient(),opts:{intentId?:string;topup?:boolean}={}) {
+export async function createHostingCheckout(accountId:string,body:unknown,db:Db=getDb(),client=hostingStripeClient(),opts:{intentId?:string;topup?:boolean}={},retried=false) {
   const b=body as any;
   if(!b||Object.keys(b).sort().join(',')!=='amount_cents,idempotency_key,return_url'||!(opts.intentId?Number.isSafeInteger(b.amount_cents)&&b.amount_cents>=ONBOARDING_MIN_FUNDING_CENTS&&b.amount_cents<=1_000_000:opts.topup?Number.isSafeInteger(b.amount_cents)&&b.amount_cents>=TOPUP_MIN_CENTS&&b.amount_cents<=TOPUP_MAX_CENTS:[500,1000,2500,5000,10000].includes(b.amount_cents))
     ||typeof b.idempotency_key!=='string'||!/^[a-zA-Z0-9_-]{8,100}$/.test(b.idempotency_key)||typeof b.return_url!=='string')throw new HostingError(400,'invalid_checkout');
@@ -23,27 +24,43 @@ export async function createHostingCheckout(accountId:string,body:unknown,db:Db=
   if(!allowed.includes(b.return_url))throw new HostingError(400,'return_url_not_allowed');
   let u:URL;try{u=new URL(b.return_url);}catch{throw new HostingError(400,'invalid_return_url');}
   if(u.protocol!=='https:'&&!(u.protocol==='http:'&&['localhost','127.0.0.1'].includes(u.hostname)))throw new HostingError(400,'invalid_return_url');
-  const order=await db.begin(async transaction=>{
+  // Lock order account -> intent matches settlement (order/quote -> account -> intent): the order row is never locked here, only read.
+  const held=await db.begin(async transaction=>{
     const tx=transaction as unknown as Db;
     await tx`SELECT id FROM hosting_accounts WHERE id=${accountId} FOR UPDATE`;
     if(opts.intentId){
-      // Serializes with cancel/release: an order is attached only to a still-open intent of this account.
-      const [i]=await tx`SELECT status,account_id FROM onboarding_intents WHERE id=${opts.intentId} FOR UPDATE`;
+      // Serializes with cancel/release/amount edits and every other payment-attempt creator for this intent.
+      const [i]=await tx`SELECT status,account_id,funding_cents FROM onboarding_intents WHERE id=${opts.intentId} FOR UPDATE`;
       if(!i||i.account_id!==accountId)throw new HostingError(404,'intent_not_found');
       if(i.status!=='open')throw new HostingError(409,'intent_not_open');
+      if(i.funding_cents!==b.amount_cents)throw new HostingError(409,'intent_amount_changed');
     }
-    // Legacy checkout never references onboarding columns; only intent-bound orders carry intent_id.
-    const [o]=opts.intentId
-      ?await tx`INSERT INTO hosting_checkout_orders(account_id,idempotency_key,amount_cents,return_url,mode,intent_id)
-        VALUES(${accountId},${b.idempotency_key},${b.amount_cents},${b.return_url},'test',${opts.intentId})
-        ON CONFLICT(account_id,idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING *`
-      :await tx`INSERT INTO hosting_checkout_orders(account_id,idempotency_key,amount_cents,return_url,mode)
-        VALUES(${accountId},${b.idempotency_key},${b.amount_cents},${b.return_url},'test')
-        ON CONFLICT(account_id,idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING *`;
-    if(o!.amount_cents!==b.amount_cents||o!.return_url!==b.return_url||o!.mode!=='test'||(o!.intent_id??null)!==(opts.intentId??null))throw new HostingError(409,'idempotency_conflict');return o!;
+    let [o]=await tx`SELECT * FROM hosting_checkout_orders WHERE account_id=${accountId} AND idempotency_key=${b.idempotency_key}`;
+    if(!o&&opts.intentId){
+      // One canonical outstanding attempt per intent across devices and keys: reuse the card order, refuse another method, before any provider call.
+      const canonical=reusableAttempt(await outstandingAttempts(opts.intentId,tx),'card');
+      if(canonical)return {order:canonical.row,reused:true};
+    }
+    if(!o){
+      // Legacy checkout never references onboarding columns; only intent-bound orders carry intent_id.
+      [o]=opts.intentId
+        ?await tx`INSERT INTO hosting_checkout_orders(account_id,idempotency_key,amount_cents,return_url,mode,intent_id)
+          VALUES(${accountId},${b.idempotency_key},${b.amount_cents},${b.return_url},'test',${opts.intentId}) ON CONFLICT(account_id,idempotency_key) DO NOTHING RETURNING *`
+        :await tx`INSERT INTO hosting_checkout_orders(account_id,idempotency_key,amount_cents,return_url,mode)
+          VALUES(${accountId},${b.idempotency_key},${b.amount_cents},${b.return_url},'test') ON CONFLICT(account_id,idempotency_key) DO NOTHING RETURNING *`;
+      if(!o)[o]=await tx`SELECT * FROM hosting_checkout_orders WHERE account_id=${accountId} AND idempotency_key=${b.idempotency_key}`;
+    }
+    if(o!.amount_cents!==b.amount_cents||o!.return_url!==b.return_url||o!.mode!=='test'||(o!.intent_id??null)!==(opts.intentId??null))throw new HostingError(409,'idempotency_conflict');
+    return {order:o!,reused:false};
   });
+  const order=held.order;
   const session=await ensureCheckoutSession(order,client,db);
-  return {order_id:order.id,checkout_url:session.url,mode:'test',amount_cents:order.amount_cents};
+  if(opts.intentId&&held.reused&&!retried&&sessionBoundToOrder(order,session)){
+    // A reused order the provider reports paid is credited; one it reports expired is recorded terminal. Either lets the next step proceed correctly.
+    if(session.payment_status==='paid'){await fulfillHostingCheckout(session,db);throw new HostingError(409,'intent_not_open');}
+    if(session.status==='expired'&&await markOrderExpired({...order,session_id:order.session_id??session.id},session,db))return createHostingCheckout(accountId,body,db,client,opts,true);
+  }
+  return {order_id:order.id,checkout_url:session.url,mode:'test',amount_cents:order.amount_cents,...(opts.intentId?{reused:held.reused}:{})};
 }
 /** The exact return URLs a client may send, as configured by the operator: https (or loopback http) with no userinfo, query or
  * fragment, which is the shape the native clients accept. Nothing else is ever listed; a client cannot add to it. */

@@ -4,7 +4,7 @@ import { HostingError } from '../services/hosting-billing';
 import { readBoundedText } from '../http-body';
 import { approvedCheckoutReturnUrls, createHostingCheckout, requestStripeRefund } from '../services/hosting-stripe';
 import { fundingReversalSummary } from '../services/hosting-funding';
-import { lightningAvailable, issueLightningQuote, readLightningQuote, reconcileOpenLightningQuotes, reconcileReceiverBindingFeed, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
+import { lightningAvailable, issueLightningQuoteResult, readLightningQuote, reconcileOpenLightningQuotes, reconcileReceiverBindingFeed, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
 import { getDb } from '../db';
 import { stripeAvailability } from '../services/hosting-billing';
 import { ONBOARDING_MAX_FUNDING_CENTS, ONBOARDING_MIN_FUNDING_CENTS, onboardingEnabled } from '../services/onboarding';
@@ -14,7 +14,7 @@ import { accountStorageSummary } from '../services/hosting-storage';
 import { accountLifecycle, acknowledgeLifecycleNotice, evaluateLifecycleNotices, listLifecycleNotices } from '../services/hosting-lifecycle';
 import {
   cancelIntent, createAgentOffer, createIntent, createInvite, intentForCheckout, inviteAvailability, listAgentOffers, listIntents, listInvites,
-  openOwnerAccount, provisionIntent, readIntent, readOwnerAccount, releaseInviteSeat, revokeInvite, updateIntent,
+  openOwnerAccount, provisionIntent, readIntent, readOwnerAccount, releaseInviteSeat, releasePaymentAttempt, revokeInvite, updateIntent,
 } from '../services/onboarding';
 
 /** Invited onboarding. Human, direct-signature routes only; none are reachable by agent bindings. */
@@ -36,7 +36,7 @@ async function reader(c: any) {
 const guard = (handler: (c: any) => Promise<Response>) => async (c: any) => {
   c.header('Cache-Control', 'private, no-store');
   try { return await handler(c); }
-  catch (e) { if (e instanceof HostingError) return c.json({ code: e.code, error: e.message }, e.status as any); throw e; }
+  catch (e) { if (e instanceof HostingError) return c.json({ ...(e.detail ?? {}), code: e.code, error: e.message }, e.status as any); throw e; }
 };
 
 onboardingRouter.get('/invites/:code', guard(async c => c.json(await inviteAvailability(c.req.param('code')))));
@@ -79,11 +79,13 @@ onboardingRouter.post('/intents/:id/checkout', guard(async c => {
   if (!body || Object.keys(body).sort().join(',') !== 'idempotency_key,return_url') throw new HostingError(400, 'invalid_checkout');
   const target = await intentForCheckout(c.req.param('id'), actor);
   // Amount is always the intent's server-held figure; the payment is bound to this intent and owner account.
-  return c.json(await createHostingCheckout(target.accountId, { amount_cents: target.amountCents, ...body }, undefined, undefined, { intentId: target.intentId }), 201);
+  const checkout = await createHostingCheckout(target.accountId, { amount_cents: target.amountCents, ...body }, undefined, undefined, { intentId: target.intentId });
+  return c.json(checkout, (checkout as any).reused ? 200 : 201);
 }));
 onboardingRouter.post('/intents/:id/lightning/quote', guard(async c => {
   const { actor, body } = await mutation(c);
-  return c.json({ quote: await issueLightningQuote(c.req.param('id'), actor, body) }, 201);
+  const result = await issueLightningQuoteResult(c.req.param('id'), actor, body);
+  return c.json(result, result.reused ? 200 : 201);
 }));
 // Server-side re-poll of the provider for this quote. The caller supplies no settlement evidence; only provider-verified state credits.
 onboardingRouter.post('/intents/:id/lightning/quotes/:quoteId/refresh', guard(async c => {
@@ -91,6 +93,10 @@ onboardingRouter.post('/intents/:id/lightning/quotes/:quoteId/refresh', guard(as
   const row = await readLightningQuote(c.req.param('quoteId'), c.req.param('id'), actor);
   const quote = await resolveLightningQuote(row.id);
   return c.json({ quote, intent: await readIntent(c.req.param('id'), actor) });
+}));
+onboardingRouter.post('/intents/:id/payment-attempt/release', guard(async c => {
+  const { actor } = await mutation(c);
+  return c.json({ intent: await releasePaymentAttempt(c.req.param('id'), actor) });
 }));
 onboardingRouter.post('/intents/:id/provision', guard(async c => {
   const { actor } = await mutation(c);

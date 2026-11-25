@@ -109,10 +109,11 @@ describe.skipIf(!port || port === 5432)('Lightning funding port on disposable Po
     expect(quotes[0]).toMatchObject({ state: 'open', amount_cents: 5000, amount_sats: 5000 * 25, rate: { source: 'fixture-fx' } });
     expect(f.issueCalls).toBeGreaterThanOrEqual(1);
     expect((await db`SELECT count(*)::int AS n FROM hosting_lightning_quotes WHERE intent_id=${a.intent.id}`)[0]!.n).toBe(1);
-    // Other identities get a neutral 404; a different key creates a distinct quote with a distinct payment hash.
+    // Other identities get a neutral 404; a different key reuses the intent's one outstanding quote (one canonical attempt per intent, never a second invoice).
     await expect(issueLightningQuote(a.intent.id, newNpub(), { idempotency_key: key() }, db as any)).rejects.toMatchObject({ code: 'intent_not_found' });
     const second = await issueLightningQuote(a.intent.id, a.owner, { idempotency_key: key() }, db as any);
-    expect(second.payment_hash).not.toBe(quotes[0]!.payment_hash);
+    expect(second.id).toBe(quotes[0]!.id);
+    expect(second.payment_hash).toBe(quotes[0]!.payment_hash);
     // Malformed provider output (wrong payee, stale expiry, bad hash, future rate time) is refused, never stored as a payable quote.
     const bad = new FakeLightning(); configureLightningProvider(bad);
     const issue = bad.issueInvoice.bind(bad);
