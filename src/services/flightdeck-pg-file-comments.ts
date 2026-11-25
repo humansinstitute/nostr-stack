@@ -243,7 +243,7 @@ export async function listFlightDeckPgFileComments(
     versionId?: string | null;
     status?: FileCommentStatus | null;
     limit: number;
-    afterCreatedAt?: Date | null;
+    afterCreatedAt?: Date | string | null;
     afterId?: string | null;
   },
   sql: DbClient = getDb(),

@@ -1519,7 +1519,7 @@ async function canonicalCommentMentions(input: {
   workspaceId: string;
   appNpub: string;
   channelId: string;
-  permission: 'task.read' | 'doc.read';
+  permission: 'task.read' | 'doc.read' | 'file.read';
 }) {
   const parsed = parseActorMentionInputs(input.value, input.path);
   if (parsed.errors.length) return { mentions: [], errors: parsed.errors };
@@ -1527,14 +1527,22 @@ async function canonicalCommentMentions(input: {
   for (const mention of parsed.mentions) {
     const actor = await resolveFlightDeckPgActorByNpub(mention.npub);
     if (!actor) return { mentions: [], errors: [{ path: input.path, code: 'unknown_actor', message: 'mentioned identity is not a workspace actor' }] };
-    const decision = await authorizeFlightDeckPgOperation({
-      actorNpub: actor.npub,
-      appNpub: input.appNpub,
-      workspaceId: input.workspaceId,
-      permission: input.permission,
-      resource: { type: 'channel', channelId: input.channelId },
-    });
-    if (!decision.allowed) return { mentions: [], errors: [{ path: input.path, code: 'inaccessible_actor', message: 'mentioned actor cannot read this comment target' }] };
+    const allowed = input.permission === 'file.read'
+      ? (await authorizeFlightDeckPgStorageRead({
+          actorNpub: actor.npub,
+          appNpub: input.appNpub,
+          workspaceId: input.workspaceId,
+          entityType: 'file',
+          channelId: input.channelId,
+        })).allowed
+      : (await authorizeFlightDeckPgOperation({
+          actorNpub: actor.npub,
+          appNpub: input.appNpub,
+          workspaceId: input.workspaceId,
+          permission: input.permission,
+          resource: { type: 'channel', channelId: input.channelId },
+        })).allowed;
+    if (!allowed) return { mentions: [], errors: [{ path: input.path, code: 'inaccessible_actor', message: 'mentioned actor cannot read this comment target' }] };
     mentions.push({ type: mention.type, actor_id: actor.id, npub: actor.npub, ...(mention.label ? { label: mention.label } : actor.display_name ? { label: actor.display_name } : {}) });
   }
   return { mentions, errors: [] };

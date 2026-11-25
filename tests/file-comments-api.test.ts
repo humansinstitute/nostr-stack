@@ -337,5 +337,36 @@ describe.skipIf(!port || port === 5432)('HTML artefact file comments and version
       expect(row.entity_type).toBe('file');
       expect(row.entity_id).toBe(f1.fileId);
     }
+
+    // Moving a commented artefact to a different scope/channel via PATCH /files/:fileId cascades scope_id/channel_id
+    // on flightdeck_pg_file_comments and immediately enforces source/destination read ACLs.
+    const [scopeB] = await db`INSERT INTO flightdeck_pg_scopes(workspace_id, name, kind) VALUES(${workspace}, 'Archive', 'project') RETURNING id`;
+    const [channelB] = await db`INSERT INTO flightdeck_pg_channels(workspace_id, scope_id, name) VALUES(${workspace}, ${scopeB!.id}, 'MovedArtefacts') RETURNING id`;
+    for (const perm of ['file.read', 'file.write']) {
+      await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id, principal_type, principal_actor_id, resource_type, resource_channel_id, permission) VALUES(${workspace}, 'actor', ${actors[0]!}, 'channel', ${channelB!.id}, ${perm})`;
+    }
+    await db`INSERT INTO flightdeck_pg_permission_grants(workspace_id, principal_type, principal_actor_id, resource_type, resource_channel_id, permission) VALUES(${workspace}, 'actor', ${actors[3]!}, 'channel', ${channelB!.id}, 'file.read')`;
+
+    const beforeMove = await request(ws(`/files/${f1.fileId}`), 'GET', 0);
+    expect(beforeMove.status).toBe(200);
+    const moved = await request(ws(`/files/${f1.fileId}`), 'PATCH', 0, {
+      channel_id: channelB!.id,
+      row_version: beforeMove.body.file.row_version,
+    });
+    expect(moved.status).toBe(200);
+    expect(moved.body.file.channel_id).toBe(channelB!.id);
+    expect(moved.body.file.scope_id).toBe(scopeB!.id);
+
+    const [movedCommentRow] = await db`SELECT scope_id, channel_id FROM flightdeck_pg_file_comments WHERE id = ${raceA.body.comment.id}`;
+    expect(movedCommentRow!.scope_id).toBe(scopeB!.id);
+    expect(movedCommentRow!.channel_id).toBe(channelB!.id);
+
+    // Source-only commenter A loses read access after move; destination reader (actor 3) gains read-only access.
+    expect((await request(ws(`/files/${f1.fileId}/comments`), 'GET', 1)).status).toBe(403);
+    const destRead = await request(ws(`/files/${f1.fileId}/comments`), 'GET', 3);
+    expect(destRead.status).toBe(200);
+    expect(destRead.body.comments.length).toBe(1);
+    expect(destRead.body.comments[0].id).toBe(raceA.body.comment.id);
+    expect(destRead.body.permissions.can_comment).toBe(false);
   });
 });
