@@ -86,9 +86,10 @@ export async function verifyRecoveryRestore(copyId: string, now = new Date(), db
   });
 }
 
-/** Expires and destroys copies past their 30 days. Only sealed copies are touched; live data is never involved. */
+/** Expires and destroys copies past their 30 days. Only sealed copies are touched; live data is never involved. A `failed` copy keeps its final state
+ * but its sealed bytes are destroyed on the same schedule (recorded once as an `expired` event), so a failed restore test never extends retention. */
 export async function expireRecoveryCopies(now = new Date(), db: Db = getDb()) {
-  const due = await db`SELECT * FROM hosting_recovery_copies WHERE state IN ('sealed','restore_verified') AND expires_at<=${now} ORDER BY expires_at LIMIT 100`;
+  const due = await db`SELECT * FROM hosting_recovery_copies c WHERE expires_at<=${now} AND (state IN ('sealed','restore_verified') OR (state='failed' AND NOT EXISTS(SELECT 1 FROM hosting_recovery_events e WHERE e.copy_id=c.id AND e.kind='expired'))) ORDER BY expires_at LIMIT 100`;
   let expired = 0;
   for (const copy of due) {
     try { await requireVault().destroy(copy.object_ref); }

@@ -36,3 +36,5 @@ Until 1–4 exist, `offline_recovery` stays `available:false, verified:false, pr
 ## Tests
 
 `tests/hosting-recovery.test.ts` (disposable PostgreSQL, in-memory test vault only; no keys, no live data). Run with `RECOVERY_TEST_PORT`.
+
+See `hosting-feed-runner-and-age-vault-v1.md` for the encrypt-only `age` vault adapter (provenance `test`, never promises) and the feed runner.
