@@ -23,6 +23,10 @@ It does not own:
 - app-specific translation of payload data into local UI rows
 - optional Flight Logs memory behavior
 
+## Pluggable application boundary
+
+NStack is a reusable backend for independent apps. Apps own domain tables/collections, schemas and business rules in their own namespace. Before adding a route, table, migration or shared contract, read the installed `wingman-be-free-platform` skill and `references/pluggable-app-boundary.md`; inspect existing app DB, org-data, napplet and storage contracts first. Extend NStack for a demonstrated reusable capability gap, with server-enforced authorization, isolation, validation and concurrency guarantees. Existing typed Flight Deck APIs remain supported; this direction does not claim generic parity or authorize a migration.
+
 ## Read this first
 
 - repo purpose: `README.md`
@@ -166,3 +170,9 @@ Own queue management never authorizes consuming another session’s queue. Callb
 Retain machine names documented in `docs/branding-compatibility.md`. Product copy
 uses NStack; branding changes do not authorize API, configuration, identity, data
 or runtime renames. Existing integrations remain supported.
+
+<!-- post-work-cleanup:v1 -->
+## Build, simulator and test cleanup
+
+Before declaring build/test work complete, remove the disposable outputs created by the task: temporary build trees, test results, simulator clones, emulator snapshots and scratch downloads. Shut down task-owned test devices and processes when finished. Preserve source, signing material, release deliverables, required evidence, installed user data and anything used by concurrent work. Check ownership and active processes before deleting shared caches or devices; use supported simulator/emulator tooling. Measure disk space before and after cleanup and report what was reclaimed, what remains and why. Cleanup is part of completion; workers must include it in their handoff. Retain large caches or test environments only with an explicit reason and a cleanup owner/time.
+<!-- /post-work-cleanup:v1 -->

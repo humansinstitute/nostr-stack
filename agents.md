@@ -23,6 +23,10 @@ It does not own:
 - app-specific translation of payload data into local UI rows
 - optional Flight Logs memory behavior
 
+## Pluggable application boundary
+
+NStack is a reusable backend for independent apps. Apps own domain tables/collections, schemas and business rules in their own namespace. Before adding a route, table, migration or shared contract, read the installed `wingman-be-free-platform` skill and `references/pluggable-app-boundary.md`; inspect existing app DB, org-data, napplet and storage contracts first. Extend NStack for a demonstrated reusable capability gap, with server-enforced authorization, isolation, validation and concurrency guarantees. Existing typed Flight Deck APIs remain supported; this direction does not claim generic parity or authorize a migration.
+
 ## Read this first
 
 - repo purpose: `README.md`
