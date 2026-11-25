@@ -35,22 +35,21 @@ workspace UUID.
 Every public table with a UUID `workspace_id` must be classified exactly once; a test fails when
 a new table is added unclassified, so the meter cannot silently grow or shrink.
 
-**Git provider seam (inspected 2026-11-25; no provider can be implemented in Tower today).** Stock Forgejo owns accounts,
-organizations, repositories and Git transport natively (see `docs/forgejo-native-auth-migration.md`); the legacy `git_*` tables are
-retained read-only and stale, the old Tower webhook receiver and reconcilers are retired, and Tower sees no push. Three facts are
-missing, and any provider needs all three before `registerMeteredStorageCategory` may be called:
-1. **Attribution.** No authoritative repository-to-workspace mapping exists in Tower (`workspace-storage-usage` reports exactly this
-   as unavailable). A mapping must be an explicit, owner-authorized binding written by whatever provisions Forgejo organizations, not
-   an inference from a name or the stale legacy bindings.
-2. **Write-path journal.** Peak billing needs every byte change inside the hour. Forgejo does not call Tower on push, so there is
-   nothing to journal into `hosting_storage_record(ws,'external',delta)`. Forgejo's repository `size` (KiB) is an asynchronously
-   refreshed estimate: sampling it once per hour would be exactly the current-bytes sampling the policy rejects (a push and a
-   force-push/gc inside one hour would vanish).
-3. **Authoritative byte reader.** The size source (Forgejo API, or the repository store) must be read with a service credential this
-   deployment does not hold in Tower, and its accuracy relative to physical bytes (packs, LFS, forks, archives) is unproven.
-A provider would be a Forgejo system webhook (HMAC-verified, idempotent by delivery id) that triggers a size read and journals the
-signed delta against the bound workspace, plus an hourly reconciling read recorded in each anchor. Until then Git stays required,
-unmetered and fail closed (reserve, refunds and agent spend closed); registering a name or sampling a size does not change that.
+**Git provider seam (inspected 2026-11-25; no verified provider is configured).** Current NStack routes retire
+`/api/v4/git/*` with HTTP 410 and direct clients to the configured GRasp Git and Nostr endpoints. Older Forgejo migration
+notes and stale legacy `git_*` bindings do not establish current repository ownership, credentials or workspace attribution.
+Do not restore retired OIDC, authorization replication or webhook routes to make this meter appear complete. Three facts
+are missing, and a provider needs all three before `registerMeteredStorageCategory` may be called:
+1. **Attribution.** An explicit, owner-authorized repository-to-workspace binding from the actual provisioner. Neither a
+   repository name nor a legacy binding is authoritative evidence.
+2. **Write-path journal.** Every byte change inside the hour must reach `hosting_storage_record(ws,'external',delta)` with
+   replay protection. A push followed by a force-push or garbage collection cannot disappear between hourly samples.
+3. **Authoritative byte reader.** A verified read from the actual repository/archive store must define its treatment of
+   packs, retained history, LFS, forks and archives and contribute bytes to every anchor. A service-reported asynchronous
+   size estimate alone does not prove the approved peak policy.
+The actual GRasp deployment, repository coordinates, supported write-path integration and byte/archive reader must be
+verified before implementing that adapter. Until then Git stays required, unmetered and fail closed (reserve, refunds and
+agent spend closed); registering a name or sampling a size does not change that.
 
 **Git is required billable customer storage and is not yet metered.** Until a real provider is
 registered (`registerMeteredStorageCategory({id:'git', journal:'write_path', bytes})`: a name alone is rejected; the provider's bytes

@@ -34,7 +34,7 @@ removes nothing.** Nothing may be described as recoverable until the gates below
 4. Support restore procedure and tooling, and the explicit operator removal tool that calls `removalGate`.
 5. Decision on key custody/escrow and who may trigger a restore.
 
-Until 1–4 exist, `offline_recovery` stays `available:false, verified:false, promised:false` and the lifecycle copy must not say recoverable.
+Until 1–4 exist, `offline_recovery.promised` stays false and the lifecycle copy must not say recoverable. Without a configured vault, `available` and `verified` are also false. Test adapters may demonstrate stored-byte availability and integrity, which never prove a complete workspace can be recovered.
 
 ## Tests
 

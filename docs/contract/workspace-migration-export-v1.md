@@ -85,7 +85,7 @@ chain over what it received and matches `manifest.sections.*.chain` and `items` 
 | `app_storage_objects` | Registered-app private objects are readable only through generic canonical-owner recovery: the workspace owner receives completed objects (with bytes verified in `assets`); every other member receives nothing. |
 
 **Known gap:** managed-app storage (`managed_*`: ciphertext chunks readable only by the delegated app's own signer, no member or owner
-read route) and Git repositories (Forgejo owns them; no workspace attribution or byte/archive provider exists, see
+read route) and Git repositories (current NStack routes delegate Git to GRasp; no verified workspace attribution or byte/archive provider exists, see
 `hosting-storage-peak-v1.md`) are still not exported, so every manifest is currently `incomplete` with `uncovered_content`; each is
 listed in `coverage.uncovered_required` with its reason. `response_activities` (transient status), `channel_move_receipts` and
 `agent_work_receipts` (receipts) are classified `operational`, not content: a reclassification is a one-line change. Until the
