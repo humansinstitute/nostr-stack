@@ -248,9 +248,10 @@ describe('OpenAPI docs', () => {
     expect(wappActivityItemAuthority.properties.registered_open_origins).toBeUndefined();
     expect(body.paths['/api/v4/flightdeck-pg/workspaces/{workspaceId}/wapp-activity/items/{itemId}'].get.responses['200'].content['application/json'].schema.properties.item.$ref).toBe('#/components/schemas/WappActivityItem');
     const gitPaths = Object.keys(body.paths).filter((path) => path.startsWith('/api/v4/git/'));
-    expect(gitPaths).toHaveLength(6);
-    expect(gitPaths.every((path) => path.startsWith('/api/v4/git/oidc/'))).toBe(true);
-    expect(body.paths['/api/v4/git/oidc/authorize'].get.responses['200'].content['application/json'].schema.required).toEqual(['request_id', 'completion_url', 'client_id', 'expires_at']);
+    expect(gitPaths).toHaveLength(0); // GRasp owns Git; retired NStack OIDC is not an advertised API.
+    const retiredGit = await app.request('/api/v4/git/oidc/authorize');
+    expect(retiredGit.status).toBe(410);
+    expect(await retiredGit.json()).toMatchObject({ error: 'retired' });
     expect(body.components.securitySchemes.gitInternalService).toBeUndefined();
     expect(body.components.schemas.GitCredentialExchangeResponse).toBeUndefined();
     expect(body.paths['/api/v4/flightdeck-pg/service'].get.responses['200'].content['application/json'].schema.properties.git).toBeUndefined();

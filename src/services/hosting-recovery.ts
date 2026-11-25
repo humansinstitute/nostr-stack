@@ -73,7 +73,8 @@ export async function verifyRecoveryRestore(copyId: string, now = new Date(), db
   if (copy.provenance !== v.provenance) throw new HostingError(409, 'recovery_vault_mismatch');
   let got: { plaintextSha256: string; plaintextBytes: number } | null = null, failure: string | null = null;
   try { got = await v.restoreIdentity(copy.object_ref); } catch { failure = 'restore_unavailable'; }
-  if (got && (got.plaintextSha256 !== copy.plaintext_sha256 || got.plaintextBytes !== Number(copy.plaintext_bytes))) failure = 'restored_identity_mismatch';
+  if (!got || !HEX64.test(got.plaintextSha256) || !Number.isSafeInteger(got.plaintextBytes) || got.plaintextBytes < 0) failure = 'restore_unavailable';
+  if (!failure && got && (got.plaintextSha256 !== copy.plaintext_sha256 || got.plaintextBytes !== Number(copy.plaintext_bytes))) failure = 'restored_identity_mismatch';
   return db.begin(async tx => {
     const sql = tx as unknown as Db;
     if (failure === 'restore_unavailable') { await note(sql, copyId, 'restore_failed', { reason: failure }); throw new HostingError(502, 'recovery_restore_unavailable'); }
@@ -105,7 +106,7 @@ export async function expireRecoveryCopies(now = new Date(), db: Db = getDb()) {
   return { expired };
 }
 
-/** What may honestly be said about offline recovery for an account. `promised` requires a production-vault copy that passed an isolated restore and is unexpired. */
+/** Byte-integrity status only. No complete-snapshot verifier exists, so no copy currently earns a recovery promise. */
 export async function accountRecoveryState(db: Db, accountId: string, now = new Date()) {
   const rows = await db`SELECT state,provenance,expires_at,restore_verified_at,workspace_id FROM hosting_recovery_copies WHERE account_id=${accountId} AND state IN ('sealed','restore_verified') AND expires_at>${now}`;
   const available = rows.length > 0;

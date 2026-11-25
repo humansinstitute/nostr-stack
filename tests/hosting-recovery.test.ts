@@ -139,6 +139,17 @@ describe.skipIf(!port || port === 5432)('offline recovery seam on disposable Pos
     expect((await accountRecoveryState(db as any, account)).promised).toBe(false);
   });
 
+  test('a malformed restore answer fails without changing or verifying the sealed copy', async () => {
+    const vault = new FixtureVault('test'); configureRecoveryVault(vault);
+    const copy = await sealRecoveryCopy({ workspaceId: workspace, manifest: manifest(), plaintext }, new Date(), db as any);
+    for (const answer of [null, {}, { plaintextSha256: sha(plaintext), plaintextBytes: NaN }]) {
+      configureRecoveryVault({ provenance: 'test', seal: vault.seal.bind(vault), destroy: vault.destroy.bind(vault), restoreIdentity: async () => answer as any });
+      await expect(verifyRecoveryRestore(copy.id, new Date(), db as any)).rejects.toMatchObject({ code: 'recovery_restore_unavailable', status: 502 });
+      expect((await db`SELECT state FROM hosting_recovery_copies WHERE id=${copy.id}`)[0]!.state).toBe('sealed');
+      expect((await db`SELECT count(*)::int AS n FROM hosting_recovery_events WHERE copy_id=${copy.id} AND kind='restore_verified'`)[0]!.n).toBe(0);
+    }
+  });
+
   test('regression: arbitrary partial bytes with an empty or self-serving manifest roundtrip from a production vault but can never authorize removal or a recovery promise', async () => {
     const vault = new FixtureVault('production'); configureRecoveryVault(vault);
     const partial = new TextEncoder().encode('hello');
