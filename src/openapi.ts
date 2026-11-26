@@ -5621,16 +5621,16 @@ export function buildOpenApiDocument(origin: string) {
         },
         patch: {
           tags: ['Flight Deck PG'],
-          summary: 'Rename one thread',
-          description: 'Normalizes whitespace and enforces a 120-character title limit. Authorizes channel.write; non-human actors must also participate in the thread.',
+          summary: 'Update a thread title and/or generic metadata',
+          description: 'Accepts title and/or metadata. Omitted fields are preserved. Title normalizes whitespace with a 120-character limit. Metadata is full replacement, requires a numeric positive int32 row_version checked atomically, and is bounded to 65536 UTF-8 JSON bytes, depth 32 and 8192 values. Empty object clears metadata; null/arrays are invalid. Metadata never changes canonical identity, ACL, latest, activity or attention. Authorizes channel.write; non-human actors must participate. Metadata changes emit flightdeck_pg.thread.updated with operation updated and payload.thread; title-only retains renamed. Refetch and reapply intent on 409 or uncertain delivery; do not replay a stale whole object. See docs/contract/thread-metadata-v1.md.',
           parameters: [
             { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
             { name: 'threadId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
           ],
-          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['title'], properties: { title: { type: 'string', minLength: 1, maxLength: 120 }, row_version: { type: 'integer', minimum: 1 } } } } } },
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', anyOf: [{ required: ['title'], not: { required: ['metadata'] } }, { required: ['metadata', 'row_version'] }], properties: { title: { type: 'string', minLength: 1, maxLength: 120 }, metadata: { type: 'object', additionalProperties: true, description: 'Full generic JSON object replacement; <=65536 UTF-8 bytes, depth <=32, <=8192 values. Requires row_version.' }, row_version: { type: 'integer', minimum: 1, maximum: 2147483647 } } } } } },
           responses: {
-            '200': { description: 'Renamed thread', content: { 'application/json': { schema: { type: 'object' } } } },
-            '400': { description: 'Invalid title', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+            '200': { description: 'Canonical updated thread, audit and outbox cursor', content: { 'application/json': { schema: { type: 'object' } } } },
+            '400': { description: 'Invalid or empty operation, metadata limits, or missing/invalid row_version', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
             '403': { description: 'Channel access or bot participation denied', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
             '404': { description: 'Thread not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
             '409': { description: 'Stale row version', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },

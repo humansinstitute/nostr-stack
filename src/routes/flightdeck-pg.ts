@@ -1,4 +1,5 @@
 import { readWorkspaceStorage } from '../services/flightdeck-pg-workspace-storage';
+import { validateFlightDeckPgThreadUpdate } from '../services/flightdeck-pg-thread-update';
 import { readFlightDeckPgWorkspaceReport, parseWorkspaceReportQuery, WorkspaceReportError } from '../services/flightdeck-pg-workspace-report';
 import QRCode from 'qrcode';
 import { readFipsIngressConfig } from '../fips-ingress';
@@ -384,7 +385,7 @@ import {
   updateFlightDeckPgFileFolder,
   updateFlightDeckPgTask,
   updateFlightDeckPgMessage,
-  updateFlightDeckPgThreadTitle,
+  updateFlightDeckPgThread,
   updateFlightDeckPgTaskState,
   updateFlightDeckPgWorkroom,
   markFlightDeckPgResourceViewed,
@@ -6026,11 +6027,7 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/threads/:threadId', async (c)
   const { context, identity } = result;
   const body = await readJsonBody(c);
   if (!body) return validationError(c, identity, [{ path: 'body', code: 'invalid_json', message: 'body must be valid JSON' }]);
-  const titleValidation = validateFlightDeckPgThreadTitle(body.title);
-  const rowVersion = optionalRowVersion({ row_version: body.row_version });
-  const fields: { path: string; code: string; message: string }[] = [];
-  if (titleValidation.error) fields.push({ path: 'title', code: titleValidation.title ? 'too_long' : 'required', message: titleValidation.error });
-  if (Number.isNaN(rowVersion)) fields.push({ path: 'row_version', code: 'invalid', message: 'row_version must be a positive integer' });
+  const { update, fields } = validateFlightDeckPgThreadUpdate(body);
   if (fields.length) return validationError(c, identity, fields);
 
   const existing = await resolveFlightDeckPgThread(context.workspace.id, c.req.param('threadId'));
@@ -6049,25 +6046,27 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/threads/:threadId', async (c)
     actorId: context.actor.id,
     actorNpub: auth.userNpub,
   }))) {
-    return jsonError(c, 403, 'thread_participation_required', 'Bot must participate in the thread to update its title', identity);
+    return jsonError(c, 403, 'thread_participation_required', 'Bot must participate in the thread to update it', identity);
   }
 
   const payload = await getDb().begin(async (tx) => {
     const sql = asDbClient(tx);
-    const thread = await updateFlightDeckPgThreadTitle({
+    const thread = await updateFlightDeckPgThread({
       workspaceId: context.workspace.id,
       threadId: existing.id,
-      title: titleValidation.title,
+      title: update.title,
+      metadata: update.metadata,
       actorId: context.actor.id,
-      rowVersion,
+      rowVersion: update.row_version,
     }, sql);
     if (!thread) return null;
-    const auditId = await writeFlightDeckPgAudit({ workspaceId: context.workspace.id, actorId: context.actor.id, action: 'thread.rename', resourceType: 'thread', resourceId: thread.id, metadata: { channel_id: thread.channel_id, scope_id: thread.scope_id } }, sql);
-    const outbox = await createFlightDeckPgChatOutboxEvent({ workspaceId: context.workspace.id, scopeId: thread.scope_id, channelId: thread.channel_id, actorId: context.actor.id, eventType: 'flightdeck_pg.thread.updated', entityType: 'thread', entityId: thread.id, operation: 'renamed', entityRowVersion: thread.row_version, payload: { thread_id: thread.id, title: thread.title } }, sql);
+    const operation = update.metadata === undefined ? 'thread.rename' : 'thread.update';
+    const auditId = await writeFlightDeckPgAudit({ workspaceId: context.workspace.id, actorId: context.actor.id, action: operation, resourceType: 'thread', resourceId: thread.id, metadata: { channel_id: thread.channel_id, scope_id: thread.scope_id, row_version: thread.row_version, changed_fields: Object.keys(update).filter(key => key !== 'row_version') } }, sql);
+    const outbox = await createFlightDeckPgChatOutboxEvent({ workspaceId: context.workspace.id, scopeId: thread.scope_id, channelId: thread.channel_id, actorId: context.actor.id, eventType: 'flightdeck_pg.thread.updated', entityType: 'thread', entityId: thread.id, operation: update.metadata === undefined ? 'renamed' : 'updated', entityRowVersion: thread.row_version, payload: update.metadata === undefined ? { thread_id: thread.id, title: thread.title } : { thread_id: thread.id, title: thread.title, thread: serializeFlightDeckPgThread(thread) } }, sql);
     return { thread, auditId, outbox };
   });
   if (!payload) return jsonError(c, 409, 'stale_row_version', 'Thread row_version is stale', identity);
-  return c.json({ identity, thread: serializeFlightDeckPgThread(payload.thread), audit: { event_id: payload.auditId, operation: 'thread.rename', actor_npub: auth.userNpub }, outbox: payload.outbox });
+  return c.json({ identity, thread: serializeFlightDeckPgThread(payload.thread), audit: { event_id: payload.auditId, operation: update.metadata === undefined ? 'thread.rename' : 'thread.update', actor_npub: auth.userNpub }, outbox: payload.outbox });
 });
 
 flightDeckPgRouter.delete('/workspaces/:workspaceId/threads/:threadId', async (c) => {

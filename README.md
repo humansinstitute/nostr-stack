@@ -123,6 +123,10 @@ existing-row backfill and independent user read/device checkpoint behavior.
 
 ## Message reference lookup
 
+[Thread metadata updates v1](docs/contract/thread-metadata-v1.md) extends the
+existing thread PATCH with bounded application-owned JSON metadata and required
+atomic row-version checks, preserving legacy title updates and canonical access.
+
 [Flight Deck message references](docs/contract/flightdeck-message-reference-lookup.md)
 documents the narrow authorized message/owning-thread lookup for uncached links,
 its error and branch semantics, and the separate runtime activation check.

@@ -7,6 +7,7 @@ import { inboxApiEnabled } from './notification-core';
 import { transportAdvertisement } from './notification-registry';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import { getDb } from '../db';
+import { validateFlightDeckPgThreadUpdate } from './flightdeck-pg-thread-update';
 
 /**
  * Flight Deck PG service boundary.
@@ -3907,10 +3908,20 @@ export async function updateFlightDeckPgThreadTitle(
   input: { workspaceId: string; threadId: string; title: string; actorId: string; rowVersion?: number | null },
   sql: DbClient = getDb(),
 ): Promise<FlightDeckPgThreadRow | null> {
+  return updateFlightDeckPgThread(input, sql);
+}
+
+export async function updateFlightDeckPgThread(
+  input: { workspaceId: string; threadId: string; title?: string; metadata?: Record<string, unknown>; actorId: string; rowVersion?: number | null },
+  sql: DbClient = getDb(),
+): Promise<FlightDeckPgThreadRow | null> {
+  const { update, fields } = validateFlightDeckPgThreadUpdate({ title: input.title, metadata: input.metadata, row_version: input.rowVersion });
+  if (fields.length) throw new Error(fields.map(field => `${field.path}: ${field.message}`).join('; '));
   const [thread] = await sql<FlightDeckPgThreadRow[]>`
     UPDATE flightdeck_pg_threads
     SET
-      title = ${input.title},
+      title = COALESCE(${update.title ?? null}::text, title),
+      metadata = CASE WHEN ${input.metadata !== undefined} THEN ${sql.json(asDbJson(input.metadata ?? {}))}::jsonb ELSE metadata END,
       updated_by_actor_id = ${input.actorId},
       row_version = row_version + 1,
       updated_at = NOW()
@@ -8587,7 +8598,7 @@ export async function createFlightDeckPgChatOutboxEvent(
     eventType: string;
     entityType: 'message' | 'thread';
     entityId: string | null;
-    operation: 'created' | 'updated' | 'deleted';
+    operation: 'created' | 'updated' | 'deleted' | 'renamed' | 'branched' | 'archived' | 'unarchived';
     entityRowVersion: number | null;
     payload?: Record<string, unknown>;
   },

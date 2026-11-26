@@ -1105,6 +1105,15 @@ export interface FlightDeckPgTask {
   deleted_at: Date | null;
 }
 
+/** PATCH of the canonical thread. Metadata is a full replacement, bounded to
+ * 65536 UTF-8 JSON bytes / depth 32 / 8192 values, and requires row_version CAS.
+ * Omitting title or metadata preserves it. Application keys grant no access. */
+export interface FlightDeckPgThreadUpdate {
+  title?: string;
+  metadata?: Record<string, unknown>;
+  row_version?: number;
+}
+
 export interface FlightDeckPgThread {
   attention?: FlightDeckPgAttention;
   id: string;
