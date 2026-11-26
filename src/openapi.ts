@@ -284,6 +284,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
           <button class="nav-btn active" data-view="home" type="button">Home</button>
           <button class="nav-btn" data-view="workspace" type="button">View Workspace</button>
           <button class="nav-btn" data-view="newWorkspace" type="button">New Workspace</button>
+          <button class="nav-btn" data-view="hosting" type="button">Hosting Accounts</button>
           <button class="nav-btn" data-view="tables" type="button">Tables</button>
           <button class="nav-btn" data-view="setup" type="button">Setup</button>
           <button class="nav-btn" data-view="danger" type="button">Danger</button>
@@ -298,6 +299,10 @@ function adminInterfaceHtml(apiBaseUrl: string) {
             <button class="card action-card" data-jump="newWorkspace" type="button">
               <strong>New Workspace</strong>
               <span class="muted">Create a Postgres-backed workspace and copy its descriptor.</span>
+            </button>
+            <button class="card action-card" data-jump="hosting" type="button">
+              <strong>Hosting Accounts</strong>
+              <span class="muted">Latest USD hosting accounts: owner, balances, linked workspaces and onboarding state.</span>
             </button>
             <button class="card action-card" data-jump="tables" type="button">
               <strong>Browse Tables</strong>
@@ -393,6 +398,27 @@ function adminInterfaceHtml(apiBaseUrl: string) {
               <textarea id="descriptorOutput" readonly placeholder="Created workspace descriptor appears here"></textarea>
               <label for="setupOutput" style="margin-top:10px;">Setup result</label>
               <textarea id="setupOutput" readonly placeholder="Workspace setup result appears here"></textarea>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-hosting" class="section">
+          <div class="card">
+            <div class="row" style="justify-content:space-between;">
+              <h2>Hosting Accounts</h2>
+              <div class="row">
+                <button id="openHostingAccountBtn" class="primary" type="button">Open my hosting account</button>
+                <button id="refreshHostingBtn" type="button">Refresh</button>
+              </div>
+            </div>
+            <p class="muted" style="margin-top:6px;">Shared USD hosting accounts, newest first (read-only). Legacy workspace credits (Billing) are a separate system and never appear here as purchased hosting credit. Opening your account signs one request with your own Nostr identity: it creates a zero-balance account only. It starts no checkout, charge, paid agent or credit.</p>
+            <div id="hostingMeta" class="muted" style="margin-top:8px;"></div>
+            <div id="hostingProviders" class="muted" style="margin-top:4px;"></div>
+            <div id="hostingData" class="table-wrap" style="margin-top:10px;"><div class="empty" style="padding:12px;">Connect to load hosting accounts.</div></div>
+            <div class="row" style="margin-top:10px;">
+              <button id="prevHostingBtn" type="button">Prev</button>
+              <button id="nextHostingBtn" type="button">Next</button>
+              <span id="hostingPage" class="muted"></span>
             </div>
           </div>
         </section>
@@ -551,6 +577,11 @@ function adminInterfaceHtml(apiBaseUrl: string) {
         workspaceInspect: null,
         bulkSelectedWorkspaceIds: new Set(),
         bulkPreview: null,
+        generation: 0,
+        hostingOffset: 0,
+        hostingLimit: 25,
+        hostingLoadSeq: 0,
+        hostingBusy: false,
       };
       const el = (id) => document.getElementById(id);
       const els = {
@@ -641,10 +672,22 @@ function adminInterfaceHtml(apiBaseUrl: string) {
         state.workspaces = [];
         state.tables = [];
         state.workspaceInspect = null;
+        resetHosting();
         renderSession();
         renderWorkspaces();
         renderTableSelect();
         setStatus('Logged out.');
+      }
+
+      function resetHosting() {
+        // Invalidate every in-flight owner/session-scoped load so a late response cannot repopulate after logout or identity change.
+        state.generation += 1;
+        state.hostingOffset = 0;
+        state.hostingBusy = false;
+        el('hostingMeta').textContent = '';
+        el('hostingProviders').textContent = '';
+        el('hostingPage').textContent = '';
+        el('hostingData').innerHTML = '<div class="empty" style="padding:12px;">Connect to load hosting accounts.</div>';
       }
 
       function renderSession() {
@@ -673,6 +716,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
       async function connect() {
         if (!window.nostr) throw new Error('Nostr extension not available');
         const pubkey = await window.nostr.getPublicKey();
+        if (state.pubkey && state.pubkey !== pubkey) resetHosting();
         state.pubkey = pubkey;
         state.npub = await npubFromHex(pubkey);
         saveSession();
@@ -714,6 +758,140 @@ function adminInterfaceHtml(apiBaseUrl: string) {
         return data;
       }
 
+      // Strict body-bound mutation proof: the payload tag is always present (sha256 of the exact body, empty included) and the
+      // signer must be the connected identity. Fails closed; nothing is sent when the extension identity differs.
+      async function signStrict(url, method, body) {
+        if (!window.nostr) throw new Error('Nostr extension not available');
+        if (!state.pubkey) throw new Error('Connect with Nostr first');
+        const current = await window.nostr.getPublicKey();
+        if (current !== state.pubkey) throw new Error('Nostr identity changed since connecting. Log out and connect again.');
+        const event = await window.nostr.signEvent({
+          kind: 27235,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [['u', url], ['method', method.toUpperCase()], ['payload', await sha256Hex(body)]],
+          content: '',
+        });
+        if (!event || event.pubkey !== state.pubkey) throw new Error('Signature was not made by the connected identity. Nothing was sent.');
+        return 'Nostr ' + base64Json(event);
+      }
+
+      function usd(value) {
+        const parts = String(value ?? '0').split('.');
+        return '$' + parts[0] + (parts[1] ? '.' + parts[1].slice(0, 4) : '');
+      }
+
+      function hostingCell(row, lines) {
+        const td = document.createElement('td');
+        lines.forEach((line, index) => {
+          if (index) td.appendChild(document.createElement('br'));
+          const span = document.createElement('span');
+          span.textContent = line.text;
+          if (line.title) span.title = line.title;
+          if (line.muted) span.className = 'muted';
+          td.appendChild(span);
+        });
+        row.appendChild(td);
+      }
+
+      function renderHosting(payload) {
+        const providers = payload.providers || {};
+        const build = payload.build || {};
+        el('hostingMeta').textContent = 'Refreshed ' + formatDate(payload.refreshed_at) + ' · build '
+          + (build.git_commit ? String(build.git_commit).slice(0, 12) : 'unknown')
+          + (build.build_time ? ' (' + build.build_time + ')' : '') + ' · ' + payload.total + ' account' + (payload.total === 1 ? '' : 's');
+        const card = providers.card || {};
+        el('hostingProviders').textContent = 'Onboarding rollout: ' + (providers.onboarding_enabled ? 'enabled' : 'disabled')
+          + ' · Card (' + (card.mode || 'unknown') + '): ' + (card.available ? 'available' : 'unavailable')
+          + ' · Lightning: ' + ((providers.lightning || {}).available ? 'available' : 'unavailable');
+        const rows = payload.accounts || [];
+        const holder = el('hostingData');
+        holder.textContent = '';
+        if (!rows.length) {
+          const empty = document.createElement('div');
+          empty.className = 'empty';
+          empty.style.padding = '12px';
+          empty.textContent = payload.total > 0 ? 'No accounts on this page.' : 'No hosting accounts exist yet.';
+          holder.appendChild(empty);
+        } else {
+          const tableEl = document.createElement('table');
+          const headRow = document.createElement('tr');
+          ['Owner', 'Account', 'Created', 'Purchased', 'Promo', 'Reversal debt', 'Balance', 'Workspaces', 'Latest onboarding'].forEach((label) => {
+            const th = document.createElement('th');
+            th.textContent = label;
+            headRow.appendChild(th);
+          });
+          const thead = document.createElement('thead');
+          thead.appendChild(headRow);
+          tableEl.appendChild(thead);
+          const tbody = document.createElement('tbody');
+          rows.forEach((account) => {
+            const tr = document.createElement('tr');
+            tr.dataset.accountId = account.account_id;
+            hostingCell(tr, [...(account.owner_label ? [{ text: account.owner_label }] : []), { text: short(account.owner_npub), title: account.owner_npub }]);
+            hostingCell(tr, [{ text: account.account_id.slice(0, 8), title: account.account_id }, { text: account.opened_by, muted: true }]);
+            hostingCell(tr, [{ text: formatDate(account.created_at) }]);
+            hostingCell(tr, [{ text: usd(account.purchased_usd), title: account.purchased_units + ' units' }]);
+            hostingCell(tr, [{ text: usd(account.promo_usd), title: account.promo_units + ' units' }, { text: 'expires ' + formatDate(account.promo_expires_at), muted: true }]);
+            hostingCell(tr, [{ text: usd(account.reversal_debt_usd), title: account.reversal_debt_units + ' units' }]);
+            hostingCell(tr, [{ text: usd(account.balance_usd), title: account.balance_units + ' units' }]);
+            hostingCell(tr, [{ text: String(account.workspaces.count) }, ...(account.workspaces.names.length ? [{ text: account.workspaces.names.join(', ') + (account.workspaces.count > account.workspaces.names.length ? ', ...' : ''), muted: true }] : [])]);
+            const latest = account.latest_onboarding;
+            hostingCell(tr, latest
+              ? [{ text: latest.status }, { text: formatDate(latest.updated_at) + (latest.last_error ? ' · ' + latest.last_error : ''), muted: true }]
+              : [{ text: 'none', muted: true }]);
+            tbody.appendChild(tr);
+          });
+          tableEl.appendChild(tbody);
+          holder.appendChild(tableEl);
+        }
+        el('hostingPage').textContent = payload.total ? 'Showing ' + (payload.offset + (rows.length ? 1 : 0)) + '-' + (payload.offset + rows.length) + ' of ' + payload.total : '';
+        el('prevHostingBtn').disabled = payload.offset <= 0;
+        el('nextHostingBtn').disabled = !payload.has_more;
+      }
+
+      async function loadHosting() {
+        if (!state.pubkey) { setStatus('Connect with Nostr first.', true); return; }
+        const generation = state.generation;
+        const seq = ++state.hostingLoadSeq;
+        el('hostingData').className = 'table-wrap';
+        el('hostingData').innerHTML = '<div class="empty" style="padding:12px;">Loading hosting accounts...</div>';
+        try {
+          const payload = await api('/api/v4/admin/hosting-accounts?limit=' + state.hostingLimit + '&offset=' + state.hostingOffset);
+          // Drop results from a previous session or a superseded request.
+          if (generation !== state.generation || seq !== state.hostingLoadSeq) return;
+          renderHosting(payload);
+        } catch (error) {
+          if (generation !== state.generation || seq !== state.hostingLoadSeq) return;
+          el('hostingData').textContent = 'Could not load hosting accounts: ' + error.message;
+          el('hostingData').className = 'table-wrap status error';
+          throw error;
+        }
+      }
+
+      async function openHostingAccount() {
+        if (state.hostingBusy) return;
+        state.hostingBusy = true;
+        const generation = state.generation;
+        el('openHostingAccountBtn').disabled = true;
+        try {
+          const url = API_BASE + '/api/v4/onboarding/account';
+          const auth = await signStrict(url, 'POST', '');
+          const res = await fetch(url, { method: 'POST', headers: { Authorization: auth } });
+          const text = await res.text();
+          let data = {};
+          try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text }; }
+          if (generation !== state.generation) return;
+          if (!res.ok) throw new Error((data.code ? data.code + ': ' : '') + (data.error || text || 'Request failed'));
+          const account = data.account || {};
+          setStatus('Hosting account ' + String(account.account_id || '').slice(0, 8) + ' is open for ' + short(state.npub) + ' (balance ' + usd(account.balance_usd) + '). No credit, checkout or paid agent was started.');
+          state.hostingOffset = 0;
+          await loadHosting();
+        } finally {
+          state.hostingBusy = false;
+          el('openHostingAccountBtn').disabled = false;
+        }
+      }
+
       async function loadAdmin() {
         setStatus('Loading admin data...');
         const tables = await api('/api/v4/admin/tables');
@@ -726,6 +904,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
         renderWorkspaces();
         renderTableSelect();
         setStatus('Connected as ' + (state.npub || tables.viewer));
+        loadHosting().catch((error) => setStatus('Hosting accounts: ' + error.message, true));
       }
 
       function switchView(name) {
@@ -1168,6 +1347,16 @@ function adminInterfaceHtml(apiBaseUrl: string) {
       el('nextTableBtn').addEventListener('click', () => {
         state.tableOffset += state.tableLimit;
         loadTable().catch((error) => setStatus(error.message, true));
+      });
+      el('refreshHostingBtn').addEventListener('click', () => loadHosting().catch((error) => setStatus(error.message, true)));
+      el('openHostingAccountBtn').addEventListener('click', () => openHostingAccount().catch((error) => setStatus(error.message, true)));
+      el('prevHostingBtn').addEventListener('click', () => {
+        state.hostingOffset = Math.max(0, state.hostingOffset - state.hostingLimit);
+        loadHosting().catch((error) => setStatus(error.message, true));
+      });
+      el('nextHostingBtn').addEventListener('click', () => {
+        state.hostingOffset += state.hostingLimit;
+        loadHosting().catch((error) => setStatus(error.message, true));
       });
       el('createFdBtn').addEventListener('click', () => createFdWorkspace().catch((error) => setStatus(error.message, true)));
       el('copyDescriptorBtn').addEventListener('click', async () => {
@@ -2552,6 +2741,39 @@ export function buildOpenApiDocument(origin: string) {
 
         ...hostingSchemas,
         ...onboardingSchemas,
+        AdminHostingAccount: {
+          type: 'object',
+          required: ['account_id', 'owner_npub', 'owner_label', 'opened_by', 'created_at', 'purchased_units', 'purchased_usd', 'promo_units', 'promo_usd', 'promo_expires_at', 'reversal_debt_units', 'reversal_debt_usd', 'balance_units', 'balance_usd', 'workspaces', 'latest_onboarding'],
+          properties: {
+            account_id: { type: 'string', format: 'uuid' },
+            owner_npub: { type: 'string' },
+            owner_label: { type: ['string', 'null'], maxLength: 80 },
+            opened_by: { enum: ['legacy', 'onboarding'] },
+            created_at: { type: 'string', format: 'date-time' },
+            purchased_units: { type: 'string', pattern: '^[0-9]+$' }, purchased_usd: { type: 'string', description: 'Display only. Positive paid balance; 0 when the account carries reversal debt.' },
+            promo_units: { type: 'string', pattern: '^[0-9]+$' }, promo_usd: { type: 'string', description: 'Unexpired promotional units only (0 once promo_expires_at has passed).' }, promo_expires_at: { type: 'string', format: 'date-time' },
+            reversal_debt_units: { type: 'string', pattern: '^[0-9]+$' }, reversal_debt_usd: { type: 'string', description: 'Absolute paid shortfall left by provider reversals of already-spent credit.' },
+            balance_units: { type: 'string', pattern: '^-?[0-9]+$', description: 'purchased + unexpired promo - reversal debt. Exact integer tariff units.' }, balance_usd: { type: 'string' },
+            workspaces: { type: 'object', required: ['count', 'names'], properties: { count: { type: 'integer', minimum: 0 }, names: { type: 'array', maxItems: 5, items: { type: 'string' }, description: 'Up to five names, ordered by name.' } } },
+            latest_onboarding: { oneOf: [{ type: 'null' }, { type: 'object', required: ['status', 'funding_cents', 'created_at', 'updated_at', 'provisioned_at', 'last_error'], properties: {
+              status: { enum: ['open', 'funded', 'provisioning', 'provisioned', 'cancelled'] }, funding_cents: { type: 'integer' }, created_at: { type: 'string', format: 'date-time' },
+              updated_at: { type: 'string', format: 'date-time' }, provisioned_at: { type: ['string', 'null'], format: 'date-time' }, last_error: { type: ['string', 'null'], description: '<step>:<code> of the last failed provisioning step.' } } }] },
+          },
+        },
+        AdminHostingAccountsResponse: {
+          type: 'object',
+          required: ['viewer', 'version', 'refreshed_at', 'build', 'providers', 'total', 'limit', 'offset', 'has_more', 'accounts'],
+          properties: {
+            viewer: { type: 'string' }, version: { const: 1 }, refreshed_at: { type: 'string', format: 'date-time' },
+            build: { type: 'object', required: ['git_commit', 'git_branch', 'build_time', 'version'], properties: { git_commit: { type: ['string', 'null'] }, git_branch: { type: ['string', 'null'] }, build_time: { type: ['string', 'null'] }, version: { type: ['string', 'null'] } } },
+            providers: { type: 'object', required: ['onboarding_enabled', 'card', 'lightning'], properties: {
+              onboarding_enabled: { type: 'boolean' },
+              card: { type: 'object', required: ['available', 'mode', 'live_rollout_blocked'], properties: { available: { type: 'boolean' }, mode: { type: 'string' }, live_rollout_blocked: { type: 'boolean' } } },
+              lightning: { type: 'object', required: ['available'], properties: { available: { type: 'boolean' } } } } },
+            total: { type: 'integer', minimum: 0 }, limit: { type: 'integer' }, offset: { type: 'integer' }, has_more: { type: 'boolean' },
+            accounts: { type: 'array', items: { $ref: '#/components/schemas/AdminHostingAccount' } },
+          },
+        },
         ...agentHoldsSchemas,
         ...identityBackupSchemas,
         ...feedReaderSchemas,
@@ -8171,6 +8393,24 @@ export function buildOpenApiDocument(origin: string) {
             '200': { description: 'Deleted app row', content: { 'application/json': { schema: { type: 'object' } } } },
             '403': { description: 'Not authorized', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
             '404': { description: 'Row or app namespace not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+          },
+        },
+      },
+      '/api/v4/admin/hosting-accounts': {
+        get: {
+          tags: ['Admin'],
+          summary: 'List shared USD hosting accounts (read-only administrator projection)',
+          description: 'Platform administrator only (same NIP-98 and configured admin npub as the other admin routes). Explicit projection of hosting_accounts: owner, balances, linked workspaces and the latest onboarding intent. Newest first (created_at, id), bounded pagination. Performs no writes (promo expiry is computed, not recorded). Never returns invoices, checkout sessions, ledger reason/actor fields, provider configuration, identity backups or replay keys. Distinct from the legacy workspace credit ledger. Responses are Cache-Control: private, no-store. Contract: docs/contract/onboarding-v1.md.',
+          security: [{ nip98: [] }],
+          parameters: [
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 25 } },
+            { name: 'offset', in: 'query', required: false, schema: { type: 'integer', minimum: 0, maximum: 100000, default: 0 } },
+          ],
+          responses: {
+            '200': { description: 'Hosting account page', content: { 'application/json': { schema: { $ref: '#/components/schemas/AdminHostingAccountsResponse' } } } },
+            '400': { description: 'invalid_limit or invalid_offset', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+            '401': { description: 'NIP-98 authentication missing or invalid', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+            '403': { description: 'admin npub required', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
           },
         },
       },

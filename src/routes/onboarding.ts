@@ -4,12 +4,12 @@ import { HostingError } from '../services/hosting-billing';
 import { readBoundedText } from '../http-body';
 import { approvedCheckoutReturnUrls, createHostingCheckout, requestStripeRefund } from '../services/hosting-stripe';
 import { fundingReversalSummary } from '../services/hosting-funding';
-import { lightningAvailable, issueLightningQuoteResult, readLightningQuote, reconcileOpenLightningQuotes, reconcileReceiverBindingFeed, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
+import { issueLightningQuoteResult, readLightningQuote, reconcileOpenLightningQuotes, reconcileReceiverBindingFeed, requestLightningRefund, resolveLightningQuote } from '../services/hosting-lightning';
 import { getDb } from '../db';
-import { stripeAvailability } from '../services/hosting-billing';
-import { ONBOARDING_MAX_FUNDING_CENTS, ONBOARDING_MIN_FUNDING_CENTS, onboardingEnabled } from '../services/onboarding';
+import { ONBOARDING_MAX_FUNDING_CENTS, ONBOARDING_MIN_FUNDING_CENTS } from '../services/onboarding';
 import { TOPUP_MAX_CENTS, TOPUP_MIN_CENTS } from '../services/hosting-topup-limits';
 import { createTopupCheckout, issueTopupQuote, listTopups, refreshTopupQuote } from '../services/hosting-topup';
+import { providerAvailability } from '../services/hosting-account-admin';
 import { accountStorageSummary } from '../services/hosting-storage';
 import { accountLifecycle, acknowledgeLifecycleNotice, evaluateLifecycleNotices, listLifecycleNotices } from '../services/hosting-lifecycle';
 import {
@@ -43,13 +43,12 @@ onboardingRouter.get('/invites/:code', guard(async c => c.json(await inviteAvail
 /** What this deployment can actually do right now, for client gating. Operator configuration only: no secrets and nothing a client can alter. */
 onboardingRouter.get('/config', guard(async c => {
   await reader(c);
-  const stripe = stripeAvailability();
-  const returnUrls = approvedCheckoutReturnUrls();
+  const providers = providerAvailability();
   return c.json({
-    version: 1, onboarding_enabled: onboardingEnabled(),
+    version: 1, onboarding_enabled: providers.onboarding_enabled,
     funding: { min_cents: ONBOARDING_MIN_FUNDING_CENTS, max_cents: ONBOARDING_MAX_FUNDING_CENTS, topup_min_cents: TOPUP_MIN_CENTS, topup_max_cents: TOPUP_MAX_CENTS },
-    card: { available: onboardingEnabled() && stripe.configured && stripe.mode === 'test' && returnUrls.length > 0, mode: stripe.mode, live_rollout_blocked: stripe.live_rollout_blocked, return_urls: returnUrls },
-    lightning: { available: onboardingEnabled() && lightningAvailable() },
+    card: { ...providers.card, return_urls: approvedCheckoutReturnUrls() },
+    lightning: providers.lightning,
   });
 }));
 onboardingRouter.get('/account', guard(async c => {

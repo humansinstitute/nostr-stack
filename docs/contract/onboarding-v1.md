@@ -17,6 +17,32 @@ account (including legacy accounts that received the old welcome grant) is retur
 unchanged; there is no back-charge, conversion or wallet migration. Ordinary hosted
 signup and legacy billing are unchanged.
 
+## Administrator hosting-account view (read projection)
+
+`GET /api/v4/admin/hosting-accounts?limit=&offset=` (existing `/api/v4/admin` namespace, same NIP-98 and configured
+admin npub as its neighbours; 401 without authentication, 403 for any other identity) lists the shared USD hosting
+accounts, newest first (`created_at`, `id`), `limit` 1-100 (default 25), `offset` 0-100000 (`400 invalid_limit` /
+`invalid_offset` otherwise), `Cache-Control: private, no-store`. It is a read-only projection, not a new store:
+
+- Per account: `account_id`, `owner_npub`, optional `owner_label` (actor display name, 80 chars), `opened_by`, `created_at`,
+  exact integer-unit balances with server display strings (`purchased_*` = positive paid balance, `promo_*` = unexpired promo
+  only, `reversal_debt_*` = paid shortfall from provider reversals of spent credit, `balance_*` = their sum), linked workspace
+  `count` and up to five `names`, and the latest onboarding intent (`status`, `funding_cents`, timestamps, `last_error` as
+  `<step>:<code>`).
+- Envelope: `refreshed_at`, `build` (git commit/branch/build time/version), `providers` (rollout flag, card and Lightning
+  availability; booleans and mode only, shared with `GET /config`), `total`, `has_more`.
+- No writes on GET: promo expiry is computed from `promo_expires_at`, never recorded (`lockedAccount` is not used).
+- Never returned: invoices, checkout session URLs, ledger reason/actor fields, provider configuration or secrets, identity
+  backups, replay keys. The raw table viewer does not list hosting tables and is not a bypass.
+- The legacy workspace credit view (`workspace_credit_accounts`) is a different system and is never shown as purchased
+  hosting credit.
+
+The existing admin page (`/admin`, "Hosting Accounts") renders it with loading, empty, error and refresh states, drops
+responses that arrive after logout or an identity change, and offers **Open my hosting account**: one strict, body-bound
+NIP-98 signature (payload tag = SHA-256 of the empty body) from the connected browser identity to the unchanged
+`POST /account`. It is self only, idempotent, creates a zero-balance account (no credit, checkout, charge or paid agent) and
+works while `ONBOARDING_ENABLED` is off. It refuses to send if the extension identity differs from the connected one.
+
 ## Intent
 
 `POST /intents` creates or replays a durable intent keyed by

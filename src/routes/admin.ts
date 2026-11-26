@@ -6,6 +6,8 @@ import { getDb } from '../db';
 import { getInsufficientCreditsBlock, getOperationalBillingOverview } from '../services/billing';
 import { generatedFlightDeckPgWorkspaceServiceNpub, setupFlightDeckPgDevWorkspace } from '../services/flightdeck-pg-setup';
 import { getTowerProfile, updateTowerProfile } from '../services/tower-profile';
+import { listHostingAccountsForAdmin, parseAccountPage } from '../services/hosting-account-admin';
+import { HostingError } from '../services/hosting-billing';
 import { measureWorkspaceUsage } from '../services/usage';
 import { listWorkspaceApps, listWorkspaceAppSchemaManifests } from '../services/workspace-apps';
 import {
@@ -990,6 +992,22 @@ adminRouter.get('/billing/overview', async (c) => {
     viewer: authNpub,
     ...overview,
   });
+});
+
+adminRouter.get('/hosting-accounts', async (c) => {
+  const authNpub = await requireNip98Auth(c);
+  if (authNpub instanceof Response) return authNpub;
+  const adminError = requireAdminNpub(authNpub);
+  if (adminError) return adminError;
+  // Financial projection: never cacheable. Read-only; see listHostingAccountsForAdmin for the explicit column set.
+  c.header('Cache-Control', 'private, no-store');
+  try {
+    const page = parseAccountPage({ limit: c.req.query('limit'), offset: c.req.query('offset') });
+    return c.json({ viewer: authNpub, ...(await listHostingAccountsForAdmin(page)) });
+  } catch (error) {
+    if (error instanceof HostingError) return c.json({ code: error.code, error: error.message }, error.status as any);
+    throw error;
+  }
 });
 
 adminRouter.get('/tower', async (c) => {
