@@ -26,7 +26,7 @@ accounts, newest first (`created_at`, `id`), `limit` 1-100 (default 25), `offset
 
 - Per account: `account_id`, `owner_npub`, optional `owner_label` (actor display name, 80 chars), `opened_by`, `created_at`,
   exact integer-unit balances with server display strings (`purchased_*` = positive paid balance, `promo_*` = unexpired promo
-  only, `reversal_debt_*` = paid shortfall from provider reversals of spent credit, `balance_*` = their sum), linked workspace
+  only, `reversal_debt_*` = paid shortfall from provider reversals of spent credit, `balance_*` = their sum, the net ledger balance, not the available or spendable amount after reserves or holds), linked workspace
   `count` and up to five `names`, and the latest onboarding intent (`status`, `funding_cents`, timestamps, `last_error` as
   `<step>:<code>`).
 - Envelope: `refreshed_at`, `build` (git commit/branch/build time/version), `providers` (rollout flag, card and Lightning
@@ -41,7 +41,7 @@ The existing admin page (`/admin`, "Hosting Accounts") renders it with loading, 
 responses that arrive after logout or an identity change, and offers **Open my hosting account**: one strict, body-bound
 NIP-98 signature (payload tag = SHA-256 of the empty body) from the connected browser identity to the unchanged
 `POST /account`. It is self only, idempotent, creates a zero-balance account (no credit, checkout, charge or paid agent) and
-works while `ONBOARDING_ENABLED` is off. It refuses to send if the extension identity differs from the connected one.
+works while `ONBOARDING_ENABLED` is off. The identity and session are captured when the click starts; logout, reconnect or an identity change at any point before the request is sent sends nothing, and a finished older action never resets a newer session's state.
 
 ## Intent
 

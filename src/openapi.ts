@@ -411,7 +411,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
                 <button id="refreshHostingBtn" type="button">Refresh</button>
               </div>
             </div>
-            <p class="muted" style="margin-top:6px;">Shared USD hosting accounts, newest first (read-only). Legacy workspace credits (Billing) are a separate system and never appear here as purchased hosting credit. Opening your account signs one request with your own Nostr identity: it creates a zero-balance account only. It starts no checkout, charge, paid agent or credit.</p>
+            <p class="muted" style="margin-top:6px;">Shared USD hosting accounts, newest first (read-only). Legacy workspace credits (Billing) are a separate system and never appear here as purchased hosting credit. Opening your account signs one request with your own Nostr identity: it creates a zero-balance account only. It starts no checkout, charge, paid agent or credit. Net ledger balance = purchased + unexpired promo - reversal debt; it is not the available or spendable amount after reserves or holds.</p>
             <div id="hostingMeta" class="muted" style="margin-top:8px;"></div>
             <div id="hostingProviders" class="muted" style="margin-top:4px;"></div>
             <div id="hostingData" class="table-wrap" style="margin-top:10px;"><div class="empty" style="padding:12px;">Connect to load hosting accounts.</div></div>
@@ -684,6 +684,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
         state.generation += 1;
         state.hostingOffset = 0;
         state.hostingBusy = false;
+        el('openHostingAccountBtn').disabled = false;
         el('hostingMeta').textContent = '';
         el('hostingProviders').textContent = '';
         el('hostingPage').textContent = '';
@@ -758,20 +759,23 @@ function adminInterfaceHtml(apiBaseUrl: string) {
         return data;
       }
 
-      // Strict body-bound mutation proof: the payload tag is always present (sha256 of the exact body, empty included) and the
-      // signer must be the connected identity. Fails closed; nothing is sent when the extension identity differs.
-      async function signStrict(url, method, body) {
+      // Strict body-bound mutation proof: the payload tag is always present (sha256 of the exact body, empty included). The signer
+      // must be the identity captured when the action started, in the same session generation, across every await. Fails closed.
+      async function signStrict(url, method, body, expected, generation) {
+        const live = () => generation === state.generation && state.pubkey === expected;
         if (!window.nostr) throw new Error('Nostr extension not available');
-        if (!state.pubkey) throw new Error('Connect with Nostr first');
+        if (!expected) throw new Error('Connect with Nostr first');
         const current = await window.nostr.getPublicKey();
-        if (current !== state.pubkey) throw new Error('Nostr identity changed since connecting. Log out and connect again.');
+        if (!live()) throw new Error('Session changed while signing. Nothing was sent.');
+        if (current !== expected) throw new Error('Nostr identity changed since connecting. Log out and connect again. Nothing was sent.');
         const event = await window.nostr.signEvent({
           kind: 27235,
           created_at: Math.floor(Date.now() / 1000),
           tags: [['u', url], ['method', method.toUpperCase()], ['payload', await sha256Hex(body)]],
           content: '',
         });
-        if (!event || event.pubkey !== state.pubkey) throw new Error('Signature was not made by the connected identity. Nothing was sent.');
+        if (!live()) throw new Error('Session changed while signing. Nothing was sent.');
+        if (!event || event.pubkey !== expected) throw new Error('Signature was not made by the connected identity. Nothing was sent.');
         return 'Nostr ' + base64Json(event);
       }
 
@@ -815,7 +819,7 @@ function adminInterfaceHtml(apiBaseUrl: string) {
         } else {
           const tableEl = document.createElement('table');
           const headRow = document.createElement('tr');
-          ['Owner', 'Account', 'Created', 'Purchased', 'Promo', 'Reversal debt', 'Balance', 'Workspaces', 'Latest onboarding'].forEach((label) => {
+          ['Owner', 'Account', 'Created', 'Purchased', 'Promo', 'Reversal debt', 'Net ledger balance', 'Workspaces', 'Latest onboarding'].forEach((label) => {
             const th = document.createElement('th');
             th.textContent = label;
             headRow.appendChild(th);
@@ -870,12 +874,16 @@ function adminInterfaceHtml(apiBaseUrl: string) {
 
       async function openHostingAccount() {
         if (state.hostingBusy) return;
-        state.hostingBusy = true;
         const generation = state.generation;
+        const expected = state.pubkey;
+        if (!expected) { setStatus('Connect with Nostr first.', true); return; }
+        state.hostingBusy = true;
         el('openHostingAccountBtn').disabled = true;
         try {
           const url = API_BASE + '/api/v4/onboarding/account';
-          const auth = await signStrict(url, 'POST', '');
+          const auth = await signStrict(url, 'POST', '', expected, generation);
+          // Last check before any network mutation: logout, reconnect or an identity swap during signing sends nothing.
+          if (generation !== state.generation || state.pubkey !== expected) throw new Error('Session changed while signing. Nothing was sent.');
           const res = await fetch(url, { method: 'POST', headers: { Authorization: auth } });
           const text = await res.text();
           let data = {};
@@ -883,12 +891,15 @@ function adminInterfaceHtml(apiBaseUrl: string) {
           if (generation !== state.generation) return;
           if (!res.ok) throw new Error((data.code ? data.code + ': ' : '') + (data.error || text || 'Request failed'));
           const account = data.account || {};
-          setStatus('Hosting account ' + String(account.account_id || '').slice(0, 8) + ' is open for ' + short(state.npub) + ' (balance ' + usd(account.balance_usd) + '). No credit, checkout or paid agent was started.');
+          setStatus('Hosting account ' + String(account.account_id || '').slice(0, 8) + ' is open for ' + short(state.npub) + ' (net balance ' + usd(account.balance_usd) + '). No credit, checkout or paid agent was started.');
           state.hostingOffset = 0;
           await loadHosting();
         } finally {
-          state.hostingBusy = false;
-          el('openHostingAccountBtn').disabled = false;
+          // A finished older action must not clear a newer session's busy state.
+          if (generation === state.generation) {
+            state.hostingBusy = false;
+            el('openHostingAccountBtn').disabled = false;
+          }
         }
       }
 
@@ -2753,7 +2764,7 @@ export function buildOpenApiDocument(origin: string) {
             purchased_units: { type: 'string', pattern: '^[0-9]+$' }, purchased_usd: { type: 'string', description: 'Display only. Positive paid balance; 0 when the account carries reversal debt.' },
             promo_units: { type: 'string', pattern: '^[0-9]+$' }, promo_usd: { type: 'string', description: 'Unexpired promotional units only (0 once promo_expires_at has passed).' }, promo_expires_at: { type: 'string', format: 'date-time' },
             reversal_debt_units: { type: 'string', pattern: '^[0-9]+$' }, reversal_debt_usd: { type: 'string', description: 'Absolute paid shortfall left by provider reversals of already-spent credit.' },
-            balance_units: { type: 'string', pattern: '^-?[0-9]+$', description: 'purchased + unexpired promo - reversal debt. Exact integer tariff units.' }, balance_usd: { type: 'string' },
+            balance_units: { type: 'string', pattern: '^-?[0-9]+$', description: 'Net ledger balance: purchased + unexpired promo - reversal debt, exact integer tariff units. Not the available or spendable amount after reserves or holds.' }, balance_usd: { type: 'string' },
             workspaces: { type: 'object', required: ['count', 'names'], properties: { count: { type: 'integer', minimum: 0 }, names: { type: 'array', maxItems: 5, items: { type: 'string' }, description: 'Up to five names, ordered by name.' } } },
             latest_onboarding: { oneOf: [{ type: 'null' }, { type: 'object', required: ['status', 'funding_cents', 'created_at', 'updated_at', 'provisioned_at', 'last_error'], properties: {
               status: { enum: ['open', 'funded', 'provisioning', 'provisioned', 'cancelled'] }, funding_cents: { type: 'integer' }, created_at: { type: 'string', format: 'date-time' },

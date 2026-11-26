@@ -23,7 +23,7 @@ const page = (accounts: any[], extra: Record<string, unknown> = {}) => ({
   total: accounts.length, limit: 25, offset: 0, has_more: false, accounts, ...extra,
 });
 
-async function run(scenario: 'list' | 'empty' | 'error' | 'open' | 'identity-change' | 'logout-race' | 'rejected') {
+async function run(scenario: 'list' | 'empty' | 'error' | 'open' | 'identity-change' | 'logout-race' | 'rejected' | 'sign-logout' | 'sign-reconnect' | 'sign-identity-swap') {
   const key = generateSecretKey(), pubkey = getPublicKey(key), npub = nip19.npubEncode(pubkey);
   const reads: string[] = [], posts: { raw: string; event: any }[] = [];
   let accounts: any[] = scenario === 'list' ? [
@@ -68,6 +68,10 @@ async function run(scenario: 'list' | 'empty' | 'error' | 'open' | 'identity-cha
         signEvent: async (e: any) => {
           if (scenario === 'rejected' && e.tags.some((t: string[]) => t[0] === 'payload')) throw new Error('Signer declined');
           (window as any).__signs++;
+          if (scenario.startsWith('sign-') && e.tags.some((t: string[]) => t[0] === 'payload')) {
+            // Hold each strict signature until the test releases it, so session changes can happen mid-signing.
+            await new Promise<void>((resolve) => { ((window as any).__held ??= []).push(resolve); });
+          }
           return (window as any).fixtureSign(e);
         },
       };
@@ -126,6 +130,43 @@ async function run(scenario: 'list' | 'empty' | 'error' | 'open' | 'identity-cha
       await tab.getByText('Signer declined').waitFor();
       expect(posts.length).toBe(0);
     }
+    if (scenario.startsWith('sign-')) {
+      await data.getByText('No hosting accounts exist yet.').waitFor();
+      const held = () => tab.evaluate(() => ((window as any).__held ?? []).length);
+      const release = (i: number) => tab.evaluate((n) => (window as any).__held[n](), i);
+      await tab.locator('#openHostingAccountBtn').click();
+      for (let i = 0; i < 100 && (await held()) < 1; i++) await tab.waitForTimeout(25);
+      expect(await held()).toBe(1);
+      expect(await tab.locator('#openHostingAccountBtn').isDisabled()).toBe(true);
+      await tab.locator('#logoutBtn').click();
+      if (scenario === 'sign-logout') {
+        await release(0);
+        await tab.waitForTimeout(250);
+        expect(posts.length).toBe(0);
+        expect(await tab.locator('#openHostingAccountBtn').isEnabled()).toBe(true);
+      } else {
+        if (scenario === 'sign-identity-swap') await tab.evaluate(() => { (window as any).__identity = '1'.repeat(64); });
+        await tab.locator('#connectBtn').click();
+        await data.getByText('No hosting accounts exist yet.').waitFor();
+        if (scenario === 'sign-reconnect') {
+          // The new session starts its own action; the old action finishing must not re-enable its busy button.
+          await tab.locator('#openHostingAccountBtn').click();
+          for (let i = 0; i < 100 && (await held()) < 2; i++) await tab.waitForTimeout(25);
+          expect(await held()).toBe(2);
+          await release(0);
+          await tab.waitForTimeout(250);
+          expect(posts.length).toBe(0);
+          expect(await tab.locator('#openHostingAccountBtn').isDisabled()).toBe(true);
+          await release(1);
+          await tab.locator('#hostingData tbody tr').first().waitFor();
+          expect(posts.length).toBe(1);
+        } else {
+          await release(0);
+          await tab.waitForTimeout(250);
+          expect(posts.length).toBe(0);
+        }
+      }
+    }
     if (scenario === 'logout-race') {
       await data.getByText('No hosting accounts exist yet.').waitFor();
       accounts = [account(4)];
@@ -143,5 +184,5 @@ async function run(scenario: 'list' | 'empty' | 'error' | 'open' | 'identity-cha
   } finally { await browser.close(); server.stop(true); }
 }
 
-for (const scenario of ['list', 'empty', 'error', 'open', 'identity-change', 'rejected', 'logout-race'] as const)
+for (const scenario of ['list', 'empty', 'error', 'open', 'identity-change', 'rejected', 'logout-race', 'sign-logout', 'sign-reconnect', 'sign-identity-swap'] as const)
   test(`admin hosting accounts view: ${scenario}`, () => run(scenario), 30000);
