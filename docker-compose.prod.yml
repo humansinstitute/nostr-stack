@@ -141,7 +141,7 @@ services:
     build:
       context: .
       args:
-        BUN_IMAGE: ${TOWER_BUN_IMAGE:-oven/bun:1.2.23}
+        BUN_IMAGE: ${TOWER_BUN_IMAGE:-oven/bun:1.4.4}
         TOWER_BUILD_TIME: ${TOWER_BUILD_TIME:-}
         TOWER_GIT_COMMIT: ${TOWER_GIT_COMMIT:-}
         TOWER_GIT_BRANCH: ${TOWER_GIT_BRANCH:-}
