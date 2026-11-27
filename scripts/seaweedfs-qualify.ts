@@ -198,7 +198,8 @@ async function main() {
   }
 
   // 2. S3 gRPC 18333 negative probes (unauthenticated & forged Bearer token must fail closed)
-  const fakeJwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjk5OTk5OTk5OTl9.invalid-signature';
+  const b64url = (v: object) => Buffer.from(JSON.stringify(v)).toString('base64url');
+  const fakeJwt = [b64url({ alg: 'HS256', typ: 'JWT' }), b64url({ exp: 9999999999 }), 'invalid-signature'].join('.');
   for (const method of [
     '/messaging_pb.SeaweedS3IamCache/PutIdentity',
     '/messaging_pb.SeaweedS3IamCache/RemoveIdentity',
@@ -279,7 +280,7 @@ async function main() {
   );
 
   // Wrong-key & least-privilege checks
-  const badS3 = new S3Client({ region: 'us-east-1', endpoint, forcePathStyle: true, maxAttempts: 1, credentials: { accessKeyId: 'wrong-key', secretAccessKey: 'wrong-secret-0123456789' } });
+  const badS3 = new S3Client({ region: 'us-east-1', endpoint, forcePathStyle: true, maxAttempts: 1, credentials: { accessKeyId: `wrong-${randomUUID()}`, secretAccessKey: randomBytes(24).toString('hex') } });
   const appS3 = new S3Client({ region: 'us-east-1', endpoint, forcePathStyle: true, maxAttempts: 1, credentials: { accessKeyId: appKey, secretAccessKey: appSecret } });
 
   try {

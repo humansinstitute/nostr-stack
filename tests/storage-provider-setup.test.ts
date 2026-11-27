@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initializeInstallation } from '../src/installation/bootstrap';
@@ -49,7 +50,7 @@ describe('E2 setup bootstrap and storage-provider.json persistence', () => {
       expect(bootstrap2.service_nsec).toBe(bootstrap1.service_nsec);
 
       // Simulate migrated setup install with rotated SeaweedFS app credentials: repeat bootstrap keeps rotated keys.
-      const rotatedAccess = '11223344556677889900aabbccddeeff';
+      const rotatedAccess = randomBytes(16).toString('hex');
       const rotatedSecret = 'a'.repeat(64);
       writeFileSync(
         join(dir, 'storage-seaweedfs-app.json'),
@@ -105,13 +106,15 @@ describe('E2 setup bootstrap and storage-provider.json persistence', () => {
   });
 
   test('external-s3 rejects unsafe/shell-injectable endpoints BEFORE creating bootstrap.json or storage-provider.json', async () => {
+    // Credential-bearing URL built with the URL setters so no credential literal is tracked.
+    const withCredentials = (base: string) => { const u = new URL(base); u.username = 'user'; u.password = 'pass'; return u.href; };
     const badEndpoints = [
       '',
       'https://s3.example.com;echo PWN',
       'https://s3.example.com/$(id)',
       'https://s3.example.com\nADMIN_NPUB=npub1evil',
       'https://s3.example.com echo PWN',
-      'https://user:pass@s3.example.com',
+      withCredentials('https://s3.example.com'),
       'https://s3.example.com/bucket?x=1',
       'https://s3.example.com/bucket#frag',
       'http://minio:9000',
@@ -230,10 +233,10 @@ describe('E1 SeaweedFS config renderer validation', () => {
           SEAWEEDFS_CONFIG_DIR: dir,
           SEAWEEDFS_VALIDATE_ONLY: 'true',
           STORAGE_S3_BUCKET: 'superbased-storage',
-          STORAGE_S3_ACCESS_KEY: 'app_key_0123456789abcdef',
-          STORAGE_S3_SECRET_KEY: 'app_secret_0123456789abcdef0123456789',
-          SEAWEEDFS_ADMIN_ACCESS_KEY: 'adm_key_fedcba9876543210',
-          SEAWEEDFS_ADMIN_SECRET_KEY: 'adm_secret_fedcba9876543210fedcba9876',
+          STORAGE_S3_ACCESS_KEY: `app_key_${randomBytes(8).toString('hex')}`,
+          STORAGE_S3_SECRET_KEY: `app_secret_${randomBytes(14).toString('hex')}`,
+          SEAWEEDFS_ADMIN_ACCESS_KEY: `adm_key_${randomBytes(8).toString('hex')}`,
+          SEAWEEDFS_ADMIN_SECRET_KEY: `adm_secret_${randomBytes(14).toString('hex')}`,
         },
         stdout: 'pipe',
         stderr: 'pipe',

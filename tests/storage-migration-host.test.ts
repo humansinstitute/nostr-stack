@@ -12,7 +12,8 @@ function tmp() {
   return mkdtempSync(join(tmpdir(), 'nstack-host-lib-'));
 }
 
-const creds = { appAccessKey: 'APPKEY1234567890ABCD', appSecretKey: 'appsecretappsecretappsecret12', adminAccessKey: 'ADMINKEY1234567890AB', adminSecretKey: 'adminsecretadminsecret1234' };
+// Synthetic identities generated per run (distinct app/admin, safe alphabet).
+const creds = { appAccessKey: generateCredential('access'), appSecretKey: generateCredential('secret'), adminAccessKey: generateCredential('access'), adminSecretKey: generateCredential('secret') };
 
 function container(over: Partial<ContainerView> & { running?: boolean; nets?: string[]; ports?: Record<string, any> } = {}): ContainerView {
   return {
@@ -53,7 +54,10 @@ describe('storage migration host helpers', () => {
   });
 
   test('unsafe URLs and credentials are rejected before anything is written', () => {
-    for (const bad of ['https://x.org;id', 'https://u:p@x.org', 'https://x.org/?a=1', 'ftp://x.org', 'https://x.org/$(id)', 'https://x .org']) {
+    const credentialed = new URL('https://x.org');
+    credentialed.username = 'u';
+    credentialed.password = 'p';
+    for (const bad of ['https://x.org;id', credentialed.href, 'https://x.org/?a=1', 'ftp://x.org', 'https://x.org/$(id)', 'https://x .org']) {
       expect(() => assertSafeUrl('U', bad)).toThrow(HostError);
     }
     const dir = tmp();

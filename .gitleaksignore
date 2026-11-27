@@ -7,3 +7,10 @@ e77514af45668ff89104d956b68973f638a0daa0:tests/forgejo-native-boundary.test.ts:g
 d4b48bbe42ea325bc6dff6a34e7a2c5478bd9614:src/openapi.ts:generic-api-key:6850
 8dc34ac7464f82e58498c0d290e5ddf5371144ac:src/openapi.ts:generic-api-key:6771
 3ebc8d0bf43750aea523195e1e34320fc8081a4c:src/openapi.ts:generic-api-key:6931
+# b2514a9 synthetic fixtures (wrong-key probe, fake .invalid JWT, placeholder test credentials); later commits generate them at runtime.
+b2514a9818c02167ccfadac1eb6b44774565473a:scripts/seaweedfs-qualify.ts:generic-api-key:282
+b2514a9818c02167ccfadac1eb6b44774565473a:scripts/seaweedfs-qualify.ts:jwt:201
+b2514a9818c02167ccfadac1eb6b44774565473a:tests/storage-migration-host.test.ts:generic-api-key:15
+b2514a9818c02167ccfadac1eb6b44774565473a:tests/storage-provider-setup.test.ts:generic-api-key:52
+b2514a9818c02167ccfadac1eb6b44774565473a:tests/storage-provider-setup.test.ts:generic-api-key:235
+b2514a9818c02167ccfadac1eb6b44774565473a:tests/storage-provider-setup.test.ts:generic-api-key:236
