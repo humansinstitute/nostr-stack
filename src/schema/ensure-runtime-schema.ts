@@ -4452,6 +4452,9 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
   await sql.unsafe(hostingWorkspaceBillingV2Sql);
   await sql.unsafe(onboardingV1Sql);
   await sql.unsafe(hostingFundingV1Sql);
+  // On a fresh database 001_init.sql's ALTER adding pg_workspace_id has not run yet, but
+  // the storage peak functions reference it; ensure the column first (idempotent).
+  await sql.unsafe(`ALTER TABLE v4_storage_objects ADD COLUMN IF NOT EXISTS pg_workspace_id UUID REFERENCES flightdeck_pg_workspaces(id)`);
   await sql.unsafe(hostingStoragePeakV1Sql);
   await sql.unsafe(workspaceExportV1Sql);
   await sql.unsafe(hostingLifecycleV1Sql);
