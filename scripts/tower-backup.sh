@@ -248,8 +248,10 @@ verify() {
     [[ $actual == "$expected" ]] || die "checksum mismatch: $file"
     case "$comp_format" in
       pg_dump-custom)
+        # pg_restore --list reads only the table of contents and exits; store the whole stream first
+        # so a large dump is fully decrypted and age never dies of SIGPIPE under pipefail.
         age --decrypt --identity "$IDENTITY" "$BACKUP/$file" \
-          | docker run --rm -i postgres:16-alpine pg_restore --list >/dev/null
+          | docker run --rm -i postgres:16-alpine sh -ec 'cat > /tmp/dump && pg_restore --list /tmp/dump >/dev/null'
         ;;
       tar|docker-image-archive)
         age --decrypt --identity "$IDENTITY" "$BACKUP/$file" | tar -tf - >/dev/null

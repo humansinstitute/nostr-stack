@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres from 'postgres';
@@ -688,6 +688,49 @@ describe('E5 tower-backup.sh manifest component validation', () => {
       });
       expect(badIdentity.exitCode).not.toBe(0);
       expect(badIdentity.stderr.toString()).toContain('lacks a valid image_ref/image_id');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('E5 tower-backup.sh verify on production-sized dumps', () => {
+  test('verify drains each encrypted dump even when pg_restore reads only the table of contents', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tower-backup-large-'));
+    try {
+      if (Bun.spawnSync(['age-keygen', '-o', join(dir, 'key.txt')]).exitCode !== 0) return;
+      const recipient = readFileSync(join(dir, 'key.txt'), 'utf8').match(/public key:\s*(age1[a-z0-9]+)/i)![1]!;
+      const bdir = join(dir, 'set');
+      mkdirSync(bdir);
+      const enc = (name: string, bytes: Buffer) => {
+        expect(Bun.spawnSync(['age', '--encrypt', '--recipient', recipient, '--output', join(bdir, name)], { stdin: bytes }).exitCode).toBe(0);
+        return createHash('sha256').update(readFileSync(join(bdir, name))).digest('hex');
+      };
+      // Far larger than a pipe buffer, like a real production dump.
+      const big = randomBytes(4 * 1024 * 1024);
+      const tar = Bun.spawnSync(['tar', '-cf', '-', '-C', dir, 'key.txt']).stdout;
+      const components = [
+        { name: 'main-postgres', file: 'main-postgres.dump.age', sha256: enc('main-postgres.dump.age', big), format: 'pg_dump-custom' },
+        { name: 'graph-postgres', file: 'graph-postgres.dump.age', sha256: enc('graph-postgres.dump.age', big), format: 'pg_dump-custom' },
+        { name: 'minio', file: 'minio-data.tar.age', sha256: enc('minio-data.tar.age', Buffer.from(tar)), format: 'tar' },
+      ];
+      enc('manifest.json.age', Buffer.from(JSON.stringify({ format: 'wingman-tower-backup', version: 2, storage_provider: 'minio', created_at: new Date().toISOString(), components })));
+      // Fake docker: pg_restore --list reads only the TOC and exits without draining stdin.
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(join(bin, 'docker'), `#!/bin/sh
+case "$*" in
+  *"cat > /tmp/dump"*) cat >/dev/null; exit 0;;
+  *"pg_restore --list"*) head -c 5 >/dev/null; exit 0;;
+  *) exit 0;;
+esac
+`, { mode: 0o755 });
+      const res = Bun.spawnSync(['bash', join(import.meta.dir, '../scripts/tower-backup.sh'), 'verify', '--backup', bdir, '--identity', join(dir, 'key.txt')], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdout: 'pipe', stderr: 'pipe',
+      });
+      expect(res.stderr.toString()).toBe('');
+      expect(res.exitCode).toBe(0);
+      expect(res.stdout.toString()).toContain('Verified backup set');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
