@@ -1115,7 +1115,7 @@ function fencedEtagChangeError(ids: string[]) {
   return new MigrationError(
     MIGRATION_EXIT.PREFLIGHT_BLOCK,
     'fenced_etag_change_unsupported',
-    `${ids.length} storage object(s) managed by an active app-db content fence would get a different ETag on the target, and the fence forbids rebinding them. The managing app must release its fence for these objects before migrating (no data was switched). Objects: ${ids.slice(0, 20).join(', ')}${ids.length > 20 ? ', …' : ''}`,
+    `${ids.length} storage object(s) managed by an active app-db content fence would get a different ETag on the target, and the fence forbids rebinding them. Migrating them requires a supported maintenance or handoff path with the managing app; the migrator refuses rather than disabling the fence (nothing was switched). Objects: ${ids.slice(0, 20).join(', ')}${ids.length > 20 ? ', …' : ''}`,
     { object_ids: ids },
   );
 }

@@ -43,6 +43,10 @@ NStack defaults new installations to **SeaweedFS 4.55**, built from pinned upstr
   - Isolates `seaweedfs` from non-NStack sidecars (`nostr-relay`, `blossom`, Postgres) via dedicated `storage-internal` (`internal: true`) + `storage-host` networks.
   - Supports `-s3.externalUrl` and `-s3.allowedOrigins=*` for public presigned upload/download CORS parity behind reverse proxies/tunnels.
 
+## App-db content fences
+
+Storage objects referenced by an active app-db content fence (`app_db_content_fences`) cannot be updated. The migration therefore rewrites `sha256_verified_etag` only where the target ETag really differs and checks and locks unchanged rows without writing them (single-part objects keep the same MD5 ETag on MinIO and SeaweedFS). A fenced object whose ETag would change (for example a multipart upload) is refused during the online precopy (`fenced_etag_change_unsupported`, exit `10`) and again before the switch; migrating it requires a supported maintenance or handoff path with the managing app. The migrator never disables a fence. Remote preflight must run the same check.
+
 ## Split Authority: Host Orchestration vs. Data CLI
 
 - **Data CLI (`bun run nstack:migrate-storage <cmd>` / `src/scripts/migrate-storage.ts`):** Runs inside a labelled one-off Tower container (`nstack.migration=1`, `nstack.migration.fingerprint=<fp>`, `nstack.migration.run=<run_id>`) with DB and internal storage network access **only** — no Docker socket, no host mounts, no CapRover credentials. Holds a session-level `pg_advisory_lock`.
