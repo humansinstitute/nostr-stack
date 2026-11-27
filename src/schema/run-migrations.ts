@@ -4,6 +4,10 @@ import { fileURLToPath } from 'url';
 import postgres from 'postgres';
 import { getDb, closeDb } from '../db';
 import { config } from '../config';
+import {
+  checkStorageMigrationStartupGuard,
+  StorageStartupGuardError,
+} from '../services/storage-startup-guard';
 import { ensureRuntimeSchema } from './ensure-runtime-schema';
 import { splitSqlStatements } from './sql-statements';
 
@@ -38,6 +42,12 @@ async function run() {
   await ensureDatabaseExists();
 
   const sql = getDb();
+
+  // Fail closed before applying DDL if a quiesced/intermediate storage migration blocks startup (§7.6).
+  await checkStorageMigrationStartupGuard(sql, {
+    provider: config.storage.provider,
+    startRunId: process.env.NSTACK_MIGRATION_START_RUN_ID,
+  });
 
   const migrationPath = join(__dirname, '001_init.sql');
   const migration = readFileSync(migrationPath, 'utf-8');
@@ -86,7 +96,12 @@ async function run() {
   await closeDb();
 }
 
-run().catch((err) => {
+run().catch(async (err) => {
+  await closeDb().catch(() => {});
+  if (err instanceof StorageStartupGuardError) {
+    console.error(`[nstack][startup-guard] ${err.code}: ${err.message}`);
+    process.exit(42);
+  }
   console.error('Migration failed:', err);
   process.exit(1);
 });

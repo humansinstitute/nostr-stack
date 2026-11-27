@@ -13,6 +13,8 @@ services:
     command: ["bun", "src/installation/bootstrap.ts"]
     environment:
       NSTACK_UNSUPPORTED_OVERRIDES: "${DB_USER:+DB_USER }${DB_PASSWORD:+DB_PASSWORD }${STORAGE_S3_ACCESS_KEY:+STORAGE_S3_ACCESS_KEY }${STORAGE_S3_SECRET_KEY:+STORAGE_S3_SECRET_KEY }${SUPERBASED_SERVICE_NSEC:+SUPERBASED_SERVICE_NSEC }"
+      NSTACK_SETUP_STORAGE_PROVIDER: "${NSTACK_SETUP_STORAGE_PROVIDER:-}"
+      STORAGE_S3_ENDPOINT: "${STORAGE_S3_ENDPOINT:-}"
     volumes: ["bootstrap:/run/nstack", "database-credentials:/run/nstack-db", "storage-credentials:/run/nstack-storage"]
     restart: "no"
   postgres:
@@ -27,7 +29,47 @@ services:
       interval: 3s
       timeout: 3s
       retries: 40
+  seaweedfs:
+    profiles: ["seaweedfs"]
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9}
+    user: "1000:1000"
+    entrypoint: ["/bin/sh", "/run/nstack-storage/render-seaweedfs-config.sh"]
+    environment:
+      SEAWEEDFS_ENV_FILE: /run/nstack-storage/runtime.env
+      SEAWEEDFS_MIN_FREE_SPACE: "${SEAWEEDFS_MIN_FREE_SPACE:-10}"
+      SEAWEEDFS_VOLUME_SIZE_LIMIT_MB: "${SEAWEEDFS_VOLUME_SIZE_LIMIT_MB:-1024}"
+    depends_on:
+      bootstrap: { condition: service_completed_successfully }
+    volumes: ["storage-credentials:/run/nstack-storage:ro", "storage-seaweedfs:/data"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    pids_limit: 512
+    mem_limit: ${SEAWEEDFS_MEM_LIMIT:-2g}
+    cpus: ${SEAWEEDFS_CPUS:-2.0}
+    networks:
+      - storage-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8333/readyz"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+  seaweedfs-init:
+    profiles: ["seaweedfs"]
+    image: nstack-setup-local:${NSTACK_BUILD_COMMIT:-0.2.0}
+    pull_policy: never
+    entrypoint: ["sh", "-ec", "set -a; . /run/nstack-storage/runtime.env; export STORAGE_PROVIDER=seaweedfs STORAGE_S3_ENDPOINT=http://seaweedfs:8333 STORAGE_INIT_ACCESS_KEY=$$SEAWEEDFS_ADMIN_ACCESS_KEY STORAGE_INIT_SECRET_KEY=$$SEAWEEDFS_ADMIN_SECRET_KEY STORAGE_INIT_WRITE_SENTINEL=true STORAGE_INIT_PROBE_RW=true; exec bun run src/scripts/storage-init.ts"]
+    depends_on:
+      seaweedfs: { condition: service_healthy }
+    volumes: ["storage-credentials:/run/nstack-storage:ro"]
+    networks:
+      - storage-internal
+    restart: "no"
   minio:
+    profiles: ["minio"]
     build:
       context: .
       dockerfile: docker/Dockerfile.setup-storage
@@ -37,6 +79,8 @@ services:
     depends_on:
       bootstrap: { condition: service_completed_successfully }
     volumes: ["storage-credentials:/run/nstack-storage:ro", "storage:/data"]
+    networks:
+      - storage-internal
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/live"]
@@ -44,12 +88,16 @@ services:
       timeout: 3s
       retries: 40
   storage-init:
-    image: nstack-storage-local:2025-10-15
+    profiles: ["minio"]
+    image: nstack-setup-local:${NSTACK_BUILD_COMMIT:-0.2.0}
     pull_policy: never
-    entrypoint: ["sh", "-ec", "set -a; . /run/nstack-storage/runtime.env; mc alias set local http://minio:9000 $$STORAGE_S3_ACCESS_KEY $$STORAGE_S3_SECRET_KEY >/dev/null; mc mb --ignore-existing local/$$STORAGE_S3_BUCKET; mc anonymous set none local/$$STORAGE_S3_BUCKET"]
+    entrypoint: ["sh", "-ec", "set -a; . /run/nstack-storage/runtime.env; export STORAGE_PROVIDER=minio STORAGE_S3_ENDPOINT=http://minio:9000 STORAGE_INIT_WRITE_SENTINEL=false STORAGE_INIT_ENFORCE_PRIVATE_POLICY=true; exec bun run src/scripts/storage-init.ts"]
     depends_on:
       minio: { condition: service_healthy }
     volumes: ["storage-credentials:/run/nstack-storage:ro"]
+    networks:
+      - storage-internal
+    restart: "no"
   tower:
     build:
       context: .
@@ -62,12 +110,19 @@ services:
     pull_policy: never
     entrypoint: ["sh", "-ec", "set -a; . /run/nstack/runtime.env; exec sh docker/entrypoint.sh"]
     depends_on:
+      bootstrap: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
-      storage-init: { condition: service_completed_successfully }
+      # The active provider's one-shot initializer finishes first (only one profile is enabled).
+      seaweedfs-init: { condition: service_completed_successfully, required: false }
+      storage-init: { condition: service_completed_successfully, required: false }
     environment:
       PORT: "3100"
       NSTACK_SETTINGS_DIRECTORY: /run/nstack-settings
+      NSTACK_MIGRATION_START_RUN_ID: "${NSTACK_MIGRATION_START_RUN_ID:-}"
     volumes: ["bootstrap:/run/nstack", "settings:/run/nstack-settings"]
+    networks:
+      - default
+      - storage-internal
     ports: ["127.0.0.1:${NSTACK_LOCAL_PORT:-3101}:3100", "127.0.0.1:43111:43101"]
     restart: unless-stopped
     healthcheck:
@@ -83,12 +138,18 @@ services:
       NSTACK_SETTINGS_DIRECTORY: /run/nstack-settings
       NSTACK_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME}
     volumes: ["settings:/run/nstack-settings", "/var/run/docker.sock:/var/run/docker.sock"]
+    networks:
+      - default
     read_only: true
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
     restart: unless-stopped
     depends_on:
       tower: { condition: service_healthy }
+networks:
+  default:
+  storage-internal:
+    internal: true
 volumes:
   settings:
   database-credentials:
@@ -96,3 +157,4 @@ volumes:
   bootstrap:
   postgres:
   storage:
+  storage-seaweedfs:

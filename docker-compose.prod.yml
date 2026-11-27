@@ -3,7 +3,7 @@ name: ${COMPOSE_PROJECT_NAME:-wingman-tower}
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: wingman-tower-postgres
+    container_name: ${POSTGRES_CONTAINER_NAME:-wingman-tower-postgres}
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${DB_NAME:-coworker_v4}
@@ -19,7 +19,7 @@ services:
 
   graph-postgres:
     image: apache/age:release_PG16_1.6.0
-    container_name: wingman-tower-graph-postgres
+    container_name: ${GRAPH_POSTGRES_CONTAINER_NAME:-wingman-tower-graph-postgres}
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${GRAPH_DB_NAME:-tower_graph}
@@ -34,8 +34,11 @@ services:
       retries: 20
 
   minio:
-    image: minio/minio:latest
-    container_name: wingman-tower-minio
+    profiles: ["minio"]
+    # Pinned to the verified cached MinIO CE digest (upstream removed unpinned Docker Hub tags).
+    image: ${MINIO_IMAGE:-minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e}
+    pull_policy: never
+    container_name: ${MINIO_CONTAINER_NAME:-wingman-tower-minio}
     restart: unless-stopped
     environment:
       MINIO_ROOT_USER: ${STORAGE_S3_ACCESS_KEY:?set STORAGE_S3_ACCESS_KEY}
@@ -53,29 +56,109 @@ services:
       retries: 30
 
   minio-init:
-    image: minio/mc:latest
-    container_name: wingman-tower-minio-init
+    profiles: ["minio"]
+    # Uses the built Tower Bun/AWS S3 initializer instead of the removed MinIO mc image.
+    image: ${TOWER_IMAGE:-wingman-tower-tower:latest}
+    pull_policy: never
+    container_name: ${MINIO_INIT_CONTAINER_NAME:-wingman-tower-minio-init}
     restart: "no"
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      until mc alias set local http://minio:9000 $$STORAGE_S3_ACCESS_KEY $$STORAGE_S3_SECRET_KEY; do
-        echo 'waiting for minio...';
-        sleep 2;
-      done &&
-      mc mb -p local/$$STORAGE_S3_BUCKET || true &&
-      mc anonymous set none local/$$STORAGE_S3_BUCKET || true
-      "
+    entrypoint: ["bun", "run", "src/scripts/storage-init.ts"]
     environment:
+      STORAGE_PROVIDER: minio
+      STORAGE_S3_ENDPOINT: http://minio:9000
+      STORAGE_S3_REGION: ${STORAGE_S3_REGION:-us-east-1}
       STORAGE_S3_ACCESS_KEY: ${STORAGE_S3_ACCESS_KEY:?set STORAGE_S3_ACCESS_KEY}
       STORAGE_S3_SECRET_KEY: ${STORAGE_S3_SECRET_KEY:?set STORAGE_S3_SECRET_KEY}
       STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-superbased-storage}
+      STORAGE_S3_FORCE_PATH_STYLE: ${STORAGE_S3_FORCE_PATH_STYLE:-true}
+      STORAGE_INIT_WRITE_SENTINEL: "false"
+      STORAGE_INIT_ENFORCE_PRIVATE_POLICY: "true"
+
+  seaweedfs:
+    profiles: ["seaweedfs"]
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9}
+    container_name: ${SEAWEEDFS_CONTAINER_NAME:-wingman-tower-seaweedfs}
+    user: "1000:1000"
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/nstack/render-seaweedfs-config.sh"]
+    env_file:
+      - path: ${SEAWEEDFS_ADMIN_ENV_FILE:-.env.seaweedfs-admin}
+        required: false
+    environment:
+      STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-superbased-storage}
+      STORAGE_S3_ACCESS_KEY: ${SEAWEEDFS_ACCESS_KEY:-${STORAGE_S3_ACCESS_KEY:?set STORAGE_S3_ACCESS_KEY}}
+      STORAGE_S3_SECRET_KEY: ${SEAWEEDFS_SECRET_KEY:-${STORAGE_S3_SECRET_KEY:?set STORAGE_S3_SECRET_KEY}}
+      SEAWEEDFS_ACTIVE_PROVIDER: ${STORAGE_PROVIDER:-minio}
+      SEAWEEDFS_EXPLICIT_ACCESS_KEY: ${SEAWEEDFS_ACCESS_KEY:-}
+      SEAWEEDFS_EXPLICIT_SECRET_KEY: ${SEAWEEDFS_SECRET_KEY:-}
+      SEAWEEDFS_ADMIN_ACCESS_KEY_OVERRIDE: ${SEAWEEDFS_ADMIN_ACCESS_KEY:-}
+      SEAWEEDFS_ADMIN_SECRET_KEY_OVERRIDE: ${SEAWEEDFS_ADMIN_SECRET_KEY:-}
+      SEAWEEDFS_JWT_SECRET_OVERRIDE: ${SEAWEEDFS_JWT_SECRET:-}
+      SEAWEEDFS_JWT_READ_SECRET_OVERRIDE: ${SEAWEEDFS_JWT_READ_SECRET:-}
+      SEAWEEDFS_JWT_FILER_SECRET_OVERRIDE: ${SEAWEEDFS_JWT_FILER_SECRET:-}
+      SEAWEEDFS_JWT_FILER_READ_SECRET_OVERRIDE: ${SEAWEEDFS_JWT_FILER_READ_SECRET:-}
+      SEAWEEDFS_JWT_FILER_SUBSCRIBE_SECRET_OVERRIDE: ${SEAWEEDFS_JWT_FILER_SUBSCRIBE_SECRET:-}
+      SEAWEEDFS_ALLOWED_ORIGINS: ${SEAWEEDFS_ALLOWED_ORIGINS:-*}
+      SEAWEEDFS_EXTERNAL_URL: ${SEAWEEDFS_EXTERNAL_URL:-${STORAGE_S3_ENDPOINT_PUBLIC:-}}
+      SEAWEEDFS_MIN_FREE_SPACE: ${SEAWEEDFS_MIN_FREE_SPACE:-10}
+      SEAWEEDFS_VOLUME_SIZE_LIMIT_MB: ${SEAWEEDFS_VOLUME_SIZE_LIMIT_MB:-1024}
+    ports:
+      - "${SEAWEEDFS_HOST_BIND_ADDRESS:-127.0.0.1}:${SEAWEEDFS_API_HOST_PORT:-8333}:8333"
+    volumes:
+      - tower-seaweedfs-data:/data
+      - ./deploy/nstack/render-seaweedfs-config.sh:/opt/nstack/render-seaweedfs-config.sh:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    pids_limit: 512
+    mem_limit: ${SEAWEEDFS_MEM_LIMIT:-2g}
+    cpus: ${SEAWEEDFS_CPUS:-2.0}
+    networks:
+      storage-internal:
+      storage-host:
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8333/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  seaweedfs-init:
+    profiles: ["seaweedfs"]
+    image: ${TOWER_IMAGE:-wingman-tower-tower:latest}
+    pull_policy: never
+    container_name: ${SEAWEEDFS_INIT_CONTAINER_NAME:-wingman-tower-seaweedfs-init}
+    restart: "no"
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    entrypoint: ["bun", "run", "src/scripts/storage-init.ts"]
+    env_file:
+      - path: ${SEAWEEDFS_ADMIN_ENV_FILE:-.env.seaweedfs-admin}
+        required: false
+    environment:
+      STORAGE_PROVIDER: seaweedfs
+      STORAGE_S3_ENDPOINT: http://seaweedfs:8333
+      STORAGE_S3_REGION: ${STORAGE_S3_REGION:-us-east-1}
+      STORAGE_INIT_ACCESS_KEY_OVERRIDE: ${SEAWEEDFS_ADMIN_ACCESS_KEY:-}
+      STORAGE_INIT_SECRET_KEY_OVERRIDE: ${SEAWEEDFS_ADMIN_SECRET_KEY:-}
+      STORAGE_S3_ACCESS_KEY: ${SEAWEEDFS_ACCESS_KEY:-${STORAGE_S3_ACCESS_KEY:?set STORAGE_S3_ACCESS_KEY}}
+      STORAGE_S3_SECRET_KEY: ${SEAWEEDFS_SECRET_KEY:-${STORAGE_S3_SECRET_KEY:?set STORAGE_S3_SECRET_KEY}}
+      STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-superbased-storage}
+      STORAGE_S3_FORCE_PATH_STYLE: ${STORAGE_S3_FORCE_PATH_STYLE:-true}
+      STORAGE_INIT_WRITE_SENTINEL: "true"
+      STORAGE_INIT_PROBE_RW: "true"
+    networks:
+      storage-internal:
 
   nostr-relay:
     image: docker.io/scsibug/nostr-rs-relay:0.10.0@sha256:48d54c2d2781577cf3ed2951112f0953dc2c5e7c9d2ea20c64e8c0fa37d16e4d
-    container_name: wingman-tower-nostr-relay
+    container_name: ${NOSTR_RELAY_CONTAINER_NAME:-wingman-tower-nostr-relay}
     restart: unless-stopped
     environment:
       NOSTR_RELAY_PUBLIC_ORIGIN: ${NOSTR_RELAY_PUBLIC_ORIGIN:?set NOSTR_RELAY_PUBLIC_ORIGIN}
@@ -104,7 +187,7 @@ services:
 
   blossom:
     image: ghcr.io/hzrd149/blossom-server:6.4.1@sha256:446fa6c4b0ca529a1fbceabf5ea75839b5b76dfb0d0e1d150f3bae5f9a52b3b8
-    container_name: wingman-tower-blossom
+    container_name: ${BLOSSOM_CONTAINER_NAME:-wingman-tower-blossom}
     restart: unless-stopped
     environment:
       BLOSSOM_REQUIRE_CONFIG: "1"
@@ -145,15 +228,14 @@ services:
         TOWER_BUILD_TIME: ${TOWER_BUILD_TIME:-}
         TOWER_GIT_COMMIT: ${TOWER_GIT_COMMIT:-}
         TOWER_GIT_BRANCH: ${TOWER_GIT_BRANCH:-}
-    container_name: wingman-tower-b3
+    image: ${TOWER_IMAGE:-wingman-tower-tower:latest}
+    container_name: ${TOWER_CONTAINER_NAME:-wingman-tower-b3}
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       graph-postgres:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     env_file:
       - ${TOWER_ENV_FILE:-.env.prod}
     environment:
@@ -175,7 +257,9 @@ services:
       GRAPH_AGE_GRAPH_NAME: ${GRAPH_AGE_GRAPH_NAME:-tower_memory}
       GRAPH_ALLOWED_NPUBS: ${GRAPH_ALLOWED_NPUBS:-}
       PORT: ${TOWER_PORT:-3100}
-      STORAGE_S3_ENDPOINT: ${STORAGE_S3_ENDPOINT:-http://minio:9000}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
+      STORAGE_S3_DEFAULT_MINIO_ENDPOINT: http://minio:9000
+      STORAGE_S3_ENDPOINT: ${STORAGE_S3_ENDPOINT:-}
       STORAGE_S3_ENDPOINT_PUBLIC: ${STORAGE_S3_ENDPOINT_PUBLIC:-http://127.0.0.1:9000}
       STORAGE_S3_REGION: ${STORAGE_S3_REGION:-us-east-1}
       STORAGE_S3_ACCESS_KEY: ${STORAGE_S3_ACCESS_KEY:?set STORAGE_S3_ACCESS_KEY}
@@ -184,6 +268,19 @@ services:
       STORAGE_S3_FORCE_PATH_STYLE: ${STORAGE_S3_FORCE_PATH_STYLE:-true}
       STORAGE_PRESIGN_UPLOAD_TTL_SECONDS: ${STORAGE_PRESIGN_UPLOAD_TTL_SECONDS:-900}
       STORAGE_PRESIGN_DOWNLOAD_TTL_SECONDS: ${STORAGE_PRESIGN_DOWNLOAD_TTL_SECONDS:-900}
+      STORAGE_REQUIRE_SENTINEL: ${STORAGE_REQUIRE_SENTINEL:-}
+      NSTACK_MIGRATION_START_RUN_ID: ${NSTACK_MIGRATION_START_RUN_ID:-}
+      # Explicitly scrub SeaweedFS init/admin and internal gRPC JWT keys from Tower runtime env
+      # so Tower never holds Admin/S3Tables or gRPC signing credentials even if present in env_file.
+      SEAWEEDFS_ADMIN_ACCESS_KEY: ""
+      SEAWEEDFS_ADMIN_SECRET_KEY: ""
+      SEAWEEDFS_ACCESS_KEY: ""
+      SEAWEEDFS_SECRET_KEY: ""
+      SEAWEEDFS_JWT_SECRET: ""
+      SEAWEEDFS_JWT_READ_SECRET: ""
+      SEAWEEDFS_JWT_FILER_SECRET: ""
+      SEAWEEDFS_JWT_FILER_READ_SECRET: ""
+      SEAWEEDFS_JWT_FILER_SUBSCRIBE_SECRET: ""
       SUPERBASED_DIRECT_HTTPS_URL: ${SUPERBASED_DIRECT_HTTPS_URL:?set SUPERBASED_DIRECT_HTTPS_URL}
       ADMIN_NPUB: ${ADMIN_NPUB:?set ADMIN_NPUB}
       FLIGHT_DECK_PG_APP_NPUB: ${FLIGHT_DECK_PG_APP_NPUB:?set FLIGHT_DECK_PG_APP_NPUB}
@@ -237,15 +334,74 @@ services:
       - ${TOWER_APNS_SECRETS_DIR:-./.runtime/tower-apns-secrets}:/run/tower-apns-secrets:ro
     networks:
       default:
+      storage-internal:
     healthcheck:
       test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:3100/health');process.exit(r.ok?0:1)"]
       interval: 5s
       timeout: 5s
       retries: 30
 
+  # One-off storage migration data CLI (scripts/nstack-migrate-storage-host.ts runs it).
+  # Deliberately no env_file, no volumes and no Docker socket: DB and storage networks
+  # plus the explicit variables below only. Source/target S3 credentials are passed
+  # through from the orchestrator's process environment, never on the command line.
+  storage-migrate:
+    profiles: ["migration"]
+    image: ${TOWER_IMAGE:-wingman-tower-tower:latest}
+    pull_policy: never
+    restart: "no"
+    entrypoint: ["bun", "run", "src/scripts/migrate-storage.ts"]
+    environment:
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-coworker_v4}
+      DB_USER: ${DB_USER:?set DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      SUPERBASED_SERVICE_NSEC: ${SUPERBASED_SERVICE_NSEC:?set SUPERBASED_SERVICE_NSEC}
+      STORAGE_S3_SOURCE_PROVIDER:
+      STORAGE_S3_SOURCE_ENDPOINT:
+      STORAGE_S3_SOURCE_REGION:
+      STORAGE_S3_SOURCE_BUCKET:
+      STORAGE_S3_SOURCE_ACCESS_KEY:
+      STORAGE_S3_SOURCE_SECRET_KEY:
+      STORAGE_S3_SOURCE_FORCE_PATH_STYLE:
+      STORAGE_S3_TARGET_PROVIDER:
+      STORAGE_S3_TARGET_ENDPOINT:
+      STORAGE_S3_TARGET_REGION:
+      STORAGE_S3_TARGET_BUCKET:
+      STORAGE_S3_TARGET_ACCESS_KEY:
+      STORAGE_S3_TARGET_SECRET_KEY:
+      STORAGE_S3_TARGET_FORCE_PATH_STYLE:
+      STORAGE_MIGRATION_SOURCE_IDENTITY:
+      STORAGE_MIGRATION_REQUEST_TIMEOUT_MS:
+      HOME: /tmp
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    pids_limit: 256
+    mem_limit: ${STORAGE_MIGRATE_MEM_LIMIT:-1g}
+    networks:
+      default:
+      storage-internal:
+      migration-source:
+
+networks:
+  default:
+  storage-internal:
+    internal: true
+  storage-host:
+  # Only the fenced source store and the migration data CLI join this network.
+  migration-source:
+    internal: true
+
 volumes:
   tower-postgres-data:
   tower-graph-postgres-data:
   tower-minio-data:
+  tower-seaweedfs-data:
   tower-nostr-relay-data:
   tower-blossom-data:

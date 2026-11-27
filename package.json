@@ -24,7 +24,8 @@
     "nstack:setup": "bun scripts/nstack-start.ts",
     "nstack:host": "bun scripts/nstack-host.ts",
     "nstack:recovery": "bun scripts/nstack-recovery.ts",
-    "nstack:rm": "bun scripts/nstack-remove.ts"
+    "nstack:rm": "bun scripts/nstack-remove.ts",
+    "nstack:migrate-storage": "bun run src/scripts/migrate-storage.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1162.0",

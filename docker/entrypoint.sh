@@ -20,7 +20,17 @@ ATTEMPTS=0
 MAX_ATTEMPTS="${DB_WAIT_MAX_ATTEMPTS:-40}"
 
 echo "Waiting for Postgres and running migrations..."
-until bun run db:init >/tmp/coworker-db-init.log 2>&1; do
+while true; do
+  if bun run db:init >/tmp/coworker-db-init.log 2>&1; then
+    break
+  else
+    DB_INIT_STATUS=$?
+  fi
+  if [ "$DB_INIT_STATUS" -eq 42 ]; then
+    echo "Database init blocked by active storage migration startup guard:"
+    cat /tmp/coworker-db-init.log || true
+    exit 42
+  fi
   ATTEMPTS=$((ATTEMPTS + 1))
   if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
     echo "Database init failed after ${MAX_ATTEMPTS} attempts."

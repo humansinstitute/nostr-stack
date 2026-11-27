@@ -4485,5 +4485,6 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
   // Last: needs every workspace table to exist. Closed rollout installs nothing.
   await installStorageTracking(sql);
   await sql.unsafe(readFileSync(new URL('./app-db-native-v1.sql', import.meta.url), 'utf8'));
+  await sql.unsafe(readFileSync(new URL('./storage-migration-v1.sql', import.meta.url), 'utf8'));
 
 }

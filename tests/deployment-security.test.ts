@@ -37,11 +37,35 @@ describe('production deployment security contract', () => {
     }
   });
 
-  test('binds host-published Tower and MinIO ports to loopback by default', () => {
+  test('binds host-published Tower, MinIO, and SeaweedFS ports to loopback by default and pins storage images', () => {
     expect(compose).toContain('${TOWER_HOST_BIND_ADDRESS:-127.0.0.1}:${TOWER_HOST_PORT:-3100}:3100');
     expect(compose).toContain('${MINIO_HOST_BIND_ADDRESS:-127.0.0.1}:${MINIO_API_HOST_PORT:-9000}:9000');
     expect(compose).toContain('${MINIO_HOST_BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_HOST_PORT:-9001}:9001');
-    expect(compose).toContain('STORAGE_S3_ENDPOINT: ${STORAGE_S3_ENDPOINT:-http://minio:9000}');
+    expect(compose).toContain('${SEAWEEDFS_HOST_BIND_ADDRESS:-127.0.0.1}:${SEAWEEDFS_API_HOST_PORT:-8333}:8333');
+    expect(compose).toContain('STORAGE_S3_DEFAULT_MINIO_ENDPOINT: http://minio:9000');
+    expect(compose).toContain('STORAGE_S3_ENDPOINT: ${STORAGE_S3_ENDPOINT:-}');
+    expect(compose).toContain('chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9');
+    expect(compose).not.toContain('minio/minio:latest');
+    expect(compose).not.toContain('minio/mc:latest');
+    expect(compose).toContain('storage-internal:');
+    expect(compose).toContain('tower-seaweedfs-data:');
+  });
+
+  test('scrubs SeaweedFS admin and gRPC JWT secrets from Tower runtime container', () => {
+    const towerSection = compose.slice(compose.indexOf('\n  tower:\n'));
+    for (const secretVar of [
+      'SEAWEEDFS_ADMIN_ACCESS_KEY: ""',
+      'SEAWEEDFS_ADMIN_SECRET_KEY: ""',
+      'SEAWEEDFS_ACCESS_KEY: ""',
+      'SEAWEEDFS_SECRET_KEY: ""',
+      'SEAWEEDFS_JWT_SECRET: ""',
+      'SEAWEEDFS_JWT_READ_SECRET: ""',
+      'SEAWEEDFS_JWT_FILER_SECRET: ""',
+      'SEAWEEDFS_JWT_FILER_READ_SECRET: ""',
+      'SEAWEEDFS_JWT_FILER_SUBSCRIBE_SECRET: ""',
+    ]) {
+      expect(towerSection).toContain(secretVar);
+    }
   });
 
   test('does not ship Forgejo, OIDC secrets or a Git proxy in the production runtime',()=>{

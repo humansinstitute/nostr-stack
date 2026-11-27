@@ -1,8 +1,10 @@
 import { loadInstallationSettings } from './installation/settings';
 loadInstallationSettings();
 import { installedAdmin } from './installation/state';
+import { resolveStorageProviderConfig } from './services/storage-provider';
 
 const setupMode = Boolean(process.env.NSTACK_SETUP_DIRECTORY);
+const resolvedStorage = resolveStorageProviderConfig(process.env);
 
 function csvValues(value: string | undefined): string[] {
   return String(value || '')
@@ -41,8 +43,10 @@ export const config = {
   directHttpsUrl: setupMode ? String(process.env.SUPERBASED_DIRECT_HTTPS_URL || '') : requiredEnv('SUPERBASED_DIRECT_HTTPS_URL'),
   adminNpub: setupMode ? installedAdmin() || String(process.env.ADMIN_NPUB || '') : requiredNpubEnv('ADMIN_NPUB'),
   storage: {
+    provider: resolvedStorage.provider,
+    providerExplicit: resolvedStorage.explicit,
     blossomPublicOrigin: String(process.env.BLOSSOM_PUBLIC_ORIGIN || '').trim(),
-    s3Endpoint: (process.env.STORAGE_S3_ENDPOINT || 'http://127.0.0.1:9000').trim(),
+    s3Endpoint: resolvedStorage.endpoint,
     s3PublicEndpoint: setupMode ? String(process.env.STORAGE_S3_ENDPOINT_PUBLIC || '') : requiredEnv('STORAGE_S3_ENDPOINT_PUBLIC'),
     s3Region: (process.env.STORAGE_S3_REGION || 'us-east-1').trim(),
     s3AccessKey: requiredEnv('STORAGE_S3_ACCESS_KEY'),
@@ -51,6 +55,9 @@ export const config = {
     s3ForcePathStyle: !/^(false|0|no)$/i.test((process.env.STORAGE_S3_FORCE_PATH_STYLE || 'true').trim()),
     presignUploadTtlSeconds: parseInt(process.env.STORAGE_PRESIGN_UPLOAD_TTL_SECONDS || '900', 10),
     presignDownloadTtlSeconds: parseInt(process.env.STORAGE_PRESIGN_DOWNLOAD_TTL_SECONDS || '900', 10),
+    requireSentinel: booleanEnv('STORAGE_REQUIRE_SENTINEL', resolvedStorage.provider === 'seaweedfs'),
+    readyMaxAttempts: positiveIntEnv('STORAGE_READY_MAX_ATTEMPTS', 20),
+    readyRetryDelayMs: positiveIntEnv('STORAGE_READY_RETRY_DELAY_MS', 1500),
   },
   db: {
     host: process.env.DB_HOST || '127.0.0.1',

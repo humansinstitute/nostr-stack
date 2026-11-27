@@ -85,17 +85,25 @@ describe('Blossom verified storage', () => {
     expect(Number(complete.size_bytes)).toBe(1); expect(complete.sha256_hex).toBe(hash(new Uint8Array([50])));
     expect(await writeStorageObject(row.id,new Uint8Array([51]),owner)).toBeNull();
   });
-  test('bounded resumable backfill verifies historical claims; missing/incomplete/deleted objects have no links', async () => {
+  test('bounded resumable backfill verifies historical NULL-hash rows and rejects mismatched hashes; missing/incomplete/deleted objects have no links', async () => {
     const row = await stored(new Uint8Array([60,61,62]));
-    await sql`UPDATE v4_storage_objects SET sha256_hex = ${'0'.repeat(64)}, sha256_verified_etag = NULL WHERE id=${row.id}`;
+    await sql`UPDATE v4_storage_objects SET sha256_hex = NULL, sha256_verified_etag = NULL WHERE id=${row.id}`;
     const bounded = await backfillStorageHashes({ limit:1, maxBytes:2 }); expect(bounded.results[0].status).toBe('budget_exceeded');
     const filled = await backfillStorageHashes({ limit:1, maxBytes:3 }); expect(filled.results[0].status).toBe('verified'); expect(filled.next_cursor).toBe(row.id);
     expect((await app.request(`/${hash(new Uint8Array([60,61,62]))}`)).status).toBe(200);
+    // A row whose stored hash disagrees with S3 bytes must fail closed rather than re-adopting tampered bytes (E3).
+    // Query without a UUIDv4 cursor so results are deterministic regardless of random UUID sort order.
+    const tampered = await stored(new Uint8Array([63,64,65]));
+    await sql`UPDATE v4_storage_objects SET sha256_hex = ${'0'.repeat(64)}, sha256_verified_etag = NULL WHERE id=${tampered.id}`;
     const missing = await prepareStorageObjectForAuthorizedOwner({ owner_npub:owner,content_type:'audio/webm' },owner);
     expect((await storageBlossomMetadata(missing,'http://localhost')).blossom_url).toBeNull();
     await sql`UPDATE v4_storage_objects SET completed_at=NOW() WHERE id=${missing.id}`;
-    const result = await backfillStorageHashes({maxBytes:10}); expect(result.results.some(r=>r.id===missing.id && r.status==='missing')).toBe(true);
-    await sql`DELETE FROM v4_storage_objects WHERE id=${row.id}`;
+    const result = await backfillStorageHashes({ limit: 20, maxBytes: 10 });
+    expect(result.results.find(r=>r.id===tampered.id)?.status).toBe('failed');
+    expect(result.results.find(r=>r.id===missing.id)?.status).toBe('missing');
+    const [stillOriginal] = await sql`SELECT sha256_hex FROM v4_storage_objects WHERE id=${tampered.id}`;
+    expect(stillOriginal.sha256_hex).toBe('0'.repeat(64));
+    await sql`DELETE FROM v4_storage_objects WHERE id IN (${row.id}, ${tampered.id}, ${missing.id})`;
     expect((await app.request(`/${hash(new Uint8Array([60,61,62]))}`)).status).toBe(401);
   });
   test('duplicate hashes retain independent ownership and deletion', async () => {

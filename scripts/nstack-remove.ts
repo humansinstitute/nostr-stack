@@ -32,7 +32,7 @@ function owned(l:Resource,project:string,kind:string){
  }else if(!l['com.docker.compose.'+(kind==='container'?'service':kind==='volume'?'volume':'network')])throw Error(`Ambiguous ${kind} with project label; refusing removal.`);
  return true;
 }
-function stopTimeout(service:string){return ['postgres','minio','graph'].includes(service)?-1:20;}
+function stopTimeout(service:string){return ['postgres','minio','seaweedfs','graph'].includes(service)?-1:20;}
 export function planRemoval(project:string,s:Snapshot){
  validateProject(project);
  const containers=s.containers.filter(c=>owned(labels(c,true),project,'container'));
@@ -178,7 +178,19 @@ export async function removeInstallation(options:{project:string;purge:boolean;d
   const helper=await helperProof(project,exec);
   const recovery:FileProof[]=[];
   if(purge)for(const folder of new Set([root,...(helper.boundRoot?[helper.boundRoot]:[])])){const p=await recoveryProof(folder,project);if(p){await verifyRecovery(p,project,snapshot,exec);recovery.push(p);}}
-  const preview={project,dry_run:dryRun,purge,helper:{label:helper.label,config:helper.proof?.path||null,active:helper.state.active},containers:plan.containers,networks:plan.networks,delete_volumes:purge?plan.volumes:[],preserve_volumes:purge?[]:plan.volumes,delete_recovery_files:recovery.map(p=>p.path),stop_policy:'Applications: Docker may terminate an unresponsive process after 20 seconds; module relay/blossom/git may need crash recovery on restart. Datastores (postgres/minio/graph): no automatic forced termination; bounded client wait fails partial.',warning:purge?'PERMANENT LOSS: installation data, credentials and identity will be deleted.':'Data, credentials, identity and recovery files are retained. Same project name is ONE installation across source versions.'};
+  const activeVolumeMounts=new Set<string>();
+  for(const c of snapshot.containers){
+   const isRunning=c.State?.Running===true||c.State?.Status==='running'||c.State?.Status==='restarting';
+   if(isRunning&&plan.containers.some(p=>p.id===c.Id)){
+    for(const m of c.Mounts||[])if(m.Type==='volume'&&m.Name)activeVolumeMounts.add(m.Name);
+   }
+  }
+  const retainedColdVolumes=plan.volumes.filter(name=>{
+   const v=snapshot.volumes.find(x=>x.Name===name);
+   const volKey=v?.Labels?.['com.docker.compose.volume'];
+   return (volKey==='storage'||volKey==='storage-seaweedfs')&&!activeVolumeMounts.has(name);
+  });
+  const preview={project,dry_run:dryRun,purge,helper:{label:helper.label,config:helper.proof?.path||null,active:helper.state.active},containers:plan.containers,networks:plan.networks,delete_volumes:purge?plan.volumes:[],preserve_volumes:purge?[]:plan.volumes,retained_cold_volumes:retainedColdVolumes,delete_recovery_files:recovery.map(p=>p.path),stop_policy:'Applications: Docker may terminate an unresponsive process after 20 seconds; module relay/blossom/git may need crash recovery on restart. Datastores (postgres/minio/seaweedfs/graph): no automatic forced termination; bounded client wait fails partial.',warning:purge?'PERMANENT LOSS: installation data, credentials and identity will be deleted.':'Data, credentials, identity and recovery files are retained. Same project name is ONE installation across source versions.'};
   console.log(JSON.stringify(preview,null,2));if(dryRun)return preview;
   phase='stop/uninstall helper';completed.push('helper uninstall attempted (verify status if this step fails)');await stopHelper(helper,exec);completed.push('helper stopped/uninstalled');
   // Stop the controller first so it cannot recreate optional modules during teardown.

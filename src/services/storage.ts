@@ -396,20 +396,95 @@ export async function statStorageBytes(row: V4StorageObject) {
   } catch { return null; }
 }
 
+export interface StorageIntegrityAlert {
+  object_id: string;
+  storage_path: string;
+  reason: 'sha256_mismatch' | 'size_mismatch' | 'concurrent_identity_conflict';
+  expected_sha256: string | null;
+  actual_sha256: string;
+  expected_size: number | null;
+  actual_size: number;
+}
+
+let integrityAlertHandler: ((alert: StorageIntegrityAlert) => void) | null = null;
+
+export function setStorageIntegrityAlertHandler(handler: ((alert: StorageIntegrityAlert) => void) | null) {
+  integrityAlertHandler = handler;
+}
+
+function emitStorageIntegrityAlert(alert: StorageIntegrityAlert) {
+  if (integrityAlertHandler) {
+    integrityAlertHandler(alert);
+  } else {
+    console.error('[nstack][storage-integrity-alert]', JSON.stringify(alert));
+  }
+}
+
 export async function verifyStorageIdentity(row: V4StorageObject, maxBytes = Infinity) {
   if (!row.completed_at || !await hasActiveStorageReference(row.id)) return null;
   const stat = await statStorageBytes(row);
   if (!stat || stat.size > maxBytes) return null;
-  if (row.sha256_verified_etag === stat.etag && /^[0-9a-f]{64}$/.test(row.sha256_hex || '')) return row;
+  const expectedSha = row.sha256_hex ? row.sha256_hex.toLowerCase() : null;
+  const expectedSize = row.size_bytes === null || row.size_bytes === undefined ? null : Number(row.size_bytes);
+  if (
+    row.sha256_verified_etag === stat.etag &&
+    expectedSha !== null &&
+    /^[0-9a-f]{64}$/.test(expectedSha) &&
+    (expectedSize === null || expectedSize === stat.size)
+  ) {
+    return row;
+  }
   const identity = await hashStorageBytes(row, maxBytes);
   if (!identity) return null;
+  if (expectedSha !== null && expectedSha !== identity.sha256) {
+    emitStorageIntegrityAlert({
+      object_id: row.id,
+      storage_path: row.storage_path,
+      reason: 'sha256_mismatch',
+      expected_sha256: expectedSha,
+      actual_sha256: identity.sha256,
+      expected_size: expectedSize,
+      actual_size: identity.size,
+    });
+    return null;
+  }
+  if (expectedSize !== null && expectedSize !== identity.size) {
+    emitStorageIntegrityAlert({
+      object_id: row.id,
+      storage_path: row.storage_path,
+      reason: 'size_mismatch',
+      expected_sha256: expectedSha,
+      actual_sha256: identity.sha256,
+      expected_size: expectedSize,
+      actual_size: identity.size,
+    });
+    return null;
+  }
   const [updated] = await getDb()<V4StorageObject[]>`
-    UPDATE v4_storage_objects SET sha256_hex = ${identity.sha256},
-      sha256_verified_etag = ${identity.etag}, size_bytes = ${identity.size}
-    WHERE id = ${row.id} AND completed_at IS NOT NULL AND storage_path = ${row.storage_path}
+    UPDATE v4_storage_objects
+    SET sha256_hex = COALESCE(sha256_hex, ${identity.sha256}),
+        sha256_verified_etag = ${identity.etag},
+        size_bytes = COALESCE(size_bytes, ${identity.size})
+    WHERE id = ${row.id}
+      AND completed_at IS NOT NULL
+      AND storage_path = ${row.storage_path}
+      AND (sha256_hex IS NULL OR LOWER(sha256_hex) = ${identity.sha256})
+      AND (size_bytes IS NULL OR size_bytes = ${identity.size})
     RETURNING *
   `;
-  return updated || null;
+  if (!updated) {
+    emitStorageIntegrityAlert({
+      object_id: row.id,
+      storage_path: row.storage_path,
+      reason: 'concurrent_identity_conflict',
+      expected_sha256: expectedSha,
+      actual_sha256: identity.sha256,
+      expected_size: expectedSize,
+      actual_size: identity.size,
+    });
+    return null;
+  }
+  return updated;
 }
 
 export async function storageBlossomMetadata(row: V4StorageObject, origin: string) {

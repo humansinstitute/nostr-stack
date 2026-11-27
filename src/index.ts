@@ -3,27 +3,47 @@ import { startFipsIngress } from './fips-ingress';
 
 const identity = await ensureServiceIdentity();
 
-const [{ createApp }, { config }, { getDb }, { ensureRuntimeSchema }, { startHostingBillingRunner }, { startNotificationWorker }] = await Promise.all([
+const [{ createApp }, { config }, { getDb }, { ensureRuntimeSchema }, { startHostingBillingRunner }, { startNotificationWorker }, { checkStorageMigrationStartupGuard, verifyAuthenticatedStorageReadiness }] = await Promise.all([
   import('./server'),
   import('./config'),
   import('./db'),
   import('./schema/ensure-runtime-schema'),
   import('./services/hosting-billing'),
   import('./services/notification-worker'),
+  import('./services/storage-startup-guard'),
 ]);
 
 // Delivery classification uses the database provider (fail closed); traffic is served only after the schema below.
 const { databaseCeilingProvider } = await import('./services/agent-notifications');
 const app = createApp({ agentCeiling: databaseCeilingProvider() });
 
-// Verify DB connection on startup
+// Verify DB connection, storage migration startup guard, and authenticated storage readiness before serving.
 try {
   const sql = getDb();
   await sql`SELECT 1`;
+  // Read-only guard first: no DDL may run while a migration holds the store quiesced.
+  const guard = await checkStorageMigrationStartupGuard(sql, {
+    provider: config.storage.provider,
+    startRunId: process.env.NSTACK_MIGRATION_START_RUN_ID || null,
+  });
   await ensureRuntimeSchema();
+  await verifyAuthenticatedStorageReadiness({
+    provider: config.storage.provider,
+    endpoint: config.storage.s3Endpoint,
+    region: config.storage.s3Region,
+    bucket: config.storage.s3Bucket,
+    accessKey: config.storage.s3AccessKey,
+    secretKey: config.storage.s3SecretKey,
+    forcePathStyle: config.storage.s3ForcePathStyle,
+    expectedSentinelId: guard.expectedSentinelId,
+    requireSentinel: config.storage.requireSentinel,
+    maxAttempts: config.storage.readyMaxAttempts,
+    retryDelayMs: config.storage.readyRetryDelayMs,
+  });
   console.log(`[nstack] DB connected: ${config.db.host}:${config.db.port}/${config.db.database}`);
+  console.log(`[nstack] Storage ready: provider=${config.storage.provider} bucket=${config.storage.s3Bucket}`);
 } catch (err) {
-  console.error('[nstack] DB connection failed:', err);
+  console.error('[nstack] Startup check failed:', err);
   process.exit(1);
 }
 

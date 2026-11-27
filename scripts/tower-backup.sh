@@ -1,33 +1,55 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1"
+readonly SCRIPT_VERSION="2"
 readonly MAIN_CONTAINER="${TOWER_BACKUP_MAIN_CONTAINER:-wingman-tower-postgres}"
 readonly GRAPH_CONTAINER="${TOWER_BACKUP_GRAPH_CONTAINER:-wingman-tower-graph-postgres}"
 readonly MINIO_CONTAINER="${TOWER_BACKUP_MINIO_CONTAINER:-wingman-tower-minio}"
+readonly SEAWEEDFS_CONTAINER="${TOWER_BACKUP_SEAWEEDFS_CONTAINER:-wingman-tower-seaweedfs}"
+readonly SEAWEEDFS_VOLUME_OVERRIDE="${TOWER_BACKUP_SEAWEEDFS_VOLUME:-}"
 readonly APP_CONTAINER="${TOWER_BACKUP_APP_CONTAINER:-wingman-tower-b3}"
+STORAGE_PROVIDER="${TOWER_BACKUP_STORAGE_PROVIDER:-minio}"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 state() { docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || printf 'missing'; }
+is_stopped_state() {
+  case "$(state "$1")" in
+    exited|created|dead|missing) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 sha() { shasum -a 256 "$1" | awk '{print $1}'; }
 size() { wc -c < "$1" | tr -d ' '; }
 
 usage() {
   cat <<'EOF'
-Encrypted NStack backup sets
+Encrypted NStack backup sets (manifest v2; supports v1 and v2 verify/restore)
 
-  scripts/tower-backup.sh backup --output DIR --recipient AGE_RECIPIENT --quiesced
+  scripts/tower-backup.sh backup --output DIR --recipient AGE_RECIPIENT --quiesced \
+    [--storage-provider minio|seaweedfs]
   scripts/tower-backup.sh verify --backup DIR --identity AGE_IDENTITY_FILE
   scripts/tower-backup.sh restore --backup DIR --identity AGE_IDENTITY_FILE \
     --target tower-restore-NAME --confirm tower-restore-NAME
 
-backup requires the NStack API container to be stopped and an operator attestation
-that all external writes (including outstanding presigned MinIO uploads) are
-quiesced. It never writes an unencrypted dump.
+Environment overrides:
+  TOWER_BACKUP_STORAGE_PROVIDER=minio|seaweedfs (default: minio)
+  TOWER_BACKUP_APP_CONTAINER, TOWER_BACKUP_MAIN_CONTAINER,
+  TOWER_BACKUP_GRAPH_CONTAINER, TOWER_BACKUP_MINIO_CONTAINER,
+  TOWER_BACKUP_SEAWEEDFS_CONTAINER, TOWER_BACKUP_SEAWEEDFS_VOLUME
+
+Consistency guarantees:
+  - Both providers require the NStack API container stopped and --quiesced attestation.
+  - MinIO backups stream /data from the quiesced MinIO container (legacy compatible).
+  - SeaweedFS stores live LevelDB filer metadata, so backup requires the SeaweedFS
+    container gracefully STOPPED first, then archives its verified /data named volume
+    read-only via a disposable helper container so LevelDB state is crash-free and
+    consistent. Restart SeaweedFS after backup finishes.
 
 restore only creates new disposable Docker containers and volumes whose names
-start with tower-restore-. It refuses existing targets and known live names.
+start with tower-restore-. It refuses existing targets and known live names,
+and marks restored storage_migration_runs rows aborted_restore in the restored
+database clone only so restored clones boot safely.
 EOF
 }
 
@@ -37,6 +59,7 @@ parse() {
       --output) OUTPUT=${2:?}; shift 2 ;;
       --recipient) RECIPIENT=${2:?}; shift 2 ;;
       --quiesced) QUIESCED=1; shift ;;
+      --storage-provider) STORAGE_PROVIDER=${2:?}; shift 2 ;;
       --backup) BACKUP=${2:?}; shift 2 ;;
       --identity) IDENTITY=${2:?}; shift 2 ;;
       --target) TARGET=${2:?}; shift 2 ;;
@@ -51,16 +74,82 @@ decrypt_manifest() {
   age --decrypt --identity "$IDENTITY" "$BACKUP/manifest.json.age"
 }
 
+validate_provider() {
+  case "$1" in
+    minio|seaweedfs) ;;
+    *) die "unsupported storage provider: $1 (expected minio or seaweedfs)" ;;
+  esac
+}
+
+resolve_seaweedfs_data_volume() {
+  local vol=""
+  if [[ -n "$SEAWEEDFS_VOLUME_OVERRIDE" ]]; then
+    vol="$SEAWEEDFS_VOLUME_OVERRIDE"
+  else
+    vol=$(docker inspect -f '{{range .Mounts}}{{if and (eq .Destination "/data") (eq .Type "volume")}}{{.Name}}{{end}}{{end}}' "$SEAWEEDFS_CONTAINER" 2>/dev/null || true)
+  fi
+  [[ -n "$vol" ]] || die "could not resolve named /data volume for $SEAWEEDFS_CONTAINER (set TOWER_BACKUP_SEAWEEDFS_VOLUME if needed)"
+  docker volume inspect "$vol" >/dev/null 2>&1 || die "SeaweedFS data volume does not exist: $vol"
+  # Ensure NO running, restarting, or paused container currently holds this volume mounted
+  # (prevents live LevelDB mutation or mid-backup restart during tar).
+  local active_holders
+  active_holders=$(docker ps -a \
+    --filter "volume=$vol" \
+    --filter "status=running" \
+    --filter "status=restarting" \
+    --filter "status=paused" \
+    --format '{{.Names}}({{.State}})' 2>/dev/null || true)
+  [[ -z "$active_holders" ]] || die "SeaweedFS volume $vol is held by active/restarting/paused container(s): $active_holders; stop SeaweedFS gracefully before backing up LevelDB metadata"
+  printf '%s' "$vol"
+}
+
+validate_manifest_components() {
+  local manifest="$1" version="$2" provider="$3"
+  local expected_storage_file="${provider}-data.tar.age"
+  local comp_count
+  comp_count=$(jq -er '.components | length' <<<"$manifest")
+  [[ "$comp_count" == "3" ]] || die "manifest must contain exactly 3 components (main-postgres, graph-postgres, $provider); found $comp_count"
+
+  local unique_names
+  unique_names=$(jq -r '[.components[].name] | unique | sort | join(",")' <<<"$manifest")
+  local expected_names
+  expected_names=$(printf 'graph-postgres\nmain-postgres\n%s\n' "$provider" | LC_ALL=C sort | paste -sd, -)
+  [[ "$unique_names" == "$expected_names" ]] || die "manifest components mismatch: expected [$expected_names], found [$unique_names]"
+
+  local expected_pair
+  for expected_pair in \
+    "main-postgres:main-postgres.dump.age:pg_dump-custom" \
+    "graph-postgres:graph-postgres.dump.age:pg_dump-custom" \
+    "${provider}:${expected_storage_file}:tar"; do
+    local e_name e_file e_fmt found
+    IFS=: read -r e_name e_file e_fmt <<<"$expected_pair"
+    found=$(jq -r --arg n "$e_name" --arg f "$e_file" --arg t "$e_fmt" \
+      '[.components[] | select(.name == $n and .file == $f and .format == $t)] | length' <<<"$manifest")
+    [[ "$found" == "1" ]] || die "manifest missing required component $e_name ($e_file, $e_fmt)"
+  done
+}
+
 backup() {
   parse "$@"
   need age; need docker; need jq; need shasum
   [[ -n ${OUTPUT:-} && -n ${RECIPIENT:-} ]] || die "--output and --recipient are required"
   [[ ${QUIESCED:-0} == 1 ]] || die "--quiesced is required; see docs/backup-and-restore.md"
-  [[ $(state "$APP_CONTAINER") != running ]] || die "$APP_CONTAINER is running; stop NStack and quiesce external writes first"
+  validate_provider "$STORAGE_PROVIDER"
+
+  is_stopped_state "$APP_CONTAINER" || die "$APP_CONTAINER is not stopped (state=$(state "$APP_CONTAINER")); stop NStack and quiesce external writes first"
   [[ $(state "$MAIN_CONTAINER") == running ]] || die "$MAIN_CONTAINER is not running"
   [[ $(state "$GRAPH_CONTAINER") == running ]] || die "$GRAPH_CONTAINER is not running"
-  [[ $(state "$MINIO_CONTAINER") == running ]] || die "$MINIO_CONTAINER is not running"
   [[ ! -e $OUTPUT ]] || die "output already exists: $OUTPUT"
+
+  local storage_file seaweedfs_volume=""
+  if [[ $STORAGE_PROVIDER == seaweedfs ]]; then
+    storage_file="seaweedfs-data.tar.age"
+    is_stopped_state "$SEAWEEDFS_CONTAINER" || die "$SEAWEEDFS_CONTAINER is not stopped (state=$(state "$SEAWEEDFS_CONTAINER")); gracefully stop SeaweedFS before backup so LevelDB metadata is consistent"
+    seaweedfs_volume="$(resolve_seaweedfs_data_volume)"
+  else
+    storage_file="minio-data.tar.age"
+    [[ $(state "$MINIO_CONTAINER") == running ]] || die "$MINIO_CONTAINER is not running"
+  fi
 
   umask 077
   local parent staging created completed
@@ -75,27 +164,40 @@ backup() {
     | age --encrypt --recipient "$RECIPIENT" --output "$staging/main-postgres.dump.age"
   docker exec "$GRAPH_CONTAINER" sh -ceu 'exec pg_dump --format=custom --no-owner --no-acl --username="$POSTGRES_USER" "$POSTGRES_DB"' \
     | age --encrypt --recipient "$RECIPIENT" --output "$staging/graph-postgres.dump.age"
-  docker exec "$MINIO_CONTAINER" sh -ceu 'exec tar -C /data -cf - .' \
-    | age --encrypt --recipient "$RECIPIENT" --output "$staging/minio-data.tar.age"
 
-  local main_sha graph_sha minio_sha main_size graph_size minio_size
+  if [[ $STORAGE_PROVIDER == seaweedfs ]]; then
+    # Archive the stopped SeaweedFS volume read-only using the guaranteed postgres:16-alpine image
+    # so LevelDB metadata and volume files are consistent with UID/GID 1000:1000 preserved.
+    docker run --rm --network none -v "${seaweedfs_volume}:/data:ro" postgres:16-alpine tar -C /data -cf - . \
+      | age --encrypt --recipient "$RECIPIENT" --output "$staging/$storage_file"
+  else
+    # The pinned MinIO image ships no tar; read its /data volume through a read-only helper.
+    local minio_volume
+    minio_volume=$(docker inspect -f '{{range .Mounts}}{{if and (eq .Destination "/data") (eq .Type "volume")}}{{.Name}}{{end}}{{end}}' "$MINIO_CONTAINER" 2>/dev/null || true)
+    [[ -n "$minio_volume" ]] || die "could not resolve the named /data volume of $MINIO_CONTAINER"
+    docker run --rm --network none -v "${minio_volume}:/data:ro" postgres:16-alpine tar -C /data -cf - . \
+      | age --encrypt --recipient "$RECIPIENT" --output "$staging/$storage_file"
+  fi
+
+  local main_sha graph_sha storage_sha main_size graph_size storage_size
   main_sha=$(sha "$staging/main-postgres.dump.age"); main_size=$(size "$staging/main-postgres.dump.age")
   graph_sha=$(sha "$staging/graph-postgres.dump.age"); graph_size=$(size "$staging/graph-postgres.dump.age")
-  minio_sha=$(sha "$staging/minio-data.tar.age"); minio_size=$(size "$staging/minio-data.tar.age")
+  storage_sha=$(sha "$staging/$storage_file"); storage_size=$(size "$staging/$storage_file")
   jq -n -c \
     --argjson version "$SCRIPT_VERSION" --arg created_at "$created" \
-    --arg main_sha "$main_sha" --arg graph_sha "$graph_sha" --arg minio_sha "$minio_sha" \
-    --argjson main_size "$main_size" --argjson graph_size "$graph_size" --argjson minio_size "$minio_size" \
-    '{format:"wingman-tower-backup",version:$version,created_at:$created_at,consistency:"operator-quiesced",components:[
+    --arg storage_provider "$STORAGE_PROVIDER" --arg storage_file "$storage_file" \
+    --arg main_sha "$main_sha" --arg graph_sha "$graph_sha" --arg storage_sha "$storage_sha" \
+    --argjson main_size "$main_size" --argjson graph_size "$graph_size" --argjson storage_size "$storage_size" \
+    '{format:"wingman-tower-backup",version:$version,storage_provider:$storage_provider,created_at:$created_at,consistency:"operator-quiesced",components:[
       {name:"main-postgres",file:"main-postgres.dump.age",sha256:$main_sha,encrypted_bytes:$main_size,format:"pg_dump-custom"},
       {name:"graph-postgres",file:"graph-postgres.dump.age",sha256:$graph_sha,encrypted_bytes:$graph_size,format:"pg_dump-custom"},
-      {name:"minio",file:"minio-data.tar.age",sha256:$minio_sha,encrypted_bytes:$minio_size,format:"tar"}
+      {name:$storage_provider,file:$storage_file,sha256:$storage_sha,encrypted_bytes:$storage_size,format:"tar"}
     ]}' | age --encrypt --recipient "$RECIPIENT" --output "$staging/manifest.json.age"
 
   mv "$staging" "$OUTPUT"
   completed=1
   trap - EXIT
-  printf 'Created encrypted backup set: %s\n' "$OUTPUT"
+  printf 'Created encrypted backup set (v%s, provider=%s): %s\n' "$SCRIPT_VERSION" "$STORAGE_PROVIDER" "$OUTPUT"
   printf 'Run verify before copying or pruning backups.\n'
 }
 
@@ -103,25 +205,42 @@ verify() {
   parse "$@"
   need age; need docker; need jq; need shasum
   [[ -d ${BACKUP:-} && -f ${IDENTITY:-} ]] || die "--backup DIR and --identity FILE are required"
-  local manifest format version
+  local manifest format version provider
   manifest=$(decrypt_manifest) || die "manifest decryption failed"
   format=$(jq -er '.format' <<<"$manifest")
   version=$(jq -er '.version' <<<"$manifest")
-  [[ $format == wingman-tower-backup && $version == "$SCRIPT_VERSION" ]] || die "unsupported backup format/version"
+  [[ $format == wingman-tower-backup ]] || die "unsupported backup format: $format"
+  case "$version" in
+    1) provider="minio" ;;
+    2)
+      provider=$(jq -er '.storage_provider' <<<"$manifest")
+      validate_provider "$provider"
+      ;;
+    *) die "unsupported backup version: $version" ;;
+  esac
 
-  local file expected actual
-  while IFS=$'\t' read -r file expected; do
+  validate_manifest_components "$manifest" "$version" "$provider"
+
+  local name file expected comp_format actual
+  while IFS=$'\t' read -r name file expected comp_format; do
     [[ $file =~ ^[a-z0-9.-]+\.age$ && -f $BACKUP/$file ]] || die "missing or unsafe component filename: $file"
     actual=$(sha "$BACKUP/$file")
     [[ $actual == "$expected" ]] || die "checksum mismatch: $file"
-  done < <(jq -r '.components[] | [.file,.sha256] | @tsv' <<<"$manifest")
+    case "$comp_format" in
+      pg_dump-custom)
+        age --decrypt --identity "$IDENTITY" "$BACKUP/$file" \
+          | docker run --rm -i postgres:16-alpine pg_restore --list >/dev/null
+        ;;
+      tar)
+        age --decrypt --identity "$IDENTITY" "$BACKUP/$file" | tar -tf - >/dev/null
+        ;;
+      *)
+        die "unsupported component format: $comp_format ($name)"
+        ;;
+    esac
+  done < <(jq -r '.components[] | [.name,.file,.sha256,.format] | @tsv' <<<"$manifest")
 
-  age --decrypt --identity "$IDENTITY" "$BACKUP/main-postgres.dump.age" \
-    | docker run --rm -i postgres:16-alpine pg_restore --list >/dev/null
-  age --decrypt --identity "$IDENTITY" "$BACKUP/graph-postgres.dump.age" \
-    | docker run --rm -i postgres:16-alpine pg_restore --list >/dev/null
-  age --decrypt --identity "$IDENTITY" "$BACKUP/minio-data.tar.age" | tar -tf - >/dev/null
-  printf 'Verified backup set: %s (%s)\n' "$BACKUP" "$(jq -r '.created_at' <<<"$manifest")"
+  printf 'Verified backup set (v%s, provider=%s): %s (%s)\n' "$version" "$provider" "$BACKUP" "$(jq -r '.created_at' <<<"$manifest")"
 }
 
 restore() {
@@ -130,13 +249,26 @@ restore() {
   [[ -d ${BACKUP:-} && -f ${IDENTITY:-} ]] || die "--backup DIR and --identity FILE are required"
   [[ ${TARGET:-} =~ ^tower-restore-[a-z0-9][a-z0-9-]{2,40}$ ]] || die "--target must match tower-restore-[a-z0-9][a-z0-9-]{2,40}"
   [[ ${CONFIRM:-} == "$TARGET" ]] || die "--confirm must exactly match --target"
-  case "$TARGET" in wingman-tower*|*postgres-data|*graph-postgres-data|*minio-data) die "target resembles a live NStack resource";; esac
+  case "$TARGET" in wingman-tower*|*postgres-data|*graph-postgres-data|*minio-data|*seaweedfs-data) die "target resembles a live NStack resource";; esac
 
   verify --backup "$BACKUP" --identity "$IDENTITY"
-  local main_volume="${TARGET}-main-data" graph_volume="${TARGET}-graph-data" minio_volume="${TARGET}-minio-data"
+  local manifest version provider storage_file
+  manifest=$(decrypt_manifest)
+  version=$(jq -er '.version' <<<"$manifest")
+  if [[ $version == 1 ]]; then
+    provider="minio"
+    storage_file="minio-data.tar.age"
+  else
+    provider=$(jq -er '.storage_provider' <<<"$manifest")
+    validate_provider "$provider"
+    storage_file="${provider}-data.tar.age"
+  fi
+  [[ $storage_file =~ ^[a-z0-9.-]+\.age$ && -f $BACKUP/$storage_file ]] || die "missing storage archive: $storage_file"
+
+  local main_volume="${TARGET}-main-data" graph_volume="${TARGET}-graph-data" storage_volume="${TARGET}-${provider}-data"
   local main_container="${TARGET}-main" graph_container="${TARGET}-graph"
   local name
-  for name in "$main_volume" "$graph_volume" "$minio_volume"; do
+  for name in "$main_volume" "$graph_volume" "$storage_volume"; do
     ! docker volume inspect "$name" >/dev/null 2>&1 || die "target volume already exists: $name"
   done
   for name in "$main_container" "$graph_container"; do
@@ -145,7 +277,7 @@ restore() {
 
   docker volume create "$main_volume" >/dev/null
   docker volume create "$graph_volume" >/dev/null
-  docker volume create "$minio_volume" >/dev/null
+  docker volume create "$storage_volume" >/dev/null
   docker run -d --name "$main_container" -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=restore_main \
     -v "$main_volume:/var/lib/postgresql/data" postgres:16-alpine >/dev/null
   docker run -d --name "$graph_container" -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=restore_graph \
@@ -164,6 +296,22 @@ restore() {
     -c 'DROP DATABASE restore_graph' -c 'CREATE DATABASE restore_graph TEMPLATE template0' >/dev/null
   age --decrypt --identity "$IDENTITY" "$BACKUP/main-postgres.dump.age" \
     | docker exec -i "$main_container" pg_restore --exit-on-error --no-owner --no-acl -U postgres -d restore_main
+
+  # §7.6: Mark any restored migration journal runs aborted_restore in the restored clone ONLY
+  # so a window backup (captured at source_fenced) boots cleanly without bypassing the live guard.
+  docker exec "$main_container" psql -v ON_ERROR_STOP=1 -U postgres -d restore_main -c "
+    DO \$\$
+    BEGIN
+      IF to_regclass('public.storage_migration_runs') IS NOT NULL THEN
+        UPDATE storage_migration_runs
+        SET phase = 'aborted_restore',
+            aborted_restore_at = COALESCE(aborted_restore_at, NOW()),
+            updated_at = NOW()
+        WHERE phase <> 'aborted_restore';
+      END IF;
+    END \$\$;
+  " >/dev/null
+
   age --decrypt --identity "$IDENTITY" "$BACKUP/graph-postgres.dump.age" \
     | docker exec -i "$graph_container" pg_restore --exit-on-error --no-owner --no-acl -U postgres -d restore_graph
   # Apache AGE keys each graph by its schema OID (ag_graph.graphid, ag_label.graph). pg_restore
@@ -185,9 +333,10 @@ BEGIN
   END IF;
 END $$;
 SQL
-  age --decrypt --identity "$IDENTITY" "$BACKUP/minio-data.tar.age" \
-    | docker run --rm -i -v "$minio_volume:/restore" alpine:3.20 tar -C /restore -xf -
-  printf 'Restored into disposable targets only:\n  %s\n  %s\n  %s\n' "$main_container" "$graph_container" "$minio_volume"
+  age --decrypt --identity "$IDENTITY" "$BACKUP/$storage_file" \
+    | docker run --rm -i --network none -v "$storage_volume:/restore" postgres:16-alpine tar -C /restore -xf -
+  printf 'Restored into disposable targets only (provider=%s):\n  %s\n  %s\n  %s\n' "$provider" "$main_container" "$graph_container" "$storage_volume"
+  printf 'Restored storage_migration_runs rows (if any) marked aborted_restore in %s only.\n' "$main_container"
   printf 'No ports are published. Inspect, test, then explicitly remove these targets when finished.\n'
 }
 
