@@ -720,7 +720,7 @@ describe('E5 tower-backup.sh verify on production-sized dumps', () => {
       mkdirSync(bin);
       writeFileSync(join(bin, 'docker'), `#!/bin/sh
 case "$*" in
-  *"cat > /tmp/dump"*) cat >/dev/null; exit 0;;
+  *"pg_restore --list >/dev/null; rc="*) head -c 5 >/dev/null; cat >/dev/null; exit 0;;
   *"pg_restore --list"*) head -c 5 >/dev/null; exit 0;;
   *) exit 0;;
 esac
@@ -731,6 +731,74 @@ esac
       expect(res.stderr.toString()).toBe('');
       expect(res.exitCode).toBe(0);
       expect(res.stdout.toString()).toContain('Verified backup set');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('E5 tower-backup.sh verify refuses damaged sets', () => {
+  function makeSet(dir: string, recipient: string, mutate: (bdir: string) => void, mainPlain: Buffer) {
+    const bdir = join(dir, `set-${randomUUID()}`);
+    mkdirSync(bdir);
+    const enc = (name: string, bytes: Buffer) => {
+      expect(Bun.spawnSync(['age', '--encrypt', '--recipient', recipient, '--output', join(bdir, name)], { stdin: bytes }).exitCode).toBe(0);
+    };
+    enc('main-postgres.dump.age', mainPlain);
+    enc('graph-postgres.dump.age', mainPlain);
+    enc('minio-data.tar.age', Buffer.from(Bun.spawnSync(['tar', '-cf', '-', '-C', dir, 'key.txt']).stdout));
+    mutate(bdir);
+    // Checksums are recomputed after damage, so only decryption/authentication or format checks can catch it.
+    const sha = (name: string) => createHash('sha256').update(readFileSync(join(bdir, name))).digest('hex');
+    const components = [
+      { name: 'main-postgres', file: 'main-postgres.dump.age', sha256: sha('main-postgres.dump.age'), format: 'pg_dump-custom' },
+      { name: 'graph-postgres', file: 'graph-postgres.dump.age', sha256: sha('graph-postgres.dump.age'), format: 'pg_dump-custom' },
+      { name: 'minio', file: 'minio-data.tar.age', sha256: sha('minio-data.tar.age'), format: 'tar' },
+    ];
+    enc('manifest.json.age', Buffer.from(JSON.stringify({ format: 'wingman-tower-backup', version: 2, storage_provider: 'minio', created_at: new Date().toISOString(), components })));
+    return bdir;
+  }
+  const verify = (bdir: string, dir: string, path?: string) => Bun.spawnSync(['bash', join(import.meta.dir, '../scripts/tower-backup.sh'), 'verify', '--backup', bdir, '--identity', join(dir, 'key.txt')], {
+    env: { ...process.env, ...(path ? { PATH: path } : {}) }, stdout: 'pipe', stderr: 'pipe',
+  });
+
+  test('truncated or corrupted age ciphertext fails verification even though the stream is drained', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tower-backup-damaged-'));
+    try {
+      if (Bun.spawnSync(['age-keygen', '-o', join(dir, 'key.txt')]).exitCode !== 0) return;
+      const recipient = readFileSync(join(dir, 'key.txt'), 'utf8').match(/public key:\s*(age1[a-z0-9]+)/i)![1]!;
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      // Draining stand-in for the pg_restore container: format checks pass, so only age can fail.
+      writeFileSync(join(bin, 'docker'), '#!/bin/sh\ncat >/dev/null; exit 0\n', { mode: 0o755 });
+      const path = `${bin}:${process.env.PATH}`;
+      const plain = randomBytes(2 * 1024 * 1024);
+      expect(verify(makeSet(dir, recipient, () => {}, plain), dir, path).exitCode).toBe(0);
+      const truncated = makeSet(dir, recipient, (b) => {
+        const f = join(b, 'main-postgres.dump.age');
+        writeFileSync(f, readFileSync(f).subarray(0, 1024 * 1024));
+      }, plain);
+      expect(verify(truncated, dir, path).exitCode).not.toBe(0);
+      const corrupted = makeSet(dir, recipient, (b) => {
+        const f = join(b, 'graph-postgres.dump.age');
+        const bytes = Buffer.from(readFileSync(f));
+        bytes[bytes.length - 100] ^= 0xff;
+        writeFileSync(f, bytes);
+      }, plain);
+      expect(verify(corrupted, dir, path).exitCode).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a decryptable file that is not a pg_dump archive fails the real pg_restore check', () => {
+    if (Bun.spawnSync(['docker', 'image', 'inspect', 'postgres:16-alpine'], { stdout: 'ignore', stderr: 'ignore' }).exitCode !== 0) return;
+    const dir = mkdtempSync(join(tmpdir(), 'tower-backup-malformed-'));
+    try {
+      if (Bun.spawnSync(['age-keygen', '-o', join(dir, 'key.txt')]).exitCode !== 0) return;
+      const recipient = readFileSync(join(dir, 'key.txt'), 'utf8').match(/public key:\s*(age1[a-z0-9]+)/i)![1]!;
+      const res = verify(makeSet(dir, recipient, () => {}, randomBytes(512 * 1024)), dir);
+      expect(res.exitCode).not.toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

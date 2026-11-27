@@ -248,13 +248,15 @@ verify() {
     [[ $actual == "$expected" ]] || die "checksum mismatch: $file"
     case "$comp_format" in
       pg_dump-custom)
-        # pg_restore --list reads only the table of contents and exits; store the whole stream first
-        # so a large dump is fully decrypted and age never dies of SIGPIPE under pipefail.
+        # pg_restore --list reads only the table of contents and exits. Always drain the rest of the
+        # stream (even when listing fails) so age authenticates every chunk and never dies of SIGPIPE;
+        # the first failure wins, and pipefail still reports an age decryption/authentication failure.
         age --decrypt --identity "$IDENTITY" "$BACKUP/$file" \
-          | docker run --rm -i postgres:16-alpine sh -ec 'cat > /tmp/dump && pg_restore --list /tmp/dump >/dev/null'
+          | docker run --rm -i postgres:16-alpine sh -c 'pg_restore --list >/dev/null; rc=$?; cat >/dev/null; d=$?; [ "$rc" -ne 0 ] && exit "$rc"; exit "$d"'
         ;;
       tar|docker-image-archive)
-        age --decrypt --identity "$IDENTITY" "$BACKUP/$file" | tar -tf - >/dev/null
+        age --decrypt --identity "$IDENTITY" "$BACKUP/$file" \
+          | { tar -tf - >/dev/null; rc=$?; cat >/dev/null; [[ $rc -eq 0 ]]; }
         ;;
       *)
         die "unsupported component format: $comp_format ($name)"
