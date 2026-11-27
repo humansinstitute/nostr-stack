@@ -3504,7 +3504,11 @@ export function buildOpenApiDocument(origin: string) {
             created_at: { type: 'string', format: 'date-time' },
           },
         },
-        WorkspaceApp: {
+        NamespaceAppPermission: {
+        type: 'object', required: ['id', 'workspace_owner_npub', 'app_npub', 'agent_npub', 'permission', 'expires_at', 'revoked_at', 'revision', 'created_by_npub', 'created_at'],
+        properties: { id: { type: 'string', format: 'uuid' }, workspace_owner_npub: { type: 'string' }, app_npub: { type: 'string' }, agent_npub: { type: 'string' }, permission: { type: 'string', enum: ['namespace.manage'] }, expires_at: { type: 'string', format: 'date-time' }, revoked_at: { type: ['string', 'null'], format: 'date-time' }, revision: { type: 'integer', minimum: 1 }, created_by_npub: { type: 'string' }, revoked_by_npub: { type: ['string', 'null'] }, created_at: { type: 'string', format: 'date-time' } },
+      },
+      WorkspaceApp: {
           type: 'object',
           properties: {
             id: { type: 'string', format: 'uuid' },
@@ -7907,12 +7911,38 @@ export function buildOpenApiDocument(origin: string) {
           },
         },
       },
+      '/api/v4/workspaces/{workspaceOwnerNpub}/app-permissions': {
+        get: {
+          tags: ['Workspaces'], summary: 'Owner-only exact-app agent namespace permissions',
+          description: 'Exact signer must be the namespace owner (or encrypted workspace creator). Typed workspace membership and wapp.manage do not authorize this endpoint. Bounded to 200 rows; follow next_cursor as before. No private data or onward delegation authority.',
+          parameters: [{ name: 'workspaceOwnerNpub', in: 'path', required: true, schema: { type: 'string' } }, { name: 'before', in: 'query', schema: { type: 'string', format: 'uuid' } }],
+          responses: { '200': { description: 'grants, truncated and next_cursor', content: { 'application/json': { schema: { type: 'object', properties: { grants: { type: 'array', items: { $ref: '#/components/schemas/NamespaceAppPermission' } }, truncated: { type: 'boolean' }, next_cursor: { type: ['string', 'null'] } } } } } }, '403': { description: 'Exact owner signer required' } },
+        },
+        post: {
+          tags: ['Workspaces'], summary: 'Owner grants namespace.manage to one exact agent for one app',
+          description: 'Expiry required, at most 366 days. UUID idempotency key binds immutable request; retry never reactivates a revoked grant. Limit 1000 active grants per namespace. No membership, data, installation, database, billing or onward grant authority.',
+          parameters: [{ name: 'workspaceOwnerNpub', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', additionalProperties: false, required: ['idempotency_key', 'agent_npub', 'app_npub', 'permission', 'expires_at'], properties: { idempotency_key: { type: 'string', format: 'uuid' }, agent_npub: { type: 'string' }, app_npub: { type: 'string' }, permission: { type: 'string', enum: ['namespace.manage'] }, expires_at: { type: 'string', format: 'date-time' } } } } } },
+          responses: { '201': { description: 'Confirmed grant', content: { 'application/json': { schema: { type: 'object', properties: { grant: { $ref: '#/components/schemas/NamespaceAppPermission' } } } } } }, '400': { description: 'Invalid scope, identity or expiry' }, '403': { description: 'Exact owner signer required' }, '409': { description: 'Idempotency conflict or active grant limit' } },
+        },
+      },
+      '/api/v4/workspaces/{workspaceOwnerNpub}/app-permissions/{permissionId}/revoke': {
+        post: {
+          tags: ['Workspaces'], summary: 'Owner revokes an app permission with revision checking',
+          description: 'Revocation waits for previously admitted namespace writes; new requests are denied after commit. Existing app data is retained. Exact successful retry is idempotent.',
+          parameters: [{ name: 'workspaceOwnerNpub', in: 'path', required: true, schema: { type: 'string' } }, { name: 'permissionId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', additionalProperties: false, required: ['expected_revision'], properties: { expected_revision: { type: 'integer', minimum: 1 } } } } } },
+          responses: { '200': { description: 'Confirmed revoked grant', content: { 'application/json': { schema: { type: 'object', properties: { grant: { $ref: '#/components/schemas/NamespaceAppPermission' } } } } } }, '403': { description: 'Exact owner signer required' }, '404': { description: 'Permission not found in this namespace' }, '409': { description: 'Stale revision; refresh and review' } },
+        },
+      },
       '/api/v4/workspaces/{workspaceOwnerNpub}/apps': {
         get: {
           tags: ['Billing'],
           summary: 'List persisted app namespaces for a workspace',
+          description: 'Administrators retain full listing. An exact agent signer with active namespace.manage must supply app_npub and sees only that registration.',
           parameters: [
             { name: 'workspaceOwnerNpub', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'app_npub', in: 'query', schema: { type: 'string' }, description: 'Required for delegated agents; exact permitted app identity' },
           ],
           responses: {
             '200': {
@@ -7935,6 +7965,7 @@ export function buildOpenApiDocument(origin: string) {
         post: {
           tags: ['Billing'],
           summary: 'Create or rename a persisted app namespace for a workspace',
+          description: 'Existing owner/admin authorization retained. An active owner-approved namespace.manage permission also allows the exact agent signer to manage only its exact app registration; revocation is checked under a transaction lock.',
           parameters: [
             { name: 'workspaceOwnerNpub', in: 'path', required: true, schema: { type: 'string' } },
           ],
