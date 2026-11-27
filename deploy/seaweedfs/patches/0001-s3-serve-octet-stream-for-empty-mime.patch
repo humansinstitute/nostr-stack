@@ -1,0 +1,93 @@
+NStack compatibility patch for SeaweedFS 4.55 (a98c9e27185cf1003eca095761a39973c60734db).
+
+S3 GET/HEAD serve application/octet-stream when the stored Mime is empty instead of
+guessing a type from the key extension. The filer store blanks an explicit
+"application/octet-stream" (weed/filer/filerstore_wrapper.go normalizeEntryMimeForStore),
+so upstream served e.g. a generic-binary "index.html" upload as text/html.
+See deploy/seaweedfs/README.md for the removal gate.
+
+--- a/weed/s3api/s3api_object_handlers.go
++++ b/weed/s3api/s3api_object_handlers.go
+@@ -9,10 +9,8 @@
+ 	"fmt"
+ 	"io"
+ 	"math"
+-	"mime"
+ 	"net/http"
+ 	"net/url"
+-	"path/filepath"
+ 	"sort"
+ 	"strconv"
+ 	"strings"
+@@ -2495,24 +2493,16 @@
+ 	}
+ 
+ 	// Set Content-Type
+-	mimeType := ""
++	// NStack compatibility patch: the filer store blanks a stored
++	// "application/octet-stream" (normalizeEntryMimeForStore), so an empty Mime
++	// on an S3 object means the client wrote octet-stream or no type at all.
++	// Serve exactly that instead of guessing from the key extension, which would
++	// turn a generic-binary ".html" upload into text/html.
++	mimeType := "application/octet-stream"
+ 	if entry.Attributes != nil && entry.Attributes.Mime != "" {
+ 		mimeType = entry.Attributes.Mime
+ 	}
+-	if mimeType == "" {
+-		// Try to detect from entry name
+-		if entry.Name != "" {
+-			ext := filepath.Ext(entry.Name)
+-			if ext != "" {
+-				mimeType = mime.TypeByExtension(ext)
+-			}
+-		}
+-	}
+-	if mimeType != "" {
+-		w.Header().Set("Content-Type", mimeType)
+-	} else {
+-		w.Header().Set("Content-Type", "application/octet-stream")
+-	}
++	w.Header().Set("Content-Type", mimeType)
+ 
+ 	// Set custom headers from entry.Extended (user metadata)
+ 	// Use direct map assignment to preserve original header casing (matches proxy behavior)
+--- /dev/null
++++ b/weed/s3api/s3api_object_handlers_nstack_mime_test.go
+@@ -0,0 +1,37 @@
++package s3api
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
++)
++
++// NStack compatibility patch: the filer store blanks an explicit
++// "application/octet-stream", so GET/HEAD must serve octet-stream for an empty
++// stored Mime instead of a type guessed from the key extension, while every
++// explicitly stored type is served unchanged.
++func TestSetResponseHeadersServesOctetStreamForEmptyMime(t *testing.T) {
++	s3a := &S3ApiServer{}
++	cases := []struct{ name, mime, want string }{
++		{"index.html", "", "application/octet-stream"},
++		{"image.SVG", "", "application/octet-stream"},
++		{"data.json", "", "application/octet-stream"},
++		{"script.js", "", "application/octet-stream"},
++		{"no-extension", "", "application/octet-stream"},
++		{"index.html", "text/html", "text/html"},
++		{"image.svg", "image/svg+xml", "image/svg+xml"},
++		{"note.txt", "text/plain; charset=utf-8", "text/plain; charset=utf-8"},
++	}
++	for _, c := range cases {
++		for _, method := range []string{http.MethodGet, http.MethodHead} {
++			entry := &filer_pb.Entry{Name: c.name, Attributes: &filer_pb.FuseAttributes{Mtime: 100, Mime: c.mime}}
++			w := httptest.NewRecorder()
++			s3a.setResponseHeaders(w, httptest.NewRequest(method, "/bucket/"+c.name, nil), entry, 4)
++			if got := w.Header().Get("Content-Type"); got != c.want {
++				t.Errorf("%s %s (stored %q): Content-Type = %q, want %q", method, c.name, c.mime, got, c.want)
++			}
++		}
++	}
++}

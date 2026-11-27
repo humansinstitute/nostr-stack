@@ -357,6 +357,7 @@ describe('E2 rebuild_deploy_docker.sh profile inference and conflict guards', ()
           STORAGE_S3_SECRET_KEY: '',
           SEAWEEDFS_ACCESS_KEY: '',
           SEAWEEDFS_SECRET_KEY: '',
+          SEAWEEDFS_IMAGE: '',
           PATH: `${join(dir, 'bin')}:${Bun.env.PATH}`,
           ENV_FILE: '.env.prod',
           COMPOSE_FILE: 'docker-compose.prod.yml',
@@ -393,19 +394,29 @@ describe('E2 rebuild_deploy_docker.sh profile inference and conflict guards', ()
     expect(ext.code).toBe(0);
     expect(ext.calls).toContain('[PROFILES= TOWER_ENV=.env.prod] compose');
 
+    const sfsImage = `sha256:${'d'.repeat(64)}`;
     const sfs = await runRebuild(
-      'TOWER_HOST_PORT=3100\nSTORAGE_PROVIDER=seaweedfs # active\nSTORAGE_S3_ENDPOINT=http://seaweedfs:8333\n',
+      `TOWER_HOST_PORT=3100\nSTORAGE_PROVIDER=seaweedfs # active\nSTORAGE_S3_ENDPOINT=http://seaweedfs:8333\nSEAWEEDFS_IMAGE=${sfsImage}\n`,
     );
     expect(sfs.code).toBe(0);
     expect(sfs.calls).toContain('[PROFILES=seaweedfs TOWER_ENV=.env.prod] compose');
+    expect(sfs.calls).toContain(`bun [PROFILES=seaweedfs TOWER_ENV=.env.prod] scripts/nstack-seaweedfs-image.ts verify ${sfsImage}`);
     expect(sfs.calls).not.toContain('PROFILES=minio');
+
+    // The seaweedfs profile never falls back to a stock or unrecorded image.
+    const sfsNoImage = await runRebuild('TOWER_HOST_PORT=3100\nSTORAGE_PROVIDER=seaweedfs\nSTORAGE_S3_ENDPOINT=http://seaweedfs:8333\n');
+    expect(sfsNoImage.code).not.toBe(0);
+    expect(sfsNoImage.stderr).toContain('requires SEAWEEDFS_IMAGE');
+    expect(sfsNoImage.calls).not.toContain('build tower');
+    expect(sfsNoImage.calls).not.toContain(' up -d');
 
     // Exported STORAGE_PROVIDER + STORAGE_S3_ENDPOINT override ENV_FILE (Compose precedence).
     const exportedOverride = await runRebuild(
       'TOWER_HOST_PORT=3100\nSTORAGE_S3_ENDPOINT=http://minio:9000\n',
-      { STORAGE_PROVIDER: 'seaweedfs', STORAGE_S3_ENDPOINT: 'http://seaweedfs:8333' },
+      { STORAGE_PROVIDER: 'seaweedfs', STORAGE_S3_ENDPOINT: 'http://seaweedfs:8333', SEAWEEDFS_IMAGE: sfsImage },
     );
     expect(exportedOverride.code).toBe(0);
+    expect(exportedOverride.calls).toContain(`scripts/nstack-seaweedfs-image.ts verify ${sfsImage}`);
     expect(exportedOverride.calls).toContain('[PROFILES=seaweedfs TOWER_ENV=.env.prod] compose');
 
     // Exported STORAGE_PROVIDER=seaweedfs alone over MinIO endpoint fails closed (does not bypass conflict check).

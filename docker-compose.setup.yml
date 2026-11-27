@@ -31,7 +31,10 @@ services:
       retries: 40
   seaweedfs:
     profiles: ["seaweedfs"]
-    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9}
+    # NStack build of SeaweedFS 4.55 (deploy/seaweedfs; scripts/nstack-seaweedfs-image.ts). Installations
+    # set SEAWEEDFS_IMAGE to its immutable local reference; the stock image is never pulled.
+    image: ${SEAWEEDFS_IMAGE:-nstack-seaweedfs:4.55-nstack.1}
+    pull_policy: never
     user: "1000:1000"
     entrypoint: ["/bin/sh", "/run/nstack-storage/render-seaweedfs-config.sh"]
     environment:

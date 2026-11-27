@@ -44,7 +44,13 @@ describe('production deployment security contract', () => {
     expect(compose).toContain('${SEAWEEDFS_HOST_BIND_ADDRESS:-127.0.0.1}:${SEAWEEDFS_API_HOST_PORT:-8333}:8333');
     expect(compose).toContain('STORAGE_S3_DEFAULT_MINIO_ENDPOINT: http://minio:9000');
     expect(compose).toContain('STORAGE_S3_ENDPOINT: ${STORAGE_S3_ENDPOINT:-}');
-    expect(compose).toContain('chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9');
+    // SeaweedFS is the NStack build, never pulled; the recipe pins upstream and toolchain by digest.
+    expect(compose).toContain('image: ${SEAWEEDFS_IMAGE:-nstack-seaweedfs:4.55-nstack.1}');
+    expect(compose).not.toContain('chrislusf/seaweedfs');
+    const recipe = readFileSync(join(import.meta.dir, '../deploy/seaweedfs/Dockerfile'), 'utf8');
+    expect(recipe).toContain('chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9');
+    expect(recipe).toMatch(/golang@sha256:[0-9a-f]{64}/);
+    expect(recipe).toMatch(/SEAWEEDFS_SOURCE_SHA256=[0-9a-f]{64}/);
     expect(compose).not.toContain('minio/minio:latest');
     expect(compose).not.toContain('minio/mc:latest');
     expect(compose).toContain('storage-internal:');

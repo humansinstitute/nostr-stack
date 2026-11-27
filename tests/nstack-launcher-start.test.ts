@@ -45,6 +45,15 @@ case "$*" in
    printf '%s' "$PROVIDER_REPLY"
    exit 0
    ;;
+ 'image inspect --format {{.Id}} nstack-seaweedfs'*)
+   printf '%s\n' 'sha256:${'e'.repeat(64)}'
+   ;;
+ 'image inspect --format {{.Id}} {{json .Config.Labels}} sha256:'*)
+   printf '%s\n' 'sha256:${'e'.repeat(64)} {"org.opencontainers.image.title":"nstack-seaweedfs","org.opencontainers.image.version":"4.55-nstack.1","org.opencontainers.image.revision":"a98c9e27185cf1003eca095761a39973c60734db","io.nstack.seaweedfs.patches":"0001-s3-serve-octet-stream-for-empty-mime"}'
+   ;;
+ 'image save --output '*) : > "$4";;
+ 'image inspect nstack-seaweedfs'*) [ "$FAIL" != image ];;
+ 'build -t nstack-seaweedfs'*) exit 1;;
  'image inspect '*) exit 0;;
  'run --rm --entrypoint bun '*) echo 1.4.4;;
  'pull '*) exit 1;;
@@ -61,6 +70,7 @@ esac
         ...process.env,
         PATH: dir + ':/usr/bin:/bin',
         CALLS: log,
+        NSTACK_INSTALLATIONS_DIR: join(dir, 'installations'),
         FAIL: fail,
         PROVIDER_REPLY: providerReply,
         ...(opts.extraEnv || {}),
@@ -90,15 +100,26 @@ test('missing Compose fails before downloading or changing containers', async ()
   expect(r.text).toContain('Compose plugin is unavailable');
 });
 
-test('fresh install defaults to SeaweedFS: pulls postgres+seaweedfs and skips Go minio build', async () => {
+test('fresh install defaults to SeaweedFS: pulls only postgres (never stock SeaweedFS) and skips Go minio build', async () => {
   const r = await launch('build');
   expect(r.code).not.toBe(0);
-  expect(r.calls).toContain('pull postgres seaweedfs');
+  expect(r.calls).toContain('pull postgres');
+  expect(r.calls).not.toContain('pull postgres seaweedfs');
   expect(r.calls).toContain('build bootstrap');
   expect(r.calls).not.toContain('build bootstrap minio');
   expect(r.calls).not.toContain(' up ');
   expect(r.calls).not.toContain('pull controller');
   expect(r.text).toContain('existing volumes, credentials and identity are preserved');
+});
+
+test('fresh SeaweedFS install builds the NStack SeaweedFS image and fails closed before startup when that build fails', async () => {
+  const r = await launch('image');
+  expect(r.code).not.toBe(0);
+  expect(r.calls).toContain('build bootstrap');
+  expect(r.calls).toContain('build -t nstack-seaweedfs:4.55-nstack.1');
+  expect(r.calls).not.toContain(' up ');
+  expect(r.calls).not.toMatch(/pull [^\n]*seaweedfs/);
+  expect(r.text).toContain('SeaweedFS image build failed');
 });
 
 test('existing MinIO setup project preserves minio build path without switching to SeaweedFS', async () => {

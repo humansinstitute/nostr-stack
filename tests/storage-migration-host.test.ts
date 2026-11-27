@@ -35,8 +35,9 @@ describe('storage migration host helpers', () => {
   });
 
   test('switched env keeps unmanaged settings, replaces managed keys once and preserves the public meaning', () => {
-    const old = 'COMPOSE_PROJECT_NAME=wingman-tower\nSTORAGE_S3_ENDPOINT=http://minio:9000\nSTORAGE_S3_ENDPOINT_PUBLIC=https://storage.example.org\nSTORAGE_S3_ACCESS_KEY=root\nSTORAGE_S3_SECRET_KEY=rootsecret\nMINIO_API_HOST_PORT=9010\nSEAWEEDFS_API_HOST_PORT=8333\nOTHER=keep\n';
-    const plan = planSwitch(parseEnvText(old), '/abs/.env.seaweedfs-admin');
+    const old = 'COMPOSE_PROJECT_NAME=wingman-tower\nSTORAGE_S3_ENDPOINT=http://minio:9000\nSTORAGE_S3_ENDPOINT_PUBLIC=https://storage.example.org\nSTORAGE_S3_ACCESS_KEY=root\nSTORAGE_S3_SECRET_KEY=rootsecret\nMINIO_API_HOST_PORT=9010\nSEAWEEDFS_API_HOST_PORT=8333\nSEAWEEDFS_IMAGE=chrislusf/seaweedfs:latest\nOTHER=keep\n';
+    const image = `sha256:${'a'.repeat(64)}`;
+    const plan = planSwitch(parseEnvText(old), '/abs/.env.seaweedfs-admin', undefined, image);
     expect(plan).toMatchObject({ publicEndpoint: 'https://storage.example.org', postPort: 9010, bindAddress: '127.0.0.1' });
     const out = renderSwitchedEnv(old, creds, plan, 'run-1');
     const env = parseEnvText(out);
@@ -47,6 +48,11 @@ describe('storage migration host helpers', () => {
     expect(env.get('STORAGE_S3_ACCESS_KEY')).toBe(creds.appAccessKey);
     expect(env.get('SEAWEEDFS_API_HOST_PORT')).toBe('9010');
     expect(env.get('OTHER')).toBe('keep');
+    expect(env.get('SEAWEEDFS_IMAGE')).toBe(image);
+    expect(out.match(/^SEAWEEDFS_IMAGE=/gm)!.length).toBe(1);
+    for (const bad of ['chrislusf/seaweedfs@sha256:' + 'b'.repeat(64), 'nstack-seaweedfs@sha256:' + 'b'.repeat(64), 'nstack-seaweedfs:4.55-nstack.1', '']) {
+      expect(() => planSwitch(parseEnvText(old), '/abs/.env.seaweedfs-admin', undefined, bad)).toThrow('immutable NStack reference');
+    }
     expect(env.get('MINIO_API_HOST_PORT')).toBe('9010');
     expect(out).not.toContain(creds.adminSecretKey);
     expect(out.match(/^STORAGE_S3_ACCESS_KEY=/gm)!.length).toBe(1);
@@ -157,7 +163,7 @@ describe('storage migration host helpers', () => {
     refuse(labEnv, 'SEAWEEDFS_ADMIN_ENV_FILE=/srv/labs/a/state/target.env', 'must not be', '/srv/labs/a/state/target.env');
     refuse(labEnv, 'SEAWEEDFS_ADMIN_ENV_FILE="/srv/labs/a/$HOME"', 'unsupported characters');
     // The switched env carries the resolved path explicitly, so Compose and the runner agree after the switch.
-    const plan = planSwitch(parseEnvText('STORAGE_S3_ENDPOINT_PUBLIC=http://127.0.0.1:29010'), '/srv/labs/a/seaweedfs-admin.env');
+    const plan = planSwitch(parseEnvText('STORAGE_S3_ENDPOINT_PUBLIC=http://127.0.0.1:29010'), '/srv/labs/a/seaweedfs-admin.env', undefined, `sha256:${'c'.repeat(64)}`);
     expect(parseEnvText(renderSwitchedEnv('A=1\n', creds, plan, 'run-1')).get('SEAWEEDFS_ADMIN_ENV_FILE')).toBe('/srv/labs/a/seaweedfs-admin.env');
   });
 

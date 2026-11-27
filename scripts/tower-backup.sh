@@ -106,27 +106,35 @@ resolve_seaweedfs_data_volume() {
 validate_manifest_components() {
   local manifest="$1" version="$2" provider="$3"
   local expected_storage_file="${provider}-data.tar.age"
+  # SeaweedFS sets also carry the exact NStack SeaweedFS image, so restore never rebuilds or substitutes it.
+  local expected_count=3 extra_name=""
+  if [[ $provider == seaweedfs ]]; then expected_count=4; extra_name="seaweedfs-image"; fi
   local comp_count
   comp_count=$(jq -er '.components | length' <<<"$manifest")
-  [[ "$comp_count" == "3" ]] || die "manifest must contain exactly 3 components (main-postgres, graph-postgres, $provider); found $comp_count"
+  [[ "$comp_count" == "$expected_count" ]] || die "manifest must contain exactly $expected_count components (main-postgres, graph-postgres, $provider${extra_name:+, $extra_name}); found $comp_count"
 
   local unique_names
   unique_names=$(jq -r '[.components[].name] | unique | sort | join(",")' <<<"$manifest")
   local expected_names
-  expected_names=$(printf 'graph-postgres\nmain-postgres\n%s\n' "$provider" | LC_ALL=C sort | paste -sd, -)
+  expected_names=$(printf 'graph-postgres\nmain-postgres\n%s\n%s' "$provider" "$extra_name" | sed '/^$/d' | LC_ALL=C sort | paste -sd, -)
   [[ "$unique_names" == "$expected_names" ]] || die "manifest components mismatch: expected [$expected_names], found [$unique_names]"
 
   local expected_pair
   for expected_pair in \
     "main-postgres:main-postgres.dump.age:pg_dump-custom" \
     "graph-postgres:graph-postgres.dump.age:pg_dump-custom" \
-    "${provider}:${expected_storage_file}:tar"; do
+    "${provider}:${expected_storage_file}:tar" \
+    ${extra_name:+"seaweedfs-image:seaweedfs-image.tar.age:docker-image-archive"}; do
     local e_name e_file e_fmt found
     IFS=: read -r e_name e_file e_fmt <<<"$expected_pair"
     found=$(jq -r --arg n "$e_name" --arg f "$e_file" --arg t "$e_fmt" \
       '[.components[] | select(.name == $n and .file == $f and .format == $t)] | length' <<<"$manifest")
     [[ "$found" == "1" ]] || die "manifest missing required component $e_name ($e_file, $e_fmt)"
   done
+  if [[ -n $extra_name ]]; then
+    jq -er '.components[] | select(.name == "seaweedfs-image") | (.image_id | test("^sha256:[0-9a-f]{64}$")) and (.image_ref == .image_id)' <<<"$manifest" \
+      | grep -qx true || die "manifest seaweedfs-image component lacks a valid image_ref/image_id"
+  fi
 }
 
 backup() {
@@ -141,11 +149,15 @@ backup() {
   [[ $(state "$GRAPH_CONTAINER") == running ]] || die "$GRAPH_CONTAINER is not running"
   [[ ! -e $OUTPUT ]] || die "output already exists: $OUTPUT"
 
-  local storage_file seaweedfs_volume=""
+  local storage_file seaweedfs_volume="" seaweedfs_image_ref="" seaweedfs_image_id=""
   if [[ $STORAGE_PROVIDER == seaweedfs ]]; then
     storage_file="seaweedfs-data.tar.age"
     is_stopped_state "$SEAWEEDFS_CONTAINER" || die "$SEAWEEDFS_CONTAINER is not stopped (state=$(state "$SEAWEEDFS_CONTAINER")); gracefully stop SeaweedFS before backup so LevelDB metadata is consistent"
     seaweedfs_volume="$(resolve_seaweedfs_data_volume)"
+    seaweedfs_image_ref=$(docker inspect -f '{{.Config.Image}}' "$SEAWEEDFS_CONTAINER")
+    seaweedfs_image_id=$(docker inspect -f '{{.Image}}' "$SEAWEEDFS_CONTAINER")
+    [[ $seaweedfs_image_ref =~ ^sha256:[0-9a-f]{64}$ ]] || die "$SEAWEEDFS_CONTAINER runs $seaweedfs_image_ref, not an NStack SeaweedFS image ID reference"
+    [[ $(docker image inspect -f '{{.Id}}' "$seaweedfs_image_ref") == "$seaweedfs_image_id" ]] || die "SeaweedFS image $seaweedfs_image_ref no longer resolves to the running container's image"
   else
     storage_file="minio-data.tar.age"
     [[ $(state "$MINIO_CONTAINER") == running ]] || die "$MINIO_CONTAINER is not running"
@@ -170,6 +182,7 @@ backup() {
     # so LevelDB metadata and volume files are consistent with UID/GID 1000:1000 preserved.
     docker run --rm --network none -v "${seaweedfs_volume}:/data:ro" postgres:16-alpine tar -C /data -cf - . \
       | age --encrypt --recipient "$RECIPIENT" --output "$staging/$storage_file"
+    docker image save "$seaweedfs_image_ref" | age --encrypt --recipient "$RECIPIENT" --output "$staging/seaweedfs-image.tar.age"
   else
     # The pinned MinIO image ships no tar; read its /data volume through a read-only helper.
     local minio_volume
@@ -183,16 +196,23 @@ backup() {
   main_sha=$(sha "$staging/main-postgres.dump.age"); main_size=$(size "$staging/main-postgres.dump.age")
   graph_sha=$(sha "$staging/graph-postgres.dump.age"); graph_size=$(size "$staging/graph-postgres.dump.age")
   storage_sha=$(sha "$staging/$storage_file"); storage_size=$(size "$staging/$storage_file")
+  local image_component='[]'
+  if [[ $STORAGE_PROVIDER == seaweedfs ]]; then
+    image_component=$(jq -n -c --arg sha "$(sha "$staging/seaweedfs-image.tar.age")" --argjson bytes "$(size "$staging/seaweedfs-image.tar.age")" \
+      --arg ref "$seaweedfs_image_ref" --arg id "$seaweedfs_image_id" \
+      '[{name:"seaweedfs-image",file:"seaweedfs-image.tar.age",sha256:$sha,encrypted_bytes:$bytes,format:"docker-image-archive",image_ref:$ref,image_id:$id}]')
+  fi
   jq -n -c \
+    --argjson image_component "$image_component" \
     --argjson version "$SCRIPT_VERSION" --arg created_at "$created" \
     --arg storage_provider "$STORAGE_PROVIDER" --arg storage_file "$storage_file" \
     --arg main_sha "$main_sha" --arg graph_sha "$graph_sha" --arg storage_sha "$storage_sha" \
     --argjson main_size "$main_size" --argjson graph_size "$graph_size" --argjson storage_size "$storage_size" \
-    '{format:"wingman-tower-backup",version:$version,storage_provider:$storage_provider,created_at:$created_at,consistency:"operator-quiesced",components:[
+    '{format:"wingman-tower-backup",version:$version,storage_provider:$storage_provider,created_at:$created_at,consistency:"operator-quiesced",components:([
       {name:"main-postgres",file:"main-postgres.dump.age",sha256:$main_sha,encrypted_bytes:$main_size,format:"pg_dump-custom"},
       {name:"graph-postgres",file:"graph-postgres.dump.age",sha256:$graph_sha,encrypted_bytes:$graph_size,format:"pg_dump-custom"},
       {name:$storage_provider,file:$storage_file,sha256:$storage_sha,encrypted_bytes:$storage_size,format:"tar"}
-    ]}' | age --encrypt --recipient "$RECIPIENT" --output "$staging/manifest.json.age"
+    ] + $image_component)}' | age --encrypt --recipient "$RECIPIENT" --output "$staging/manifest.json.age"
 
   mv "$staging" "$OUTPUT"
   completed=1
@@ -231,7 +251,7 @@ verify() {
         age --decrypt --identity "$IDENTITY" "$BACKUP/$file" \
           | docker run --rm -i postgres:16-alpine pg_restore --list >/dev/null
         ;;
-      tar)
+      tar|docker-image-archive)
         age --decrypt --identity "$IDENTITY" "$BACKUP/$file" | tar -tf - >/dev/null
         ;;
       *)
@@ -335,6 +355,17 @@ END $$;
 SQL
   age --decrypt --identity "$IDENTITY" "$BACKUP/$storage_file" \
     | docker run --rm -i --network none -v "$storage_volume:/restore" postgres:16-alpine tar -C /restore -xf -
+  if [[ $provider == seaweedfs && $version == 2 ]]; then
+    # Make the exact recorded SeaweedFS image available (load only when its ID is absent).
+    local image_id image_ref
+    image_id=$(jq -er '.components[] | select(.name == "seaweedfs-image") | .image_id' <<<"$manifest")
+    image_ref=$(jq -er '.components[] | select(.name == "seaweedfs-image") | .image_ref' <<<"$manifest")
+    if ! docker image inspect "$image_id" >/dev/null 2>&1; then
+      age --decrypt --identity "$IDENTITY" "$BACKUP/seaweedfs-image.tar.age" | docker image load >/dev/null
+    fi
+    [[ $(docker image inspect -f '{{.Id}}' "$image_id" 2>/dev/null) == "$image_id" ]] || die "SeaweedFS image $image_id could not be restored from the backup"
+    printf 'SeaweedFS image available: %s (recorded reference %s)\n' "$image_id" "$image_ref"
+  fi
   printf 'Restored into disposable targets only (provider=%s):\n  %s\n  %s\n  %s\n' "$provider" "$main_container" "$graph_container" "$storage_volume"
   printf 'Restored storage_migration_runs rows (if any) marked aborted_restore in %s only.\n' "$main_container"
   printf 'No ports are published. Inspect, test, then explicitly remove these targets when finished.\n'

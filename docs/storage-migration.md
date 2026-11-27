@@ -33,7 +33,7 @@ NStack defaults new installations to **SeaweedFS 4.55** (pinned multi-arch OCI d
 
 ## Architecture & Security Isolation (SeaweedFS 4.55)
 
-- Pinned image: `chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9`.
+- Image: the NStack build of SeaweedFS 4.55 (`deploy/seaweedfs`): the pinned upstream image `chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9` with `/usr/bin/weed` rebuilt from the pinned source plus a compatibility patch that serves stored generic-binary objects as `application/octet-stream` instead of guessing a type from the key extension. Installations reference it by image ID (`SEAWEEDFS_IMAGE=sha256:…`); the stock image is never pulled. See `deploy/seaweedfs/README.md`.
 - Dedicated volume (`tower-seaweedfs-data` in prod, `storage-seaweedfs` in setup). **Never mount a MinIO data volume in SeaweedFS.**
 - Rendered by `deploy/nstack/render-seaweedfs-config.sh`:
   - Runs non-root (`1000:1000`), `read_only: true`, `cap_drop: ["ALL"]`, `no-new-privileges:true`, `/tmp` tmpfs.
@@ -76,7 +76,7 @@ All host commands default to project `wingman-tower`, `.env.prod`, the FIPS over
    ```sh
    scripts/nstack-migrate-storage-host.sh target-init
    ```
-   Creates `target.env` (mode `0600`) with distinct generated app and admin identities if it does not exist, starts `seaweedfs` with no host ports on `storage-internal`, and runs `seaweedfs-init` (bucket, private policy check, sentinel, read/write probe).
+   Creates `target.env` (mode `0600`) with distinct generated app and admin identities if it does not exist, records the NStack SeaweedFS image ID (the env file's `SEAWEEDFS_IMAGE`, else the local build, else it builds `deploy/seaweedfs`) and saves a validated copy of that image under the state directory, starts `seaweedfs` from that image with no host ports on `storage-internal`, and runs `seaweedfs-init` (bucket, private policy check, sentinel, read/write probe). Every later start, publish and the cutover gate re-check the recorded image and saved copy; the config switch writes `SEAWEEDFS_IMAGE=<ID>` into the env file.
 3. **Preflight (read-only) and online warm pre-copy (NStack keeps serving):**
    ```sh
    scripts/nstack-migrate-storage-host.sh preflight
@@ -97,7 +97,7 @@ All host commands default to project `wingman-tower`, `.env.prod`, the FIPS over
    - At or after `start_intent`: bare `rollback` exits `15`. Fail forward on SeaweedFS (`cutover --resume`), or use `rollback --reverse-migrate` (RB2) while SeaweedFS is readable, or inspect `status` for RB2 at-risk object IDs.
 5. **Post-cutover observation, first SeaweedFS backup, and explicit retirement:**
    - Observe 24–48 h with MinIO stopped (its container and volume are retained).
-   - Within 24 h of commit, take the first SeaweedFS v2 backup (Tower and SeaweedFS stopped so LevelDB metadata is consistent), verify it, then start SeaweedFS and Tower:
+   - Within 24 h of commit, take the first SeaweedFS v2 backup (Tower and SeaweedFS stopped so LevelDB metadata is consistent; the set also carries the exact SeaweedFS image), verify it, then start SeaweedFS and Tower:
      ```sh
      DC="docker compose --env-file .env.prod -f docker-compose.prod.yml --env-file .env.fips -f docker-compose.fips.yml"
      COMPOSE_PROFILES=seaweedfs $DC stop tower seaweedfs

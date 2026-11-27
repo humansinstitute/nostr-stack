@@ -102,6 +102,7 @@ ENV_STORAGE_PROVIDER="$(env_value STORAGE_PROVIDER | tr '[:upper:]' '[:lower:]')
 ENV_STORAGE_ENDPOINT="$(env_value STORAGE_S3_ENDPOINT)"
 ENV_COMPOSE_PROFILES="$(env_value COMPOSE_PROFILES)"
 ENV_MINIO_IMAGE="$(env_value MINIO_IMAGE)"
+ENV_SEAWEEDFS_IMAGE="$(env_value SEAWEEDFS_IMAGE)"
 ENV_TOWER_HOST_PORT="$(env_value TOWER_HOST_PORT)"
 ENV_SFS_ACCESS_KEY="$(env_value SEAWEEDFS_ACCESS_KEY)"
 ENV_SFS_SECRET_KEY="$(env_value SEAWEEDFS_SECRET_KEY)"
@@ -112,6 +113,7 @@ MINIO_DEFAULT_PIN="minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff
 EFFECTIVE_STORAGE_PROVIDER="$(printf '%s' "${STORAGE_PROVIDER:-$ENV_STORAGE_PROVIDER}" | tr '[:upper:]' '[:lower:]')"
 EFFECTIVE_STORAGE_ENDPOINT="${STORAGE_S3_ENDPOINT:-$ENV_STORAGE_ENDPOINT}"
 EFFECTIVE_MINIO_IMAGE="${MINIO_IMAGE:-$ENV_MINIO_IMAGE}"
+EFFECTIVE_SEAWEEDFS_IMAGE="${SEAWEEDFS_IMAGE:-$ENV_SEAWEEDFS_IMAGE}"
 EFFECTIVE_TOWER_HOST_PORT="${TOWER_HOST_PORT:-$ENV_TOWER_HOST_PORT}"
 EFFECTIVE_SFS_ACCESS_KEY="${SEAWEEDFS_ACCESS_KEY:-$ENV_SFS_ACCESS_KEY}"
 EFFECTIVE_SFS_SECRET_KEY="${SEAWEEDFS_SECRET_KEY:-$ENV_SFS_SECRET_KEY}"
@@ -207,6 +209,21 @@ if [[ ",$COMPOSE_PROFILES," == *",minio,"* ]]; then
     echo "Set MINIO_IMAGE to your cached/mirrored digest or complete explicit migration to SeaweedFS." >&2
     exit 1
   fi
+fi
+
+# SeaweedFS runs only the NStack build (deploy/seaweedfs), referenced immutably; never a stock pull.
+if [[ ",$COMPOSE_PROFILES," == *",seaweedfs,"* ]]; then
+  if [[ -z "$EFFECTIVE_SEAWEEDFS_IMAGE" ]]; then
+    echo "ERROR: the seaweedfs profile requires SEAWEEDFS_IMAGE (immutable NStack SeaweedFS reference) in $ENV_FILE." >&2
+    echo "Build it with: bun scripts/nstack-seaweedfs-image.ts build   (or load a saved artifact: ... load <dir>)" >&2
+    exit 1
+  fi
+  if ! bun scripts/nstack-seaweedfs-image.ts verify "$EFFECTIVE_SEAWEEDFS_IMAGE" >/dev/null; then
+    echo "ERROR: SEAWEEDFS_IMAGE=$EFFECTIVE_SEAWEEDFS_IMAGE is not a present, verified NStack SeaweedFS image." >&2
+    echo "Load the saved artifact (bun scripts/nstack-seaweedfs-image.ts load <dir>) or rebuild and re-qualify." >&2
+    exit 1
+  fi
+  export SEAWEEDFS_IMAGE="$EFFECTIVE_SEAWEEDFS_IMAGE"
 fi
 
 # Read-only APNs/FCM key directories mounted into Tower; empty (no key) is a valid, healthy state.

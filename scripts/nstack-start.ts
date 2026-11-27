@@ -7,6 +7,8 @@ import {
   type SetupStorageProviderRecord,
 } from '../src/installation/setup-storage-provider';
 import {resolve,join} from 'node:path';
+import {existsSync,mkdirSync,readFileSync,writeFileSync} from 'node:fs';
+import {buildImage,immutableRef,saveImage,validateArtifact,verifyImage,SEAWEEDFS_IMAGE_TAG} from './nstack-seaweedfs-image';
 const root=resolve(import.meta.dir,'..');const project=process.argv[2]||'nstack';
 if(!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(project))throw Error('Invalid installation name');
 async function dockerOut(args:string[]):Promise<{code:number;out:string;err:string}>{
@@ -109,6 +111,25 @@ const env={
  NSTACK_BUILD_COMMIT:sha,
  NSTACK_BUILD_TIME:new Date().toISOString(),
 };
+// SeaweedFS is the NStack build (deploy/seaweedfs), never a stock pull. The first install records
+// its immutable reference and a saved copy; later runs reuse exactly that image or fail closed.
+async function seaweedfsImageForInstallation():Promise<string>{
+ const dir=join(process.env.NSTACK_INSTALLATIONS_DIR||join(root,'.runtime/installations'),project),record=join(dir,'seaweedfs-image.json');
+ if(existsSync(record)){
+  const saved=JSON.parse(readFileSync(record,'utf8')) as {ref:string;id:string};
+  let v;try{v=verifyImage(saved.ref);}catch(err){throw Error(`Recorded SeaweedFS image ${saved.ref} is unavailable: ${err instanceof Error?err.message:err} Load ${join(dir,'seaweedfs-image-artifact')} with scripts/nstack-seaweedfs-image.ts load, then retry the same installation name.`);}
+  if(v.id!==saved.id)throw Error(`SeaweedFS image ${saved.ref} no longer matches the recorded image; refusing to continue.`);
+  try{await validateArtifact(join(dir,'seaweedfs-image-artifact'),saved);}catch(err){throw Error(`Saved SeaweedFS image artifact is invalid: ${err instanceof Error?err.message:err} Refusing to continue.`);}
+  return saved.ref;
+ }
+ const tagPresent=Bun.spawnSync(['docker','image','inspect',SEAWEEDFS_IMAGE_TAG],{stdout:'ignore',stderr:'ignore'}).exitCode===0;
+ let v;try{v=tagPresent?verifyImage(immutableRef(SEAWEEDFS_IMAGE_TAG)):buildImage();}catch(err){throw Error(`SeaweedFS image build failed: ${err instanceof Error?err.message:err} Retry the same installation name; existing volumes, credentials and identity are preserved.`);}
+ mkdirSync(dir,{recursive:true,mode:0o700});
+ const artifact=join(dir,'seaweedfs-image-artifact');
+ await saveImage(v.ref,artifact);
+ writeFileSync(record,JSON.stringify({ref:v.ref,id:v.id,recorded_at:new Date().toISOString()},null,2)+'\n',{mode:0o600});
+ return v.ref;
+}
 async function step(args:string[],failure:string){
  const child=Bun.spawn([...compose,...args],{cwd:root,stdout:'inherit',stderr:'inherit',env});
  if(await child.exited!==0)throw Error(failure+' Retry with the same installation name; existing volumes, credentials and identity are preserved.');
@@ -116,8 +137,9 @@ async function step(args:string[],failure:string){
 // Fetch only external runtime images. Build every local image before any service
 // can use it (controller and storage-init/seaweedfs-init share the built image).
 if(storageProvider==='seaweedfs'){
- await step(['pull','postgres','seaweedfs'],'Postgres or SeaweedFS image download failed. Check network/registry availability.');
+ await step(['pull','postgres'],'Postgres download failed. Check network/registry availability.');
  await step(['build','bootstrap'],'Local image build failed. Check the build output for the exact unavailable dependency.');
+ (env as Record<string,string>).SEAWEEDFS_IMAGE=await seaweedfsImageForInstallation();
 }else if(storageProvider==='minio'){
  await step(['pull','postgres'],'Postgres download failed. Check network/registry availability.');
  await step(['build','bootstrap','minio'],'Local image build failed. Check the build output for the exact unavailable dependency.');

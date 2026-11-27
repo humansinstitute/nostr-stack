@@ -639,7 +639,7 @@ describe('E5 tower-backup.sh manifest component validation', () => {
         components: [],
       });
       expect(empty.exitCode).not.toBe(0);
-      expect(empty.stderr.toString()).toContain('exactly 3 components');
+      expect(empty.stderr.toString()).toContain('exactly 4 components');
 
       // Duplicate components (3 entries but missing seaweedfs)
       const dup = runVerifyWithManifest({
@@ -651,6 +651,7 @@ describe('E5 tower-backup.sh manifest component validation', () => {
           { name: 'main-postgres', file: 'main-postgres.dump.age', sha256: 'a', format: 'pg_dump-custom' },
           { name: 'main-postgres', file: 'main-postgres.dump.age', sha256: 'a', format: 'pg_dump-custom' },
           { name: 'graph-postgres', file: 'graph-postgres.dump.age', sha256: 'b', format: 'pg_dump-custom' },
+          { name: 'seaweedfs-image', file: 'seaweedfs-image.tar.age', sha256: 'd', format: 'docker-image-archive', image_ref: `sha256:${'e'.repeat(64)}`, image_id: `sha256:${'e'.repeat(64)}` },
         ],
       });
       expect(dup.exitCode).not.toBe(0);
@@ -666,10 +667,27 @@ describe('E5 tower-backup.sh manifest component validation', () => {
           { name: 'main-postgres', file: 'main-postgres.dump.age', sha256: 'a', format: 'pg_dump-custom' },
           { name: 'graph-postgres', file: 'graph-postgres.dump.age', sha256: 'b', format: 'pg_dump-custom' },
           { name: 'minio', file: 'minio-data.tar.age', sha256: 'c', format: 'tar' },
+          { name: 'seaweedfs-image', file: 'seaweedfs-image.tar.age', sha256: 'd', format: 'docker-image-archive', image_ref: `sha256:${'e'.repeat(64)}`, image_id: `sha256:${'e'.repeat(64)}` },
         ],
       });
       expect(wrongProv.exitCode).not.toBe(0);
       expect(wrongProv.stderr.toString()).toContain('components mismatch');
+
+      // A SeaweedFS set must carry the exact SeaweedFS image.
+      const base = [
+        { name: 'main-postgres', file: 'main-postgres.dump.age', sha256: 'a', format: 'pg_dump-custom' },
+        { name: 'graph-postgres', file: 'graph-postgres.dump.age', sha256: 'b', format: 'pg_dump-custom' },
+        { name: 'seaweedfs', file: 'seaweedfs-data.tar.age', sha256: 'c', format: 'tar' },
+      ];
+      const noImage = runVerifyWithManifest({ format: 'wingman-tower-backup', version: 2, storage_provider: 'seaweedfs', created_at: new Date().toISOString(), components: base });
+      expect(noImage.exitCode).not.toBe(0);
+      expect(noImage.stderr.toString()).toContain('exactly 4 components');
+      const badIdentity = runVerifyWithManifest({
+        format: 'wingman-tower-backup', version: 2, storage_provider: 'seaweedfs', created_at: new Date().toISOString(),
+        components: [...base, { name: 'seaweedfs-image', file: 'seaweedfs-image.tar.age', sha256: 'd', format: 'docker-image-archive', image_ref: 'chrislusf/seaweedfs:latest', image_id: 'x' }],
+      });
+      expect(badIdentity.exitCode).not.toBe(0);
+      expect(badIdentity.stderr.toString()).toContain('lacks a valid image_ref/image_id');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

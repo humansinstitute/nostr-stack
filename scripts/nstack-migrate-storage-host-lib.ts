@@ -170,7 +170,7 @@ export function resolveAdminEnvPath(opts: { envFile: string; env: Map<string, st
 }
 
 export const MANAGED_ENV_KEYS = [
-  'STORAGE_PROVIDER', 'COMPOSE_PROFILES', 'STORAGE_REQUIRE_SENTINEL', 'STORAGE_S3_ENDPOINT', 'STORAGE_S3_ENDPOINT_PUBLIC',
+  'STORAGE_PROVIDER', 'COMPOSE_PROFILES', 'SEAWEEDFS_IMAGE', 'STORAGE_REQUIRE_SENTINEL', 'STORAGE_S3_ENDPOINT', 'STORAGE_S3_ENDPOINT_PUBLIC',
   'STORAGE_S3_ACCESS_KEY', 'STORAGE_S3_SECRET_KEY', 'SEAWEEDFS_ACCESS_KEY', 'SEAWEEDFS_SECRET_KEY',
   'SEAWEEDFS_ADMIN_ACCESS_KEY', 'SEAWEEDFS_ADMIN_SECRET_KEY', 'SEAWEEDFS_ADMIN_ENV_FILE', 'SEAWEEDFS_HOST_BIND_ADDRESS',
   'SEAWEEDFS_API_HOST_PORT', 'SEAWEEDFS_EXTERNAL_URL', 'SEAWEEDFS_JWT_SECRET', 'SEAWEEDFS_JWT_READ_SECRET',
@@ -227,10 +227,11 @@ export interface SwitchPlan {
   bindAddress: string;
   postPort: number;
   adminEnvPath: string;
+  seaweedfsImage: string;
 }
 
 /** Decide the post-cutover public meaning: the public URL is unchanged; SeaweedFS takes MinIO's host port. */
-export function planSwitch(oldEnv: Map<string, string>, adminEnvPath: string, postPortOverride?: number): SwitchPlan {
+export function planSwitch(oldEnv: Map<string, string>, adminEnvPath: string, postPortOverride: number | undefined, seaweedfsImage: string): SwitchPlan {
   const publicEndpoint = oldEnv.get('STORAGE_S3_ENDPOINT_PUBLIC') || '';
   assertSafeUrl('STORAGE_S3_ENDPOINT_PUBLIC', publicEndpoint);
   const bindAddress = oldEnv.get('MINIO_HOST_BIND_ADDRESS') || '127.0.0.1';
@@ -238,7 +239,8 @@ export function planSwitch(oldEnv: Map<string, string>, adminEnvPath: string, po
   const postPort = postPortOverride ?? Number(oldEnv.get('MINIO_API_HOST_PORT') || 9000);
   if (!Number.isInteger(postPort) || postPort < 1 || postPort > 65535) throw new HostError(EXIT.USAGE, 'Invalid SeaweedFS post-cutover port.');
   if (!adminEnvPath.startsWith('/') || /[\s"'`$\\]/.test(adminEnvPath)) throw new HostError(EXIT.USAGE, 'Admin env path must be an absolute path without special characters.');
-  return { publicEndpoint, bindAddress, postPort, adminEnvPath };
+  if (!/^sha256:[0-9a-f]{64}$/.test(seaweedfsImage)) throw new HostError(EXIT.PREFLIGHT_BLOCK, 'SeaweedFS image must be an immutable NStack reference (image ID).');
+  return { publicEndpoint, bindAddress, postPort, adminEnvPath, seaweedfsImage };
 }
 
 /** Render the switched env file: old content without managed keys, plus one deterministic block. */
@@ -254,6 +256,7 @@ export function renderSwitchedEnv(oldText: string, creds: TargetCredentials, pla
     `# Storage provider: SeaweedFS (switched by nstack-migrate-storage-host, run ${runId}).`,
     'STORAGE_PROVIDER=seaweedfs',
     'COMPOSE_PROFILES=seaweedfs',
+    `SEAWEEDFS_IMAGE=${plan.seaweedfsImage}`,
     'STORAGE_REQUIRE_SENTINEL=true',
     'STORAGE_S3_ENDPOINT=http://seaweedfs:8333',
     `STORAGE_S3_ENDPOINT_PUBLIC=${plan.publicEndpoint}`,

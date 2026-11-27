@@ -107,7 +107,9 @@ startup guard without permitting `--resume` on a clone. The restore databases
 are created from `template0` in the new containers, so image init scripts (the
 graph image creates the Apache AGE extension) cannot collide with the dump, and
 restored AGE graphs are re-keyed to their new schema OIDs so Cypher reads and
-writes work in the clone. Start an isolated,
+writes work in the clone. SeaweedFS sets also contain the exact NStack SeaweedFS image
+(`seaweedfs-image.tar.age`, image ID in the manifest); restore loads it when that image ID is
+absent and fails if the loaded image differs. Start an isolated,
 unexposed storage container against the restored volume only if application-level
 object tests are required. Cleanup is deliberately manual so a failed rehearsal
 remains inspectable.

@@ -12,11 +12,11 @@ import {
   releaseHostLock, renderAdminEnv, renderSwitchedEnv, renderTargetCredentials, resolveAdminEnvPath, sha256Hex, snapshotProblems,
   sourceCoordinates, writeFileOnce, type ContainerView, type FenceIdentity, type LockRecord, type TargetCredentials,
 } from './nstack-migrate-storage-host-lib';
+import { buildImage, immutableRef, SEAWEEDFS_IMAGE_TAG, SeaweedfsImageError, saveImage, validateArtifact, verifyImage } from './nstack-seaweedfs-image';
 
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const QUIESCED = ['source_fenced', 'backed_up', 'synced', 'verified', 'switch_prepared', 'db_switched', 'config_switched'];
 const POST_WRITE = ['start_intent', 'started', 'committed'];
-const SEAWEEDFS_IMAGE_DEFAULT = 'chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9';
 const MINUTE = 60_000;
 
 interface Options {
@@ -329,8 +329,57 @@ class Orchestrator {
     return path;
   }
 
+  /** The NStack SeaweedFS image recorded for this installation at target-init (immutable reference). */
+  seaweedfsImage(): { ref: string; id: string } {
+    const p = join(this.o.stateDir, 'seaweedfs-image.json');
+    if (!existsSync(p)) throw new HostError(EXIT.PREFLIGHT_BLOCK, `No SeaweedFS image is recorded (${p}); run target-init first.`);
+    const recorded = JSON.parse(readFileSync(p, 'utf8')) as { ref: string; id: string };
+    let v: { ref: string; id: string };
+    try { v = verifyImage(recorded.ref); } catch (err) { throw new HostError(EXIT.PREFLIGHT_BLOCK, err instanceof Error ? err.message : String(err)); }
+    if (v.id !== recorded.id) throw new HostError(EXIT.PREFLIGHT_BLOCK, `SeaweedFS image ${recorded.ref} now resolves to ${v.id}, not the recorded ${recorded.id}.`);
+    return recorded;
+  }
+
+  seaweedfsArtifactDir() { return join(this.o.stateDir, 'seaweedfs-image-artifact'); }
+
+  /**
+   * Record the image once: the env file's SEAWEEDFS_IMAGE, else the local NStack build, else build it.
+   * The exact image is saved (validated, atomically renamed) BEFORE the record is written, and every
+   * later call re-validates the saved artifact, so an interrupted save can never be skipped.
+   */
+  async recordSeaweedfsImage() {
+    const p = join(this.o.stateDir, 'seaweedfs-image.json');
+    try {
+      if (existsSync(p)) {
+        const recorded = this.seaweedfsImage();
+        await validateArtifact(this.seaweedfsArtifactDir(), recorded);
+        return recorded;
+      }
+      const declared = readEnvFile(this.o.envFile).get('SEAWEEDFS_IMAGE');
+      const tagPresent = Bun.spawnSync(['docker', 'image', 'inspect', SEAWEEDFS_IMAGE_TAG], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
+      const v = declared ? verifyImage(declared) : tagPresent ? verifyImage(immutableRef(SEAWEEDFS_IMAGE_TAG)) : buildImage();
+      await saveImage(v.ref, this.seaweedfsArtifactDir());
+      const record = { ref: v.ref, id: v.id, recorded_at: new Date().toISOString() };
+      atomicWrite(p, JSON.stringify(record, null, 2) + '\n', 0o600);
+      return record;
+    } catch (err) {
+      if (err instanceof SeaweedfsImageError) throw new HostError(EXIT.PREFLIGHT_BLOCK, err.message);
+      throw err;
+    }
+  }
+
+  /** Cutover gate: the recorded image and its saved artifact must both still be exactly right. */
+  async assertSeaweedfsArtifact() {
+    try { await validateArtifact(this.seaweedfsArtifactDir(), this.seaweedfsImage()); } catch (err) {
+      if (err instanceof SeaweedfsImageError) throw new HostError(EXIT.PREFLIGHT_BLOCK, err.message);
+      throw err;
+    }
+  }
+
   seaweedfsEnv(creds: TargetCredentials) {
-    return { SEAWEEDFS_ACCESS_KEY: creds.appAccessKey, SEAWEEDFS_SECRET_KEY: creds.appSecretKey, SEAWEEDFS_ADMIN_ACCESS_KEY: creds.adminAccessKey, SEAWEEDFS_ADMIN_SECRET_KEY: creds.adminSecretKey };
+    // Stopping needs no image; anything that creates or starts SeaweedFS asserts the recorded one.
+    const recorded = existsSync(join(this.o.stateDir, 'seaweedfs-image.json')) ? { SEAWEEDFS_IMAGE: this.seaweedfsImage().ref } : {};
+    return { ...recorded, SEAWEEDFS_ACCESS_KEY: creds.appAccessKey, SEAWEEDFS_SECRET_KEY: creds.appSecretKey, SEAWEEDFS_ADMIN_ACCESS_KEY: creds.adminAccessKey, SEAWEEDFS_ADMIN_SECRET_KEY: creds.adminSecretKey };
   }
 
   currentRunPointer() {
@@ -506,6 +555,7 @@ class Orchestrator {
 
   // ---------- container steps ----------
   async ensureSeaweedfsInternal(creds: TargetCredentials, recreate: boolean) {
+    this.seaweedfsImage();
     const overrides = [this.seaweedfsInternalOverride()];
     await this.compose(this.o.envFile, 'seaweedfs', ['up', '-d', '--no-deps', '--no-build', '--pull', 'never', ...(recreate ? ['--force-recreate'] : []), 'seaweedfs'], { overrides, extra: this.seaweedfsEnv(creds), what: 'start SeaweedFS internal-only' });
     const c = await this.waitHealthy('seaweedfs');
@@ -518,13 +568,12 @@ class Orchestrator {
   }
 
   async assertSeaweedfsImage(c: ContainerView) {
-    const env = readEnvFile(this.o.envFile);
-    const pinned = env.get('SEAWEEDFS_IMAGE') || SEAWEEDFS_IMAGE_DEFAULT;
-    const digest = pinned.split('@')[1];
-    if (!digest) throw new HostError(EXIT.PREFLIGHT_BLOCK, `SEAWEEDFS_IMAGE must be pinned by digest (got ${pinned}).`);
-    const res = await this.docker(['image', 'inspect', '-f', '{{.Id}} {{json .RepoDigests}}', c.Image]);
-    if (res.code !== 0 || !(res.stdout.startsWith(digest) || res.stdout.includes(digest))) {
-      throw new HostError(EXIT.PREFLIGHT_BLOCK, `SeaweedFS container image ${c.Image} does not match the pinned digest ${digest}.`);
+    const image = this.seaweedfsImage();
+    const declared = readEnvFile(this.o.envFile).get('SEAWEEDFS_IMAGE');
+    if (declared && declared !== image.ref) throw new HostError(EXIT.PREFLIGHT_BLOCK, `${this.o.envFile} declares SEAWEEDFS_IMAGE=${declared}, not the recorded ${image.ref}.`);
+    const res = await this.docker(['image', 'inspect', '-f', '{{.Id}}', c.Image]);
+    if (res.code !== 0 || res.stdout.trim() !== image.id) {
+      throw new HostError(EXIT.PREFLIGHT_BLOCK, `SeaweedFS container image ${c.Image} is not the recorded NStack image ${image.ref}.`);
     }
   }
 
@@ -588,13 +637,14 @@ class Orchestrator {
     const env = readEnvFile(this.o.envFile);
     if ((env.get('STORAGE_PROVIDER') || 'minio') !== 'minio') throw new HostError(EXIT.PHASE_DENIED, 'target-init is for installations still on MinIO.');
     const adminEnvPath = this.adminEnvPath(creds);
+    const image = await this.recordSeaweedfsImage();
     const src = sourceCoordinates(env);
     if (creds.appAccessKey === src.accessKey || creds.adminAccessKey === src.accessKey) throw new HostError(EXIT.PREFLIGHT_BLOCK, 'Target credentials must differ from the MinIO root credentials.');
     const c = await this.ensureSeaweedfsInternal(creds, false);
     const init = await run([...this.composeArgs(this.o.envFile), 'run', '--rm', '--no-deps', '-T', 'seaweedfs-init'], { env: this.composeEnv(this.o.envFile, 'seaweedfs', this.seaweedfsEnv(creds)), timeoutMs: 5 * MINUTE });
     if (init.code !== 0) throw new HostError(EXIT.PREFLIGHT_BLOCK, `seaweedfs-init failed: ${init.stderr.trim().split('\n').slice(-5).join(' | ')}`);
     const summary = JSON.parse(init.stdout.trim().split('\n').filter((l) => l.startsWith('{')).at(-1) || '{}');
-    return { ok: true, seaweedfs_container: c.Name.replace(/^\//, ''), boot_id: bootId(c), networks: networkNames(c), published_ports: publishedPorts(c), admin_env_path: adminEnvPath, init: summary };
+    return { ok: true, seaweedfs_container: c.Name.replace(/^\//, ''), boot_id: bootId(c), networks: networkNames(c), published_ports: publishedPorts(c), admin_env_path: adminEnvPath, seaweedfs_image: image.ref, init: summary };
   }
 
   async freeBytes() {
@@ -658,6 +708,7 @@ class Orchestrator {
     this.windowStartedAt = hs.window_started_at ? Date.parse(hs.window_started_at) : Date.now();
     if (!hs.window_started_at && !POST_WRITE.includes(st.phase)) this.saveHostState({ window_started_at: new Date(this.windowStartedAt).toISOString() });
     if (st.phase === 'precopied' && !this.o.backupRecipient) throw new HostError(EXIT.USAGE, '--backup-recipient and --backup-identity are required for the window backup.');
+    if (!POST_WRITE.includes(st.phase)) await this.assertSeaweedfsArtifact();
 
     try {
       return await this.cutoverSteps(st, creds);
@@ -767,7 +818,7 @@ class Orchestrator {
         throw new HostError(EXIT.FENCE_OR_BACKUP, `${this.o.envFile} changed during the window; refusing to prepare the switch.`);
       }
       const adminPath = this.adminEnvPath(creds);
-      const plan = planSwitch(readEnvFile(oldPath), adminPath, this.o.seaweedfsPostPort);
+      const plan = planSwitch(readEnvFile(oldPath), adminPath, this.o.seaweedfsPostPort, this.seaweedfsImage().ref);
       const rendered = renderSwitchedEnv(readFileSync(oldPath, 'utf8'), creds, plan, this.runId);
       atomicWrite(newPath, rendered, 0o600);
       this.saveHostState({ new_config_digest: sha256Hex(rendered), post_port: plan.postPort, admin_env_path: adminPath });
@@ -817,6 +868,7 @@ class Orchestrator {
         await this.step('seaweedfs_publish', async () => {
           await this.compose(this.o.envFile, 'seaweedfs', ['up', '-d', '--no-deps', '--no-build', '--pull', 'never', 'seaweedfs'], { failCode: EXIT.SMOKE_FAILED, what: 'publish SeaweedFS' });
           const c = await this.waitHealthy('seaweedfs');
+          await this.assertSeaweedfsImage(c);
           const env = readEnvFile(this.o.envFile);
           const ports = publishedPorts(c);
           if (!ports.some((p) => p.includes(`:${env.get('SEAWEEDFS_API_HOST_PORT')}->8333`))) throw new HostError(EXIT.SMOKE_FAILED, `SeaweedFS did not bind its post-cutover port (${ports.join(', ')}).`);

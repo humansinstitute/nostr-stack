@@ -1,8 +1,8 @@
 import type { StorageProvider } from '../services/storage-provider';
 
 export const SETUP_STORAGE_PROVIDER_FILE = 'storage-provider.json';
-export const SEAWEEDFS_PINNED_IMAGE =
-  'chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9';
+// SeaweedFS runs only the NStack build of 4.55 (deploy/seaweedfs), never the stock upstream image.
+export const SEAWEEDFS_IMAGE_TAG = 'nstack-seaweedfs:4.55-nstack.1';
 export const MINIO_CACHED_PINNED_IMAGE =
   'minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e';
 
