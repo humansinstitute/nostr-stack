@@ -40,7 +40,7 @@ function showView(view) {
   state.view = view;
   document.querySelectorAll('.view').forEach(el => el.hidden = el.id !== 'view-' + view);
   document.querySelectorAll('[data-view]').forEach(el => { if (el.dataset.view === view) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current'); });
-  $('heading').textContent = ({ overview: state.active?.name || 'A workspace for your apps.', apps: 'Apps and namespaces', storage: 'Storage', allApps: 'Apps across workspaces' })[view];
+  $('heading').textContent = ({ overview: state.active?.name || 'A workspace for your apps.', apps: 'Apps and namespaces', permissions: 'Agent app permissions', storage: 'Storage', allApps: 'Apps across workspaces' })[view];
   $('context').textContent = view === 'allApps' ? 'All accessible workspaces' : state.active ? 'Active workspace · ' + state.active.name : 'Welcome to NStack';
 }
 async function digest(raw) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw)))).map(b => b.toString(16).padStart(2, '0')).join(''); }
@@ -74,7 +74,7 @@ async function verifyShellWorkspace(){
   localStorage.setItem(pinKey,shellConnection.service_npub);localStorage.setItem(authorityKey,shellConnection.workspace_service_npub);
 }
 async function signedFetch(path, method = 'GET', body) {
-  const session = state.session;
+  const session = state.session, generation = state.generation;
   if (!state.pubkey || !window.nostr?.signEvent) throw new Error('Connect a Nostr browser signer first.');
   const expected = state.pubkey;
   const url = API_BASE + path, raw = body === undefined ? '' : JSON.stringify(body);
@@ -87,6 +87,7 @@ async function signedFetch(path, method = 'GET', body) {
     return window.nostr.signEvent({ kind: 27235, created_at: Math.floor(Date.now() / 1000), tags, content: '' });
   });
   if (session !== state.session || event.pubkey !== expected) throw new Error('Connection changed. Try again with the current signer.');
+  if (method !== 'GET' && !still(generation)) throw Error('The workspace changed while awaiting your signer. Review the request again.');
   return transportFetch(url, { method, cache: 'no-store', headers: { Authorization: 'Nostr ' + btoa(JSON.stringify(event)), ...(raw ? { 'Content-Type': 'application/json' } : {}) }, ...(raw ? { body: raw } : {}) });
 }
 async function api(path, method = 'GET', body) {
@@ -94,11 +95,12 @@ async function api(path, method = 'GET', body) {
   const response = await signedFetch(path, method, body);
   let result; try { result = await response.json(); } catch { throw new Error('The backend returned an unreadable response (' + response.status + ').'); }
   if (session !== state.session) throw new Error('Connection changed. Discarding the previous response.');
-  if (!response.ok) { const e = new Error(response.status === 403 ? 'Administrator access required or access is no longer available.' : result.error || 'Request failed (' + response.status + ').'); e.status = response.status; throw e; }
+  if (!response.ok) { const e = new Error(response.status === 403 ? result.error || 'Administrator access required or access is no longer available.' : result.error || 'Request failed (' + response.status + ').'); e.status = response.status; throw e; }
   return result;
 }
 const workspacePath = (w, tail) => '/api/v4/workspaces/' + encodeURIComponent(w.workspace_owner_npub) + tail;
 function resetWorkspace() {
+  $('permissionForm').hidden = true; $('permissionForm').reset(); $('permissionScope').textContent = ''; empty('permissionList', 'Choose a workspace to check permissions.'); $('permissionAccess').textContent = 'Choose a workspace to check access.';
   state.generation++; state.active = null; state.apps = []; state.offset = 0;
   $('overview').hidden = true; $('welcome').hidden = false; $('addApp').disabled = true;
   $('previous').disabled = true; $('next').disabled = true; $('pageLabel').textContent = '';
@@ -162,7 +164,7 @@ async function selectWorkspace(owner) {
   $('editName').value = w.name; $('editDescription').value = w.description || '';
   status('Loading ' + w.name + '…');
   await Promise.all([loadApps(w, generation), loadStorage(w, generation), loadUsage(w, generation), loadInventory(w, generation)]);
-  if (still(generation)) { status('Viewing ' + w.name + '. Some operations require workspace administrator access.'); if (state.view === 'allApps') await loadAllApps(); }
+  if (still(generation)) { if (state.view === 'permissions') await loadPermissions(); status('Viewing ' + w.name + '. Some operations require workspace administrator access.'); if (state.view === 'allApps') await loadAllApps(); }
 }
 function appCard(app, w, allowActions) {
   const card = document.createElement('article');
@@ -468,7 +470,7 @@ $('cancelReview').addEventListener('click', () => { $('reviewDialog').close(); s
 // Do not close a mutation review while its signer/backend operation is pending.
 $('reviewDialog').addEventListener('cancel', event => { if ($('cancelReview').disabled) event.preventDefault(); });
 for (const b of document.querySelectorAll('[data-close]')) b.addEventListener('click', () => { if (b.closest('dialog').id === 'reviewDialog' && $('cancelReview').disabled) return; b.closest('dialog').close(); });
-for (const b of document.querySelectorAll('[data-view], [data-go]')) b.addEventListener('click', () => { const view = b.dataset.view || b.dataset.go; showView(view); if (view === 'allApps') loadAllApps().catch(e => status(e.message, true)); });
+for (const b of document.querySelectorAll('[data-view], [data-go]')) b.addEventListener('click', () => { const view = b.dataset.view || b.dataset.go; showView(view); if (view === 'permissions') loadPermissions().catch(e => status(e.message, true)); if (view === 'allApps') loadAllApps().catch(e => status(e.message, true)); });
 for (const id of ['visibility', 'completion']) $(id).addEventListener('change', () => { state.offset = 0; state.generation++; loadStorage(); });
 $('previous').addEventListener('click', () => { state.offset = Math.max(0, state.offset - 20); state.generation++; loadStorage(); });
 $('next').addEventListener('click', () => { state.offset += 20; state.generation++; loadStorage(); });
@@ -564,3 +566,65 @@ if(window.__NSTACK_PACKAGED_SHELL__===true){
   $('connect').disabled=true; // The explicit preview choice performs connection and proof.
 }
 window.addEventListener('pagehide',()=>{const prior=apiTransport;apiTransport=null;prior?.disconnect().catch(()=>{});});
+
+// These permissions use the displayed owner/app namespace, independently of typed membership.
+async function loadPermissions(before) {
+  const w = state.active, generation = state.generation;
+  $('permissionForm').hidden = true;
+  if (!w) return;
+  $('permissionScope').textContent = 'Owner/app namespace address: ' + w.workspace_owner_npub;
+  $('permissionAccess').textContent = 'Checking owner authority…';
+  if (!before) empty('permissionList', 'Loading permissions…');
+  try {
+    const result = await api(workspacePath(w, '/app-permissions' + (before ? '?before=' + encodeURIComponent(before) : '')));
+    if (!still(generation)) return;
+    $('permissionForm').hidden = false;
+    $('permissionAccess').textContent = 'Your signer can grant and revoke exact-app namespace permissions.';
+    if (!before) $('permissionList').replaceChildren();
+    $('permissionMore')?.remove();
+    for (const grant of result.grants || []) {
+      const card = document.createElement('article');
+      const active = !grant.revoked_at && new Date(grant.expires_at) > new Date();
+      card.append(text('h3', grant.revoked_at ? 'Revoked' : active ? 'Active permission' : 'Expired'), details([['Agent identity', grant.agent_npub], ['App identity', grant.app_npub], ['Permission', 'Register and manage this app namespace'], ['Expires', new Date(grant.expires_at).toLocaleString()], ['Approved by', grant.created_by_npub]]));
+      if (active) card.append(button('Revoke permission', () => {
+        const session = state.session;
+        review('Revoke this agent’s app permission?', [details([['Namespace address', w.workspace_owner_npub], ['Agent', grant.agent_npub], ['App', grant.app_npub]]), text('p', 'New namespace management requests will be denied after revocation. Existing app data and independent permissions are retained.')], 'Revoke permission', async () => {
+          guard(w, session); if (!still(generation)) throw Error('The workspace view changed. Refresh and review again.');
+          const result = await api(workspacePath(w, '/app-permissions/' + encodeURIComponent(grant.id) + '/revoke'), 'POST', { expected_revision: grant.revision });
+          guard(w, session);
+          if (!result.grant?.revoked_at) throw Error('Revocation was not confirmed by the backend. Refresh to check.');
+          if (!await loadPermissions()) throw Error('Revocation was saved, but the permission list could not be refreshed. Refresh to check.'); status('Permission revoked and read back from NStack.');
+        });
+      }, 'danger'));
+      $('permissionList').append(card);
+    }
+    if (!before && !result.grants?.length) empty('permissionList', 'No agent app permissions have been granted for this namespace address.');
+    if (result.truncated && result.next_cursor) { const more = button('Load earlier permissions', () => loadPermissions(result.next_cursor)); more.id = 'permissionMore'; $('permissionList').append(more); }
+    return true;
+  } catch (error) {
+    if (!still(generation)) return;
+    $('permissionAccess').textContent = 'Permission management unavailable. ' + error.message;
+    empty('permissionList', 'No permission list was loaded. This does not mean no permissions exist.');
+    return false;
+  }
+}
+$('permissionForm').addEventListener('submit', event => {
+  event.preventDefault(); $('permissionError').textContent = '';
+  const w = state.active, session = state.session, generation = state.generation;
+  if (!w) return;
+  const agent = $('permissionAgent').value.trim(), app = $('permissionApp').value.trim();
+  let expires;
+  try {
+    for (const value of [agent, app]) if (nip19.decode(value).type !== 'npub') throw Error();
+    expires = new Date($('permissionExpiry').value).toISOString();
+    if (new Date(expires) <= new Date()) throw Error();
+  } catch { $('permissionError').textContent = 'Enter valid public agent and app npubs and a future expiry.'; return; }
+  const body = { idempotency_key: crypto.randomUUID(), agent_npub: agent, app_npub: app, permission: 'namespace.manage', expires_at: expires };
+  review('Grant this agent permission for one app?', [details([['Backend', API_BASE], ['Namespace address', w.workspace_owner_npub], ['Agent', agent], ['App', app], ['Permission', 'Register, rename, enable or disable this app namespace'], ['Expires', new Date(expires).toLocaleString()]]), text('p', 'This owner/app namespace may span typed workspaces. This does not grant data access, workspace administration or onward delegation.')], 'Grant permission', async () => {
+    guard(w, session); if (!still(generation)) throw Error('The workspace view changed. Refresh and review again.');
+    const result = await api(workspacePath(w, '/app-permissions'), 'POST', body);
+    guard(w, session);
+    if (result.grant?.agent_npub !== agent || result.grant?.app_npub !== app || result.grant?.revoked_at || new Date(result.grant?.expires_at) <= new Date()) throw Error('The backend did not confirm the reviewed permission. Refresh to check.');
+    if (!await loadPermissions()) throw Error('Permission was saved, but the list could not be refreshed. Refresh to check.'); status('Permission saved and read back from NStack.');
+  });
+});

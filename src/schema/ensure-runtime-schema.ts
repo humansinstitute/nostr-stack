@@ -4486,5 +4486,6 @@ export async function ensureRuntimeSchema(sql: DbClient = getDb()) {
   await installStorageTracking(sql);
   await sql.unsafe(readFileSync(new URL('./app-db-native-v1.sql', import.meta.url), 'utf8'));
   await sql.unsafe(readFileSync(new URL('./storage-migration-v1.sql', import.meta.url), 'utf8'));
+  await sql.unsafe(readFileSync(new URL('./namespace-permissions-v1.sql', import.meta.url), 'utf8'));
 
 }

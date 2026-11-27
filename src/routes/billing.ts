@@ -1,3 +1,5 @@
+import { getDb } from '../db';
+import { NamespacePermissionError, namespaceNpub, listNamespacePermissions, grantNamespacePermission, revokeNamespacePermission, requireNamespacePermission } from '../services/namespace-permissions';
 import { previewNamespaceArchive, applyNamespaceArchive } from '../services/namespace-console-archive';
 import { collectNamespaceInventory } from '../services/namespace-inventory';
 import { Hono } from 'hono';
@@ -243,14 +245,48 @@ workspaceBillingRouter.post('/:workspaceOwnerNpub/namespace-inventory/:appNpub/:
   }
 });
 
+// Permission administration always checks the exact signer, never a resolved user key.
+function namespacePermissionError(c: any, error: unknown) {
+  if (error instanceof NamespacePermissionError) return c.json({ error: error.message }, error.status);
+  console.error('Namespace permission operation failed', error);
+  return c.json({ error: 'Namespace permission operation failed' }, 500);
+}
+workspaceBillingRouter.get('/:workspaceOwnerNpub/app-permissions', async c => {
+  const auth = await requireNip98AuthResolved(c); if (auth instanceof Response) return auth;
+  c.header('Cache-Control', 'private, no-store');
+  try { return c.json(await listNamespacePermissions(c.req.param('workspaceOwnerNpub'), auth.signerNpub, c.req.query('before'))); }
+  catch (error) { return namespacePermissionError(c, error); }
+});
+workspaceBillingRouter.post('/:workspaceOwnerNpub/app-permissions', async c => {
+  const auth = await requireNip98AuthResolved(c); if (auth instanceof Response) return auth;
+  c.header('Cache-Control', 'private, no-store');
+  try { return c.json({ grant: await grantNamespacePermission(c.req.param('workspaceOwnerNpub'), auth.signerNpub, await c.req.json().catch(() => null)) }, 201); }
+  catch (error) { return namespacePermissionError(c, error); }
+});
+workspaceBillingRouter.post('/:workspaceOwnerNpub/app-permissions/:permissionId/revoke', async c => {
+  const auth = await requireNip98AuthResolved(c); if (auth instanceof Response) return auth;
+  c.header('Cache-Control', 'private, no-store');
+  try { return c.json({ grant: await revokeNamespacePermission(c.req.param('workspaceOwnerNpub'), c.req.param('permissionId'), auth.signerNpub, await c.req.json().catch(() => null)) }); }
+  catch (error) { return namespacePermissionError(c, error); }
+});
 workspaceBillingRouter.get('/:workspaceOwnerNpub/apps', async (c) => {
   const auth = await requireNip98AuthResolved(c);
   if (auth instanceof Response) return auth;
-  const workspaceOwnerNpub = String(c.req.param('workspaceOwnerNpub') || '').trim();
-  const authError = await requireWorkspaceManager(c, workspaceOwnerNpub, auth.userNpub);
-  if (authError) return authError;
-
-  return c.json({ workspace_owner_npub: workspaceOwnerNpub, apps: await listWorkspaceApps(workspaceOwnerNpub) });
+  const owner = String(c.req.param('workspaceOwnerNpub') || '').trim();
+  c.header('Cache-Control', 'private, no-store');
+  if (await canManageWorkspace(owner, auth.userNpub, { readOnly: true })) return c.json({ workspace_owner_npub: owner, apps: await listWorkspaceApps(owner) });
+  try {
+    const app = namespaceNpub(c.req.query('app_npub'));
+    const apps = await getDb().begin(async transaction => {
+      const sql = transaction as unknown as ReturnType<typeof getDb>;
+      await requireNamespacePermission(owner, app, auth.signerNpub, sql);
+      return sql`SELECT * FROM workspace_apps WHERE workspace_owner_npub=${owner} AND app_npub=${app}`;
+    });
+    return c.json({ workspace_owner_npub: owner, apps });
+  } catch (error) {
+    if (!c.req.query('app_npub')) return c.json({ error: 'Workspace administrator access or an exact app_npub with an active permission is required' }, 403);
+    return namespacePermissionError(c, error);
+  }
 });
 
 workspaceBillingRouter.get('/:workspaceOwnerNpub/app-schemas', async (c) => {
@@ -277,18 +313,22 @@ workspaceBillingRouter.post('/:workspaceOwnerNpub/apps', async (c) => {
   const auth = await requireNip98AuthResolved(c);
   if (auth instanceof Response) return auth;
   const workspaceOwnerNpub = String(c.req.param('workspaceOwnerNpub') || '').trim();
-  const authError = await requireWorkspaceManager(c, workspaceOwnerNpub, auth.userNpub);
-  if (authError) return authError;
-
   const body = await c.req.json<{ app_npub?: string; app_name?: string; capabilities?: unknown; enabled?: boolean }>().catch(() => null);
   const appNpub = String(body?.app_npub || '').trim();
   if (!appNpub) return c.json({ error: 'app_npub required' }, 400);
-
-  const app = await createWorkspaceApp(workspaceOwnerNpub, appNpub, String(body?.app_name || '').trim(), auth.userNpub, {
-    capabilities: body?.capabilities,
-    enabled: body?.enabled,
-  });
-  return c.json({ workspace_owner_npub: workspaceOwnerNpub, app }, 201);
+  try {
+    const options = { capabilities: body?.capabilities, enabled: body?.enabled };
+    // Preserve established administrator semantics; delegated requests always use
+    // their exact signer and retain the grant lock through the registration write.
+    const app = await canManageWorkspace(workspaceOwnerNpub, auth.userNpub)
+      ? await createWorkspaceApp(workspaceOwnerNpub, appNpub, String(body?.app_name || '').trim(), auth.userNpub, options)
+      : await getDb().begin(async transaction => {
+        const sql = transaction as unknown as ReturnType<typeof getDb>;
+        await requireNamespacePermission(workspaceOwnerNpub, appNpub, auth.signerNpub, sql);
+        return createWorkspaceApp(workspaceOwnerNpub, appNpub, String(body?.app_name || '').trim(), auth.signerNpub, options, sql);
+      });
+    return c.json({ workspace_owner_npub: workspaceOwnerNpub, app }, 201);
+  } catch (error) { return namespacePermissionError(c, error); }
 });
 
 workspaceBillingRouter.get('/:workspaceOwnerNpub/apps/:appNpub/descriptor', async (c) => {

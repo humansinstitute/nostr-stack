@@ -198,12 +198,12 @@ export async function createWorkspaceApp(
   appName: string,
   createdByNpub: string,
   options: { capabilities?: unknown; enabled?: boolean } = {},
+  sql: DbClient = getDb(),
 ): Promise<WorkspaceApp> {
   const normalizedName = String(appName || '').trim() || appNpub;
   const hasCapabilities = Array.isArray(options.capabilities);
   const hasEnabled = typeof options.enabled === 'boolean';
   const capabilities = normalizeAppCapabilities(options.capabilities);
-  const sql = getDb();
   const [app] = await sql<WorkspaceApp[]>`
     INSERT INTO workspace_apps (workspace_owner_npub, app_npub, app_name, enabled, capabilities, created_by_npub)
     VALUES (

@@ -4008,3 +4008,18 @@ export interface AppDbNativeQuery {
 }
 
 export interface AppDbNativeRead { version:1; table:string; id:string; staging?:boolean }
+
+/** Exact owner-address namespace management only; never data access or onward grants. */
+export interface NamespaceAppPermission {
+  id: string;
+  workspace_owner_npub: string;
+  app_npub: string;
+  agent_npub: string;
+  permission: 'namespace.manage';
+  expires_at: string;
+  revoked_at: string | null;
+  revision: number;
+  created_by_npub: string;
+  revoked_by_npub: string | null;
+  created_at: string;
+}
