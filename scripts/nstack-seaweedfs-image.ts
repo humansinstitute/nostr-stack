@@ -2,8 +2,8 @@
 // Build, verify, save and load the NStack SeaweedFS image (deploy/seaweedfs): the pinned
 // upstream 4.55 image with a patched /usr/bin/weed. Installations reference the image by its
 // image ID (sha256:…): unlike a local RepoDigest or tag it survives docker save/load on both
-// containerd and classic image stores, and Compose runs it with pull_policy never. Stock
-// upstream images are never substituted.
+// containerd and classic image stores, and Compose runs it with pull_policy never. There is no
+// fallback to the stock upstream image.
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -114,6 +114,37 @@ export async function loadImage(dir: string) {
   const v = verifyImage(manifest.id);
   if (v.id !== manifest.id || manifest.ref !== manifest.id) throw new SeaweedfsImageError(`Loaded image ${v.id} is not the recorded ${manifest.ref}.`);
   return v;
+}
+
+/**
+ * The SeaweedFS image of one setup installation (state in `dir`). The first install builds the NStack
+ * image (or uses the local build), saves a validated copy and records its ID; every later run reuses
+ * exactly that image after re-validating the copy, or fails closed. Returns the image ID.
+ */
+export async function installationSeaweedfsImage(dir: string): Promise<string> {
+  const record = join(dir, 'seaweedfs-image.json');
+  const artifact = join(dir, 'seaweedfs-image-artifact');
+  if (existsSync(record)) {
+    const saved = JSON.parse(readFileSync(record, 'utf8')) as { ref: string; id: string };
+    let v;
+    try { v = verifyImage(saved.ref); } catch (err) {
+      throw new SeaweedfsImageError(`Recorded SeaweedFS image ${saved.ref} is unavailable: ${err instanceof Error ? err.message : err} Load ${artifact} with scripts/nstack-seaweedfs-image.ts load, then retry the same installation name.`);
+    }
+    if (v.id !== saved.id) throw new SeaweedfsImageError(`SeaweedFS image ${saved.ref} no longer matches the recorded image; refusing to continue.`);
+    try { await validateArtifact(artifact, saved); } catch (err) {
+      throw new SeaweedfsImageError(`Saved SeaweedFS image artifact is invalid: ${err instanceof Error ? err.message : err} Refusing to continue.`);
+    }
+    return saved.ref;
+  }
+  const tagPresent = docker(['image', 'inspect', SEAWEEDFS_IMAGE_TAG]).code === 0;
+  let v;
+  try { v = tagPresent ? verifyImage(immutableRef(SEAWEEDFS_IMAGE_TAG)) : buildImage(); } catch (err) {
+    throw new SeaweedfsImageError(`SeaweedFS image build failed: ${err instanceof Error ? err.message : err} Retry the same installation name; existing volumes, credentials and identity are preserved.`);
+  }
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  await saveImage(v.ref, artifact);
+  writeFileSync(record, JSON.stringify({ ref: v.ref, id: v.id, recorded_at: new Date().toISOString() }, null, 2) + '\n', { mode: 0o600 });
+  return v.ref;
 }
 
 if (import.meta.main) {

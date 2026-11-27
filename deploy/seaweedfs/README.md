@@ -1,7 +1,8 @@
 # NStack SeaweedFS image
 
 NStack runs SeaweedFS 4.55 with one compatibility patch. This directory is the complete,
-reproducible recipe; the stock upstream image is never pulled or substituted.
+reproducible recipe. The stock upstream image is used only as the digest-pinned base layer set;
+its `weed` executable is never run and NStack never falls back to the stock image.
 
 ## Why the patch exists
 
@@ -56,6 +57,13 @@ stores, and Compose runs it with `pull_policy: never`.
   or fails closed.
 - **Backups:** SeaweedFS backup sets (`scripts/tower-backup.sh`) include the exact image
   (`seaweedfs-image.tar.age`, ID in the manifest); restore loads it when absent.
+
+## Qualification status
+
+Qualified on ARM64 (patch and upstream response-header tests, the upstream `weed/s3api` suite,
+raw S3 MIME/range/ETag/override fixtures across restart, the E1 security probes, NStack API
+uploads and downloads, MinIO-to-SeaweedFS migration, backup and cache-empty restore). The recipe
+is multi-arch, but AMD64 has not been qualified and remains a release gate.
 
 ## Upgrades and removal gate
 

@@ -1,6 +1,6 @@
 # NStack Object Storage Migration (MinIO → SeaweedFS)
 
-NStack defaults new installations to **SeaweedFS 4.55** (pinned multi-arch OCI digest) while preserving existing **MinIO** and **external-S3** deployments across code updates until an operator runs the explicit migration workflow.
+NStack defaults new installations to **SeaweedFS 4.55**, built from pinned upstream source with one compatibility patch (`deploy/seaweedfs`; qualified on ARM64, AMD64 qualification remains a release gate), while preserving existing **MinIO** and **external-S3** deployments across code updates until an operator runs the explicit migration workflow.
 
 ## Provider Selection & Update Compatibility
 
@@ -33,7 +33,7 @@ NStack defaults new installations to **SeaweedFS 4.55** (pinned multi-arch OCI d
 
 ## Architecture & Security Isolation (SeaweedFS 4.55)
 
-- Image: the NStack build of SeaweedFS 4.55 (`deploy/seaweedfs`): the pinned upstream image `chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9` with `/usr/bin/weed` rebuilt from the pinned source plus a compatibility patch that serves stored generic-binary objects as `application/octet-stream` instead of guessing a type from the key extension. Installations reference it by image ID (`SEAWEEDFS_IMAGE=sha256:…`); the stock image is never pulled. See `deploy/seaweedfs/README.md`.
+- Image: the NStack build of SeaweedFS 4.55 (`deploy/seaweedfs`): the pinned upstream image `chrislusf/seaweedfs@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9` with `/usr/bin/weed` rebuilt from the pinned source plus a compatibility patch that serves stored generic-binary objects as `application/octet-stream` instead of guessing a type from the key extension. Installations reference it by image ID (`SEAWEEDFS_IMAGE=sha256:…`) and never fall back to the stock image. See `deploy/seaweedfs/README.md`.
 - Dedicated volume (`tower-seaweedfs-data` in prod, `storage-seaweedfs` in setup). **Never mount a MinIO data volume in SeaweedFS.**
 - Rendered by `deploy/nstack/render-seaweedfs-config.sh`:
   - Runs non-root (`1000:1000`), `read_only: true`, `cap_drop: ["ALL"]`, `no-new-privileges:true`, `/tmp` tmpfs.

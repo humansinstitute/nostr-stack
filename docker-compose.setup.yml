@@ -32,7 +32,7 @@ services:
   seaweedfs:
     profiles: ["seaweedfs"]
     # NStack build of SeaweedFS 4.55 (deploy/seaweedfs; scripts/nstack-seaweedfs-image.ts). Installations
-    # set SEAWEEDFS_IMAGE to its immutable local reference; the stock image is never pulled.
+    # set SEAWEEDFS_IMAGE to its image ID; there is no fallback to the stock upstream image.
     image: ${SEAWEEDFS_IMAGE:-nstack-seaweedfs:4.55-nstack.1}
     pull_policy: never
     user: "1000:1000"
