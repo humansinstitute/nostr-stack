@@ -1086,6 +1086,40 @@ async function deleteKeyIfPresent(client: S3Like, bucket: string, key: string) {
 }
 
 /** Online warm pre-copy (no interruption). Resumable and idempotent. */
+/**
+ * v4 rows under an active app-db content fence whose verified ETag would change on the target.
+ * The fence forbids any update of those rows, so rewrite-etags could not rebind them; the run is
+ * refused early (end of precopy, again before the switch) instead of inside the window.
+ */
+async function fencedEtagChanges(sql: Sql, runId: string): Promise<string[]> {
+  const [fences] = await sql<{ present: boolean }[]>`SELECT to_regclass('public.app_db_content_fences') IS NOT NULL AS present`;
+  if (!fences?.present) return [];
+  const rows = await sql<{ id: string }[]>`
+    SELECT j.object_id::text AS id
+    FROM storage_migration_objects j
+    JOIN v4_storage_objects o ON o.id = j.object_id::uuid
+    WHERE j.run_id = ${runId} AND j.kind = 'v4'
+      AND j.original_verified_etag IS NOT NULL AND j.dst_etag IS NOT NULL AND j.dst_etag <> j.original_verified_etag
+      AND EXISTS (
+        SELECT 1 FROM app_db_content_fences fence
+        JOIN flightdeck_pg_files f ON f.workspace_id = fence.workspace_id AND f.channel_id = fence.channel_id
+        WHERE fence.active AND fence.content_type = o.content_type
+          AND (f.storage_object_id = o.id OR EXISTS (
+            SELECT 1 FROM flightdeck_pg_file_versions v WHERE v.workspace_id = f.workspace_id AND v.file_id = f.id AND v.storage_object_id = o.id)))
+    ORDER BY 1
+  `;
+  return rows.map((r) => r.id);
+}
+
+function fencedEtagChangeError(ids: string[]) {
+  return new MigrationError(
+    MIGRATION_EXIT.PREFLIGHT_BLOCK,
+    'fenced_etag_change_unsupported',
+    `${ids.length} storage object(s) managed by an active app-db content fence would get a different ETag on the target, and the fence forbids rebinding them. The managing app must release its fence for these objects before migrating (no data was switched). Objects: ${ids.slice(0, 20).join(', ')}${ids.length > 20 ? ', …' : ''}`,
+    { object_ids: ids },
+  );
+}
+
 export async function runMigrationPrecopy(
   ctx: MigrationContext,
   options: { concurrency?: number; maxMbps?: number; runId?: string } = {},
@@ -1162,6 +1196,8 @@ export async function runMigrationPrecopy(
       }
     });
 
+    const fencedChanges = await fencedEtagChanges(ctx.sql, run.run_id);
+    if (fencedChanges.length) throw fencedEtagChangeError(fencedChanges);
     const evidence = { copied, skipped_resumed: skippedResumed, missing_at_source: missingAtSource, bytes_copied: bytesCopied, identity_mismatches: identityMismatches };
     const [updated] = await ctx.sql<MigrationRunRow[]>`
       UPDATE storage_migration_runs
@@ -1468,6 +1504,8 @@ export async function prepareMigrationSwitch(
     }
     const run = await requireRun(ctx, undefined, ['verified', 'switch_prepared'], 'prepare-switch');
     await verifyRunFingerprint(ctx, run);
+    const fencedChanges = await fencedEtagChanges(ctx.sql, run.run_id);
+    if (fencedChanges.length) throw fencedEtagChangeError(fencedChanges);
     if (run.phase === 'switch_prepared' && (run.old_config_digest !== options.oldConfigDigest || run.new_config_digest !== options.newConfigDigest)) {
       throw new MigrationError(MIGRATION_EXIT.LOCK_OR_CONFLICT, 'config_digest_conflict', 'Run is already prepared with different config digests.');
     }
@@ -1515,30 +1553,45 @@ export async function rewriteMigrationEtags(ctx: MigrationContext) {
         ORDER BY object_id
       `;
       let rewrittenCount = 0;
+      let unchangedCount = 0;
       for (const row of targets) {
         if (!row.dst_etag) throw new MigrationError(MIGRATION_EXIT.INTEGRITY_MISMATCH, 'missing_dst_etag', `Journal row for v4 object ${row.object_id} is missing dst_etag.`);
-        const [res] = await tx<{ id: string }[]>`
-          UPDATE v4_storage_objects SET sha256_verified_etag = ${row.dst_etag}
-          WHERE id = ${row.object_id}::uuid
-            AND completed_at IS NOT NULL
-            AND sha256_verified_etag = ${row.original_verified_etag}
-            AND sha256_hex IS NOT DISTINCT FROM ${row.original_sha256_hex}
-            AND size_bytes = ${Number(row.original_size_bytes)}
-          RETURNING id::text
-        `;
+        // Same identity check and row lock either way; an unchanged ETag needs no write (which also
+        // keeps app-db content fences, which forbid any update of fenced objects, out of the way).
+        const unchanged = row.dst_etag === row.original_verified_etag;
+        const [res] = unchanged
+          ? await tx<{ id: string }[]>`
+            SELECT id::text FROM v4_storage_objects
+            WHERE id = ${row.object_id}::uuid
+              AND completed_at IS NOT NULL
+              AND sha256_verified_etag = ${row.original_verified_etag}
+              AND sha256_hex IS NOT DISTINCT FROM ${row.original_sha256_hex}
+              AND size_bytes = ${Number(row.original_size_bytes)}
+            FOR UPDATE
+          `
+          : await tx<{ id: string }[]>`
+            UPDATE v4_storage_objects SET sha256_verified_etag = ${row.dst_etag}
+            WHERE id = ${row.object_id}::uuid
+              AND completed_at IS NOT NULL
+              AND sha256_verified_etag = ${row.original_verified_etag}
+              AND sha256_hex IS NOT DISTINCT FROM ${row.original_sha256_hex}
+              AND size_bytes = ${Number(row.original_size_bytes)}
+            RETURNING id::text
+          `;
         if (!res) {
           throw new MigrationError(MIGRATION_EXIT.INTEGRITY_MISMATCH, 'etag_rewrite_row_changed', `v4_storage_objects row ${row.object_id} changed since verification; ETag rewrite aborted.`, { object_id: row.object_id });
         }
         await tx`UPDATE storage_migration_objects SET state = 'switched', updated_at = NOW() WHERE run_id = ${run!.run_id} AND storage_key = ${row.storage_key}`;
-        rewrittenCount++;
+        if (unchanged) unchangedCount++;
+        else rewrittenCount++;
       }
       const [updated] = await tx<MigrationRunRow[]>`
-        UPDATE storage_migration_runs SET phase = 'db_switched', last_evidence = ${jsonb(ctx.sql, { rewritten_etag_count: rewrittenCount })}, updated_at = NOW()
+        UPDATE storage_migration_runs SET phase = 'db_switched', last_evidence = ${jsonb(ctx.sql, { rewritten_etag_count: rewrittenCount, unchanged_etag_count: unchangedCount })}, updated_at = NOW()
         WHERE run_id = ${run!.run_id} AND phase = 'switch_prepared'
         RETURNING *
       `;
       if (!updated) throw new MigrationError(MIGRATION_EXIT.PHASE_DENIED, 'phase_cas_failed', 'Failed to advance run to db_switched.');
-      return { ok: true, run_id: updated.run_id, phase: updated.phase, rewritten_count: rewrittenCount, already_switched: false };
+      return { ok: true, run_id: updated.run_id, phase: updated.phase, rewritten_count: rewrittenCount, unchanged_count: unchangedCount, already_switched: false };
     });
   });
 }
@@ -1549,14 +1602,24 @@ async function revertSwitchedEtags(tx: Sql, runId: string, nextState: 'reverted'
     SELECT * FROM storage_migration_objects WHERE run_id = ${runId} AND kind = 'v4' AND state = 'switched' ORDER BY object_id
   `;
   for (const row of switched) {
-    const [res] = await tx<{ id: string }[]>`
-      UPDATE v4_storage_objects SET sha256_verified_etag = ${row.original_verified_etag}
-      WHERE id = ${row.object_id}::uuid
-        AND sha256_hex IS NOT DISTINCT FROM ${row.original_sha256_hex}
-        AND size_bytes = ${Number(row.original_size_bytes)}
-        AND sha256_verified_etag IS NOT DISTINCT FROM ${row.dst_etag}
-      RETURNING id::text
-    `;
+    // Unchanged ETags were never written: verify and lock the same identity without an update.
+    const [res] = row.dst_etag === row.original_verified_etag
+      ? await tx<{ id: string }[]>`
+        SELECT id::text FROM v4_storage_objects
+        WHERE id = ${row.object_id}::uuid
+          AND sha256_hex IS NOT DISTINCT FROM ${row.original_sha256_hex}
+          AND size_bytes = ${Number(row.original_size_bytes)}
+          AND sha256_verified_etag IS NOT DISTINCT FROM ${row.dst_etag}
+        FOR UPDATE
+      `
+      : await tx<{ id: string }[]>`
+        UPDATE v4_storage_objects SET sha256_verified_etag = ${row.original_verified_etag}
+        WHERE id = ${row.object_id}::uuid
+          AND sha256_hex IS NOT DISTINCT FROM ${row.original_sha256_hex}
+          AND size_bytes = ${Number(row.original_size_bytes)}
+          AND sha256_verified_etag IS NOT DISTINCT FROM ${row.dst_etag}
+        RETURNING id::text
+      `;
     if (!res) {
       throw new MigrationError(MIGRATION_EXIT.INTEGRITY_MISMATCH, 'etag_revert_row_changed', `v4_storage_objects row ${row.object_id} changed after the ETag rewrite; refusing a blind revert.`, { object_id: row.object_id });
     }

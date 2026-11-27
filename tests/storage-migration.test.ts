@@ -65,11 +65,13 @@ class InMemoryS3 {
   pageSize = 3;
   counter = 0;
   reachable = true;
+  /** Real single-part S3 ETags (MinIO and SeaweedFS alike) are the quoted MD5 of the body. */
+  md5Etags = false;
   constructor(readonly etagPrefix: string) {}
 
   put(key: string, body: Buffer | string, opts: { contentType?: string; metadata?: Record<string, string>; headers?: Record<string, string>; etag?: string; contentEncoding?: string; tags?: Array<{ Key: string; Value: string }> } = {}) {
     const buf = typeof body === 'string' ? Buffer.from(body) : Buffer.from(body);
-    const etag = opts.etag ?? `"${this.etagPrefix}-${++this.counter}-${sha256(buf).slice(0, 12)}"`;
+    const etag = opts.etag ?? (this.md5Etags ? `"${createHash('md5').update(buf).digest('hex')}"` : `"${this.etagPrefix}-${++this.counter}-${sha256(buf).slice(0, 12)}"`);
     this.objects.set(key, { body: buf, contentType: opts.contentType || 'application/octet-stream', metadata: { ...(opts.metadata || {}) }, headers: { ...(opts.headers || {}) }, etag, contentEncoding: opts.contentEncoding, tags: opts.tags });
     return etag;
   }
@@ -801,6 +803,122 @@ describe('E5 tower-backup.sh verify refuses damaged sets', () => {
       expect(res.exitCode).not.toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('E4 storage-migration with app-db content fences', () => {
+  /** A real active app-db content fence over the File that references storage object `objectId`. */
+  async function fenceObject(objectId: string, contentType: string) {
+    const [actor] = await sql`INSERT INTO flightdeck_pg_actors (npub, kind) VALUES (${testNpub()}, 'human') RETURNING id`;
+    const [ws] = await sql`INSERT INTO flightdeck_pg_workspaces (tower_service_npub, workspace_service_npub, workspace_owner_npub, app_npub, name) VALUES (${testNpub()}, ${testNpub()}, ${testNpub()}, ${testNpub()}, 'fenced') RETURNING id`;
+    const [scope] = await sql`INSERT INTO flightdeck_pg_scopes (workspace_id, name, kind) VALUES (${ws!.id}, 'scope', 'project') RETURNING id`;
+    const [channel] = await sql`INSERT INTO flightdeck_pg_channels (workspace_id, scope_id, name) VALUES (${ws!.id}, ${scope!.id}, 'channel') RETURNING id`;
+    await sql`UPDATE v4_storage_objects SET content_type = ${contentType} WHERE id = ${objectId}`;
+    await sql`INSERT INTO flightdeck_pg_files (workspace_id, scope_id, channel_id, storage_object_id, created_by_actor_id, updated_by_actor_id) VALUES (${ws!.id}, ${scope!.id}, ${channel!.id}, ${objectId}, ${actor!.id}, ${actor!.id})`;
+    await sql`INSERT INTO app_db_content_fences (workspace_id, channel_id, content_type, active) VALUES (${ws!.id}, ${channel!.id}, ${contentType}, true)`;
+    // Precondition: the fence really forbids ordinary updates of this object.
+    await expect(sql`UPDATE v4_storage_objects SET sha256_verified_etag = sha256_verified_etag WHERE id = ${objectId}`).rejects.toMatchObject({ message: 'managed_content_fenced' });
+    return async () => {
+      await sql`DELETE FROM app_db_content_fences WHERE workspace_id = ${ws!.id}`;
+      await sql`DELETE FROM flightdeck_pg_workspaces WHERE id = ${ws!.id}`;
+      await sql`DELETE FROM flightdeck_pg_actors WHERE id = ${actor!.id}`;
+    };
+  }
+  function testNpub() {
+    return nip19.npubEncode(getPublicKey(randomBytes(32)));
+  }
+  async function fencedAndPlain() {
+    source.md5Etags = true;
+    target.md5Etags = true;
+    // Fenced single-part object: identical MD5 ETag on both stores.
+    const fBytes = Buffer.from('fenced-managed-object');
+    const f = await insertV4({ bytes: fBytes, completed: true, etag: 'p' });
+    const fEtag = source.put(f.key, fBytes);
+    await sql`UPDATE v4_storage_objects SET sha256_verified_etag = ${fEtag} WHERE id = ${f.id}`;
+    // Unfenced object whose source ETag differs from the target's (a multipart-style ETag).
+    const uBytes = Buffer.from('plain-multipart-object');
+    const u = await insertV4({ bytes: uBytes, completed: true, etag: 'p' });
+    const uEtag = source.put(u.key, uBytes, { etag: '"0123456789abcdef0123456789abcdef-2"' });
+    await sql`UPDATE v4_storage_objects SET sha256_verified_etag = ${uEtag} WHERE id = ${u.id}`;
+    const cleanup = await fenceObject(f.id, 'application/x-fixture-record');
+    return { f, fEtag, u, uEtag, cleanup };
+  }
+  const etagOf = async (id: string) => (await sql`SELECT sha256_verified_etag FROM v4_storage_objects WHERE id = ${id}`)[0]!.sha256_verified_etag;
+
+  test('forward rewrite and RB1 skip unchanged fenced ETags under the same identity check; changed ones are rewritten', async () => {
+    const { f, fEtag, u, uEtag, cleanup } = await fencedAndPlain();
+    try {
+      const ctx = makeCtx();
+      await advanceToVerified(ctx);
+      await prepareMigrationSwitch(ctx, { oldConfigDigest: digestA, newConfigDigest: digestB });
+      const rewrite = await rewriteMigrationEtags(ctx);
+      expect(rewrite).toMatchObject({ phase: 'db_switched', rewritten_count: 1, unchanged_count: 1 });
+      expect(await etagOf(f.id)).toBe(fEtag);
+      expect(await etagOf(u.id)).toBe(target.objects.get(u.key)!.etag);
+      await beginRollbackRb1(ctx);
+      expect(await etagOf(f.id)).toBe(fEtag);
+      expect(await etagOf(u.id)).toBe(uEtag);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('RB2 reverse-sync leaves unchanged fenced ETags alone', async () => {
+    const { f, fEtag, cleanup } = await fencedAndPlain();
+    try {
+      const ctx = makeCtx();
+      await advanceToVerified(ctx);
+      await prepareMigrationSwitch(ctx, { oldConfigDigest: digestA, newConfigDigest: digestB });
+      await rewriteMigrationEtags(ctx);
+      await markMigrationPhase(ctx, { phase: 'config_switched', configDigest: digestB });
+      await markMigrationPhase(ctx, { phase: 'start_intent' });
+      await markMigrationPhase(ctx, { phase: 'started' });
+      const rb2 = await runReverseMigrateSync(ctx);
+      expect(rb2.phase).toBe('rolling_back');
+      expect(await etagOf(f.id)).toBe(fEtag);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  async function fencedChanging() {
+    source.md5Etags = true;
+    target.md5Etags = true;
+    const bytes = Buffer.from('fenced-with-multipart-etag');
+    const f = await insertV4({ bytes, completed: true, etag: 'p' });
+    const srcEtag = source.put(f.key, bytes, { etag: '"fedcba9876543210fedcba9876543210-3"' });
+    await sql`UPDATE v4_storage_objects SET sha256_verified_etag = ${srcEtag} WHERE id = ${f.id}`;
+    return { f, srcEtag };
+  }
+
+  test('a fenced object whose ETag would change is refused at the end of precopy, before any window', async () => {
+    const { f, srcEtag } = await fencedChanging();
+    const cleanup = await fenceObject(f.id, 'application/x-fixture-record');
+    try {
+      const ctx = makeCtx();
+      await expectExit(runMigrationPrecopy(ctx, { runId: randomUUID() }), MIGRATION_EXIT.PREFLIGHT_BLOCK, 'fenced_etag_change_unsupported');
+      expect((await sql`SELECT phase FROM storage_migration_runs`)[0]!.phase).toBe('planned');
+      expect(await etagOf(f.id)).toBe(srcEtag);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('a fence that appears after precopy is refused at prepare-switch, before any write; RB1 restores', async () => {
+    const { f, srcEtag } = await fencedChanging();
+    const ctx = makeCtx();
+    await advanceToVerified(ctx);
+    const cleanup = await fenceObject(f.id, 'application/x-fixture-record');
+    try {
+      await expectExit(prepareMigrationSwitch(ctx, { oldConfigDigest: digestA, newConfigDigest: digestB }), MIGRATION_EXIT.PREFLIGHT_BLOCK, 'fenced_etag_change_unsupported');
+      expect((await sql`SELECT phase FROM storage_migration_runs`)[0]!.phase).toBe('verified');
+      expect((await sql`SELECT count(*)::int n FROM storage_migration_objects WHERE state = 'switched'`)[0]!.n).toBe(0);
+      expect(await etagOf(f.id)).toBe(srcEtag);
+      await beginRollbackRb1(ctx);
+      expect(await etagOf(f.id)).toBe(srcEtag);
+    } finally {
+      await cleanup();
     }
   });
 });
