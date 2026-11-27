@@ -171,6 +171,26 @@ describe('Storage API', () => {
     expect(content.status).toBe(401);
   });
 
+  test('public direct download URLs pin the response type to the stored row type', async () => {
+    const { getStorageDownloadUrl } = await import('../src/services/storage');
+    const cases: Array<[string, string, string]> = [
+      ['public-generic.html', 'application/octet-stream', 'application/octet-stream'],
+      ['public-untyped.svg', '', 'application/octet-stream'],
+      ['public-typed.json', 'application/json', 'application/json'],
+    ];
+    for (const [path, type, served] of cases) {
+      const [object] = await sql`
+        INSERT INTO v4_storage_objects (owner_npub, created_by_npub, storage_path, content_type, is_public, completed_at)
+        VALUES (${WORKSPACE_NPUB}, ${MEMBER}, ${path}, ${type}, true, NOW())
+        RETURNING id
+      `;
+      const url = new URL((await getStorageDownloadUrl(object.id))!);
+      expect(url.pathname.endsWith(`/${path}`)).toBe(true);
+      expect(url.searchParams.get('response-content-type')).toBe(served);
+      expect(url.searchParams.get('X-Amz-Signature')).toBeTruthy();
+    }
+  });
+
   async function requireS3ForTest() {
     if (!await checkS3Availability()) return false;
     return true;

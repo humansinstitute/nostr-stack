@@ -362,8 +362,11 @@ export async function getStorageDownloadUrl(objectId: string): Promise<string | 
   if (!publicEndpoint) return null;
 
   const publicBucket = createS3Client(publicEndpoint);
+  // The served type comes from the row, never from the store: a store may infer a
+  // type from the key extension (SeaweedFS does for generic-binary objects).
   return publicBucket.presign(row.storage_path, {
     expiresIn: Math.max(60, config.storage.presignDownloadTtlSeconds),
+    type: row.content_type || 'application/octet-stream',
   });
 }
 
