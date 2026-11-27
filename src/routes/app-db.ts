@@ -1,3 +1,7 @@
+import { parseNativeJson } from '../services/app-db-native-json';
+import { bodyLimit } from 'hono/body-limit';
+import { getDb } from '../db';
+import { nativeRead, nativeSetAuthority, nativeStatus, nativeAuthority, nativeBatch, nativeQuery, nativeFence, registerNativePolicy } from '../services/app-db-native';
 import { Hono } from 'hono';
 import { requireNip98AuthResolved } from '../auth';
 import {
@@ -28,6 +32,7 @@ import type {
 } from '../types';
 
 export const appDbRouter = new Hono();
+appDbRouter.use('/:workspaceOwnerNpub/apps/:appNpub/db/native-v1/*',bodyLimit({maxSize:4_000_000,onError:c=>c.json({error:'Native request exceeds 4 MB',code:'request_too_large'},413)}));
 
 function normalizeLimit(value: string | undefined): number | undefined {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -266,4 +271,34 @@ appDbRouter.delete('/:workspaceOwnerNpub/apps/:appNpub/db/:collection/rows/:rowI
   } catch (error) {
     return appDbErrorResponse(c, error);
   }
+});
+
+// Versioned actor-authorized relational interface. No app signing key in clients.
+appDbRouter.post('/:workspaceOwnerNpub/apps/:appNpub/db/native-v1/:workspaceId/:action', async c => {
+  const auth = await requireNip98AuthResolved(c);
+  if (auth instanceof Response) return auth;
+  const {workspaceOwnerNpub,appNpub} = routeParams(c);
+  const ctx = {owner:workspaceOwnerNpub,app:appNpub,workspace:c.req.param('workspaceId'),actor:auth.userNpub};
+  const body = await c.req.text().then(parseNativeJson).catch(()=>null);
+  if (!body) return c.json({code:'bad_json',error:'JSON body required'},400);
+  try {
+    switch(c.req.param('action')) {
+      case 'policy': return c.json(await registerNativePolicy(ctx,body.table,body.policy));
+      case 'batch': return c.json(await nativeBatch(ctx,body));
+      case 'read': return c.json(await nativeRead(ctx,body));
+      case 'query': return c.json(await nativeQuery(ctx,body.table,body));
+      case 'status': return c.json(await nativeStatus(ctx,body));
+      case 'authority': return c.json(await nativeSetAuthority(ctx,body));
+      case 'fence': return c.json(await nativeFence(ctx,body));
+      case 'deployment': {
+        // Namespace creation and checksummed app DDL, under
+        // verified workspace.manage. The actor remains attributed as themselves.
+        await nativeAuthority(ctx,null,true,getDb());
+        const descriptor = await provisionWappDbNamespace(ctx.owner,ctx.app,{app_slug:body.app_slug},ctx.actor,ctx.workspace);
+        const migration = body.migrations ? await runWappDbMigrations(ctx.owner,ctx.app,{migrations:body.migrations},ctx.actor,ctx.workspace) : null;
+        return c.json({version:1,descriptor,migration});
+      }
+      default: return c.json({code:'unknown_operation',error:'Unknown native operation'},404);
+    }
+  } catch(error) { return appDbErrorResponse(c,error); }
 });

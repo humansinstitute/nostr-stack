@@ -3981,3 +3981,30 @@ export interface HostingWorkspaceCosts {
   coverage: 'partial_attributed';
   cost_precision: string;
 }
+
+// Registered native relational tables: app-owned SQL, fixed server-owned scope.
+export interface AppDbNativePolicy {
+  version: 1;
+  columns: string[];
+  parent?: { table: string; column: string };
+  append_only?: boolean;
+  manager_only_writes?: boolean;
+  managed_content_type?: string;
+}
+export interface AppDbNativeBatch {
+  version: 1;
+  staging?: boolean;
+  operation_id: string;
+  channel_id: string;
+  operations: Array<{ kind: 'insert' | 'update' | 'delete'; table: string; id: string; expected_revision?: number; data?: Record<string, unknown> }>;
+}
+export interface AppDbNativeQuery {
+  version: 1;
+  staging?: boolean;
+  channel_id: string;
+  limit: number;
+  after?: string;
+  generation?: string;
+}
+
+export interface AppDbNativeRead { version:1; table:string; id:string; staging?:boolean }

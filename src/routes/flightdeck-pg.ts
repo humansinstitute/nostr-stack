@@ -8976,6 +8976,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/channels/:channelId/files', as
       ...(payload.workReceipt ? { work_receipt: payload.workReceipt } : {}),
     }, 201);
   } catch (error) {
+    if (error instanceof Error && error.message === 'managed_content_fenced') return jsonError(c,409,'managed_content_fenced','This content is managed by a registered application',identity);
     const refusal = workReceiptResponse(c, identity, error);
     if (refusal) return refusal;
     const sqlCode = (error as { code?: string }).code;
@@ -9178,6 +9179,7 @@ flightDeckPgRouter.patch('/workspaces/:workspaceId/files/:fileId', async (c) => 
       outbox: payload.outbox,
     });
   } catch (error) {
+    if (error instanceof Error && error.message === 'managed_content_fenced') return jsonError(c,409,'managed_content_fenced','This content is managed by a registered application',identity);
     const message = error instanceof Error ? error.message : 'Flight Deck PG file could not be updated';
     return jsonError(c, 400, 'validation_error', message, identity);
   }
@@ -9463,6 +9465,7 @@ flightDeckPgRouter.post('/workspaces/:workspaceId/files/:fileId/versions', async
       outbox: payload.outbox,
     }, 201);
   } catch (error) {
+    if (error instanceof Error && error.message === 'managed_content_fenced') return jsonError(c,409,'managed_content_fenced','This content is managed by a registered application',identity);
     const sqlCode = (error as { code?: string }).code;
     if (sqlCode === '23505') {
       return jsonError(c, 409, 'file_storage_object_conflict', 'Storage object is already attached to an active Flight Deck PG object', identity);

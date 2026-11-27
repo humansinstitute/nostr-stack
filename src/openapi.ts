@@ -1,3 +1,4 @@
+import { appDbNativePaths } from './app-db-native-openapi';
 import { nappletOpenApiPaths } from './napplet-openapi';
 import { workspaceReportSchema } from './workspace-report-openapi';
 import { registeredAppStoragePaths } from './registered-app-storage-openapi';
@@ -4663,6 +4664,7 @@ export function buildOpenApiDocument(origin: string) {
     },
     security: [{ nip98: [] }],
     paths: {
+      ...appDbNativePaths,
       ...nappletOpenApiPaths(),
       ...managedStorageCollectionPaths,
       ...registeredAppStoragePaths,

@@ -43,6 +43,12 @@ export type CreateAppOptions = {
 
 export function createApp(options: CreateAppOptions = {}) {
   const app = new Hono();
+  app.onError((error, c) => {
+    if (String(error.message).includes('managed_content_fenced')) return c.json({error:'This content is managed by a registered application',code:'managed_content_fenced'},409);
+    if ('getResponse' in error && typeof error.getResponse === 'function') return error.getResponse();
+    console.error(error);
+    return c.json({error:'Internal Server Error'},500);
+  });
   const agentCeiling = options.agentCeiling ?? databaseCeilingProvider();
 
   app.use('*', cors({

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'crypto';
 import { getDb } from '../db';
 import { config } from '../config';
+import { authorizeFlightDeckPgOperation, resolveFlightDeckPgWorkspace } from './flightdeck-pg-authorization';
 import { splitSqlStatements } from '../schema/sql-statements';
 import type {
   CreateWappDbTableRowInput,
@@ -283,6 +284,23 @@ function assertDescriptorSigner(appNpub: string, signerNpub: string) {
   throw new AppDbError('app_or_admin_signer_required', 403, 'request must be signed by the app, NStack admin, or NStack service identity');
 }
 
+async function assertDeploymentSigner(owner: string, app: string, signer: string, workspaceId?: string, sql: DbClient = getDb()) {
+  if (!workspaceId) { assertDescriptorSigner(app, signer); return; }
+  const workspace = await resolveFlightDeckPgWorkspace(workspaceId, sql);
+  if (!workspace || workspace.workspace_owner_npub !== owner || workspace.app_npub !== app) throw new AppDbError('workspace_binding_mismatch',403,'Workspace binding mismatch');
+  const access = await authorizeFlightDeckPgOperation({actorNpub:signer,appNpub:app,workspaceId,permission:'workspace.manage',resource:{type:'workspace'}},sql);
+  if (!access.allowed) throw new AppDbError('permission_denied',403,'workspace.manage required');
+}
+
+async function assertNoNativePolicy(sql: DbClient, owner: string, app: string, table?: string) {
+  const [schema] = await sql`SELECT to_regclass('public.app_db_native_policies') AS present`;
+  if (!schema.present) return;
+  const rows = table
+    ? await sql`SELECT 1 FROM public.app_db_native_policies WHERE workspace_owner_npub=${owner} AND app_npub=${app} AND table_name=${table} LIMIT 1`
+    : await sql`SELECT 1 FROM public.app_db_native_policies WHERE workspace_owner_npub=${owner} AND app_npub=${app} LIMIT 1`;
+  if (rows.length) throw new AppDbError('native_policy_required',409,'Registered native tables must use native-v1; schema evolution requires a reviewed freeze');
+}
+
 async function requireRegisteredApp(sql: DbClient, workspaceOwnerNpub: string, appNpub: string) {
   const [app] = await sql<{ capabilities: unknown }[]>`
     SELECT capabilities
@@ -334,9 +352,10 @@ export async function getWappDbDescriptor(
   workspaceOwnerNpub: string,
   appNpub: string,
   signerNpub: string,
+  managementWorkspaceId?: string,
 ): Promise<WappDbNamespaceDescriptor> {
   const sql = getDb();
-  assertDescriptorSigner(appNpub, signerNpub);
+  await assertDeploymentSigner(workspaceOwnerNpub,appNpub,signerNpub,managementWorkspaceId);
   await requireRegisteredApp(sql, workspaceOwnerNpub, appNpub);
   const namespace = await getNamespace(sql, workspaceOwnerNpub, appNpub);
   if (!namespace) {
@@ -356,14 +375,20 @@ export async function provisionWappDbNamespace(
   appNpub: string,
   input: { app_slug?: unknown } | null,
   signerNpub: string,
+  managementWorkspaceId?: string,
 ): Promise<WappDbNamespaceDescriptor> {
   const sql = getDb();
-  assertDescriptorSigner(appNpub, signerNpub);
+  await assertDeploymentSigner(workspaceOwnerNpub,appNpub,signerNpub,managementWorkspaceId);
   await requireRegisteredApp(sql, workspaceOwnerNpub, appNpub);
   const appSlug = normalizeAppSlug(input?.app_slug, appNpub);
   const schemaName = buildSchemaName(workspaceOwnerNpub, appNpub, appSlug);
 
-  await sql.begin(async (tx) => {
+  await sql.begin(async (transaction) => {
+    const tx = transaction as unknown as DbClient;
+    if (managementWorkspaceId) {
+      await tx.unsafe('LOCK TABLE flightdeck_pg_workspaces,flightdeck_pg_actors,flightdeck_pg_workspace_memberships,flightdeck_pg_permission_grants,flightdeck_pg_group_memberships,flightdeck_pg_group_edges IN SHARE MODE');
+      await assertDeploymentSigner(workspaceOwnerNpub,appNpub,signerNpub,managementWorkspaceId,tx as unknown as DbClient);
+    }
     await tx.unsafe(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schemaName)}`);
     await tx.unsafe(migrationTableSql(schemaName));
     await tx`
@@ -388,7 +413,7 @@ export async function provisionWappDbNamespace(
     `;
   });
 
-  return getWappDbDescriptor(workspaceOwnerNpub, appNpub, signerNpub);
+  return getWappDbDescriptor(workspaceOwnerNpub, appNpub, signerNpub, managementWorkspaceId);
 }
 
 function assertAllowedMigrationStatement(statement: string, schemaName: string) {
@@ -420,9 +445,11 @@ export async function runWappDbMigrations(
   appNpub: string,
   input: RunWappDbMigrationsInput,
   signerNpub: string,
+  managementWorkspaceId?: string,
 ) {
   const sql = getDb();
-  assertAppSigner(appNpub, signerNpub);
+  if (managementWorkspaceId) await assertDeploymentSigner(workspaceOwnerNpub,appNpub,signerNpub,managementWorkspaceId);
+  else assertAppSigner(appNpub, signerNpub);
   const namespace = await requireNamespace(sql, workspaceOwnerNpub, appNpub);
   if (!Array.isArray(input?.migrations) || input.migrations.length < 1) {
     throw new AppDbError('bad_migrations', 400, 'migrations must be a non-empty array');
@@ -431,7 +458,14 @@ export async function runWappDbMigrations(
     throw new AppDbError('too_many_migrations', 400, 'at most 50 migrations can be applied per request');
   }
 
-  const applied = await sql.begin(async (tx) => {
+  const applied = await sql.begin(async (transaction) => {
+    const tx = transaction as unknown as DbClient;
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${workspaceOwnerNpub + ':' + appNpub},0))`;
+    if (managementWorkspaceId) {
+      await tx.unsafe('LOCK TABLE flightdeck_pg_workspaces,flightdeck_pg_actors,flightdeck_pg_workspace_memberships,flightdeck_pg_permission_grants,flightdeck_pg_group_memberships,flightdeck_pg_group_edges IN SHARE MODE');
+      await assertDeploymentSigner(workspaceOwnerNpub,appNpub,signerNpub,managementWorkspaceId,tx as unknown as DbClient);
+    }
+    await assertNoNativePolicy(tx as unknown as DbClient,workspaceOwnerNpub,appNpub);
     await tx.unsafe(`SET LOCAL statement_timeout = ${WAPP_DB_LIMITS.statement_timeout_ms}`);
     await tx`SELECT pg_advisory_xact_lock(hashtext(${namespace.schema_name}))`;
     await tx.unsafe(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(namespace.schema_name)}`);
@@ -574,6 +608,7 @@ export async function createWappDbTableRow(
   assertAppSigner(appNpub, signerNpub);
   const namespace = await requireNamespace(sql, workspaceOwnerNpub, appNpub);
   const table = normalizeIdentifier(tableInput, 'table');
+  await assertNoNativePolicy(sql,workspaceOwnerNpub,appNpub,table);
   const data = normalizeJsonObject(input?.data, 'data');
   const id = input?.id === undefined ? randomUUID() : String(input.id || '').trim();
   if (!id || id.length > 256 || id.includes('/')) throw new AppDbError('bad_id', 400, 'id must be 1-256 chars and cannot contain /');
@@ -583,7 +618,7 @@ export async function createWappDbTableRow(
   const placeholders = params.map((_, index) => `$${index + 1}`).join(', ');
   const query = `INSERT INTO ${quoteIdent(namespace.schema_name)}.${quoteIdent(table)} (${columns.map(quoteIdent).join(', ')}) VALUES (${placeholders}) RETURNING *`;
   try {
-    const [row] = await sql.unsafe(query, params);
+    const [row] = await sql.unsafe(query, params as any[]);
     return { workspace_owner_npub: workspaceOwnerNpub, app_npub: appNpub, schema_name: namespace.schema_name, table, row };
   } catch (error) {
     const code = typeof error === 'object' && error && 'code' in error ? String((error as any).code) : '';
@@ -604,6 +639,7 @@ export async function queryWappDbTableRows(
   assertAppSigner(appNpub, signerNpub);
   const namespace = await requireNamespace(sql, workspaceOwnerNpub, appNpub);
   const table = normalizeIdentifier(tableInput, 'table');
+  await assertNoNativePolicy(sql,workspaceOwnerNpub,appNpub,table);
   const select = Array.isArray(input?.select) && input.select.length
     ? input.select.map((field) => quoteIdent(normalizeIdentifier(field, 'field'))).join(', ')
     : '*';
@@ -625,7 +661,7 @@ export async function queryWappDbTableRows(
   const offsetParam = `$${params.length}`;
   const query = `SELECT ${select} FROM ${quoteIdent(namespace.schema_name)}.${quoteIdent(table)} ${whereClause} ${orderClause} LIMIT ${limitParam} OFFSET ${offsetParam}`;
   try {
-    const rows = await sql.unsafe(query, params);
+    const rows = await sql.unsafe(query, params as any[]);
     return { workspace_owner_npub: workspaceOwnerNpub, app_npub: appNpub, schema_name: namespace.schema_name, table, rows };
   } catch (error) {
     const code = typeof error === 'object' && error && 'code' in error ? String((error as any).code) : '';
@@ -666,6 +702,7 @@ export async function updateWappDbTableRow(
   assertAppSigner(appNpub, signerNpub);
   const namespace = await requireNamespace(sql, workspaceOwnerNpub, appNpub);
   const table = normalizeIdentifier(tableInput, 'table');
+  await assertNoNativePolicy(sql,workspaceOwnerNpub,appNpub,table);
   const id = String(idInput || '').trim();
   if (!id || id.length > 256 || id.includes('/')) throw new AppDbError('bad_id', 400, 'id must be 1-256 chars and cannot contain /');
   const set = normalizeJsonObject(input?.set, 'set');
@@ -681,7 +718,7 @@ export async function updateWappDbTableRow(
   const predicate = input.where === undefined ? '' : buildWhereClause({ where: input.where }, params).replace(/^WHERE /, ' AND ');
   const query = `UPDATE ${quoteIdent(namespace.schema_name)}.${quoteIdent(table)} SET ${assignments.join(', ')} WHERE "id" = $${idParameter}${predicate} RETURNING *`;
   try {
-    const [row] = await sql.unsafe(query, params);
+    const [row] = await sql.unsafe(query, params as any[]);
     if (!row && input.where !== undefined) throw new AppDbError('row_conflict', 409, 'conditional update did not match');
     return { workspace_owner_npub: workspaceOwnerNpub, app_npub: appNpub, schema_name: namespace.schema_name, table, row: row || null };
   } catch (error) {
@@ -702,6 +739,7 @@ export async function deleteWappDbTableRow(
   assertAppSigner(appNpub, signerNpub);
   const namespace = await requireNamespace(sql, workspaceOwnerNpub, appNpub);
   const table = normalizeIdentifier(tableInput, 'table');
+  await assertNoNativePolicy(sql,workspaceOwnerNpub,appNpub,table);
   const id = String(idInput || '').trim();
   if (!id || id.length > 256 || id.includes('/')) throw new AppDbError('bad_id', 400, 'id must be 1-256 chars and cannot contain /');
   try {
