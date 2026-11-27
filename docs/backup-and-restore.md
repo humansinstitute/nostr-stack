@@ -76,6 +76,10 @@ scripts/tower-backup.sh restore \
 The restored databases have no published ports. MinIO data is restored into
 `tower-restore-quarterly-test-minio-data`; start an isolated, unexposed MinIO
 container against it only if application-level object tests are required.
+The restore databases are created from `template0` in the new containers, so
+image init scripts (the graph image creates the Apache AGE extension) cannot
+collide with the dump, and restored AGE graphs are re-keyed to their new schema
+OIDs so Cypher reads and writes work in the clone.
 Cleanup is deliberately manual so a failed rehearsal remains inspectable.
 
 ## Operations policy

@@ -151,14 +151,40 @@ restore() {
   docker run -d --name "$graph_container" -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=restore_graph \
     -v "$graph_volume:/var/lib/postgresql/data" apache/age:release_PG16_1.6.0 >/dev/null
   local tries
+  # Readiness over TCP: the image entrypoint's temporary init server listens on the socket only.
+  # The restore databases are then recreated from template0, because image init scripts (the
+  # AGE image runs CREATE EXTENSION age) would otherwise collide with objects in the dump.
   for name in "$main_container" "$graph_container"; do
-    for tries in {1..60}; do docker exec "$name" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-    docker exec "$name" pg_isready -U postgres >/dev/null 2>&1 || die "restore target did not become ready: $name"
+    for tries in {1..90}; do docker exec "$name" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
+    docker exec "$name" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 || die "restore target did not become ready: $name"
   done
+  docker exec "$main_container" psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d postgres \
+    -c 'DROP DATABASE restore_main' -c 'CREATE DATABASE restore_main TEMPLATE template0' >/dev/null
+  docker exec "$graph_container" psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d postgres \
+    -c 'DROP DATABASE restore_graph' -c 'CREATE DATABASE restore_graph TEMPLATE template0' >/dev/null
   age --decrypt --identity "$IDENTITY" "$BACKUP/main-postgres.dump.age" \
     | docker exec -i "$main_container" pg_restore --exit-on-error --no-owner --no-acl -U postgres -d restore_main
   age --decrypt --identity "$IDENTITY" "$BACKUP/graph-postgres.dump.age" \
     | docker exec -i "$graph_container" pg_restore --exit-on-error --no-owner --no-acl -U postgres -d restore_graph
+  # Apache AGE keys each graph by its schema OID (ag_graph.graphid, ag_label.graph). pg_restore
+  # recreates the schema with a new OID, so remap the catalog in this fresh clone or every
+  # restored graph is unusable ("graph with oid N does not exist").
+  docker exec -i "$graph_container" psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d restore_graph >/dev/null <<'SQL'
+DO $$
+BEGIN
+  IF to_regclass('ag_catalog.ag_graph') IS NOT NULL THEN
+    SET LOCAL session_replication_role = replica;
+    CREATE TEMP TABLE ag_graph_remap ON COMMIT DROP AS
+      SELECT graphid AS old_id, namespace::oid AS new_id FROM ag_catalog.ag_graph WHERE graphid <> namespace::oid;
+    UPDATE ag_catalog.ag_label l SET graph = m.new_id FROM ag_graph_remap m WHERE l.graph = m.old_id;
+    UPDATE ag_catalog.ag_graph g SET graphid = m.new_id FROM ag_graph_remap m WHERE g.graphid = m.old_id;
+    IF EXISTS (SELECT 1 FROM ag_catalog.ag_label l LEFT JOIN ag_catalog.ag_graph g ON g.graphid = l.graph WHERE g.graphid IS NULL)
+      OR EXISTS (SELECT 1 FROM ag_catalog.ag_graph WHERE graphid <> namespace::oid) THEN
+      RAISE EXCEPTION 'AGE catalog remap left inconsistent graph references';
+    END IF;
+  END IF;
+END $$;
+SQL
   age --decrypt --identity "$IDENTITY" "$BACKUP/minio-data.tar.age" \
     | docker run --rm -i -v "$minio_volume:/restore" alpine:3.20 tar -C /restore -xf -
   printf 'Restored into disposable targets only:\n  %s\n  %s\n  %s\n' "$main_container" "$graph_container" "$minio_volume"
