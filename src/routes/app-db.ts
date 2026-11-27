@@ -1,4 +1,3 @@
-import { parseNativeJson } from '../services/app-db-native-json';
 import { bodyLimit } from 'hono/body-limit';
 import { getDb } from '../db';
 import { nativeRead, nativeSetAuthority, nativeStatus, nativeAuthority, nativeBatch, nativeQuery, nativeFence, registerNativePolicy } from '../services/app-db-native';
@@ -279,7 +278,7 @@ appDbRouter.post('/:workspaceOwnerNpub/apps/:appNpub/db/native-v1/:workspaceId/:
   if (auth instanceof Response) return auth;
   const {workspaceOwnerNpub,appNpub} = routeParams(c);
   const ctx = {owner:workspaceOwnerNpub,app:appNpub,workspace:c.req.param('workspaceId'),actor:auth.userNpub};
-  const body = await c.req.text().then(parseNativeJson).catch(()=>null);
+  const body = await c.req.json().catch(()=>null);
   if (!body) return c.json({code:'bad_json',error:'JSON body required'},400);
   try {
     switch(c.req.param('action')) {

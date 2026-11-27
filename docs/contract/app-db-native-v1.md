@@ -98,11 +98,10 @@ remain ISO strings, and revision is explicitly a decimal string. Query responses
 are capped at 4 MB and may be shorter than limit; follow has_more/next_after. Batch
 results/receipts cap at 8 MB; an oversized result rolls back the entire transaction.
 
-The native protocol preserves unknown JSON numeric values using Bun raw JSON
-lexemes and PostgreSQL JSONB text reads, including receipt replay; existing APIs
-keep their parsers. JSONB can normalize lexical spelling (for example exponent
-notation) while preserving numeric value. Clients must also use lossless JSON
-handling when decoding/re-encoding unknown extension values.
+Generic JSON fields use standard JSON number semantics. Applications requiring
+exact unknown numeric values must store opaque extension JSON as text (Goals does
+so); known facts remain normalized, typed columns. Clients must preserve that
+text without parsing and rounding its unknown numeric literals.
 
 An optional `NATIVE_CONSUMER_MODULE` points to an app-owned deployment module
 exporting migration(schema), policies(), and importBatch(); the opt-in consumer

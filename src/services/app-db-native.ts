@@ -1,4 +1,3 @@
-import { parseNativeJson, isNativeRawJson } from './app-db-native-json';
 import { createHash } from 'crypto';
 import { getDb } from '../db';
 import { AppDbError } from './app-db';
@@ -14,7 +13,7 @@ export function nativeIdentifier(value: string) {
 }
 function uuid(value: string) { if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(value)) fail('bad_uuid'); return value; }
 export function nativeDigest(value: unknown): string {
-  function canonical(v: any): any { if (isNativeRawJson(v)) return v; return Array.isArray(v) ? v.map(canonical) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, canonical(v[k])])) : v; }
+  function canonical(v: any): any { return Array.isArray(v) ? v.map(canonical) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, canonical(v[k])])) : v; }
   return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 }
 export async function nativeAuthority(ctx: NativeContext, channel: string | null, write: boolean, sql: Db) {
@@ -113,7 +112,7 @@ export async function nativeBatch(ctx: NativeContext, body: AppDbNativeBatch) {
       AND workspace_id=${ctx.workspace} AND operation_id=${body.operation_id}`;
     if (receipt) {
       if (receipt.actor_npub!==ctx.actor || receipt.channel_id!==body.channel_id || receipt.digest!==digest) fail('operation_conflict',409);
-      return parseNativeJson(receipt.result_text);
+      return JSON.parse(receipt.result_text);
     }
     await sql`SELECT set_config('nstack.native_write','on',true)`;
     const results = [];
@@ -147,7 +146,7 @@ export async function nativeBatch(ctx: NativeContext, body: AppDbNativeBatch) {
         rows = await sql.unsafe(`${statement} WHERE id=$1 AND workspace_id=$2 AND channel_id=$3 AND revision=$4 RETURNING (to_jsonb(target) || jsonb_build_object('revision',target.revision::text))::text AS row_json`,params);
       }
       if (rows.length!==1) fail('row_conflict',409);
-      const row = parseNativeJson(rows[0].row_json);
+      const row = JSON.parse(rows[0].row_json);
       resultBytes += Buffer.byteLength(rows[0].row_json);
       if (resultBytes>8_000_000) fail('result_too_large',413);
       results.push({ table:op.table,kind:op.kind,row });
@@ -176,7 +175,7 @@ export async function nativeQuery(ctx: NativeContext, table: string, body: AppDb
         WHERE workspace_id=$1 AND channel_id=$2 AND id COLLATE "C">$3 ORDER BY id COLLATE "C" LIMIT $4
       ) candidate
     ) bounded WHERE bytes<=4000000 ORDER BY (row->>'id') COLLATE "C"`,[ctx.workspace,body.channel_id,body.after??'',body.limit+1]);
-    const page = rows.slice(0,body.limit).map(r=>parseNativeJson(r.row_json));
+    const page = rows.slice(0,body.limit).map(r=>JSON.parse(r.row_json));
     let more = rows.length>body.limit;
     // Size-limited pages may be shorter than the requested count.
     if (!more) {
@@ -257,7 +256,7 @@ export async function nativeRead(ctx: NativeContext, body: {version:1;table:stri
     const schema=await namespace(ctx,sql),ps=await policies(ctx,sql),policy=allowedPolicy(ps,body.table);
     const [found]=await sql.unsafe(`SELECT (to_jsonb(t)||jsonb_build_object('revision',t.revision::text))::text AS row_json FROM ${schema}.${nativeIdentifier(body.table)} t WHERE workspace_id=$1 AND id=$2`,[ctx.workspace,body.id]);
     if (!found) fail('row_not_found',404);
-    found.row = parseNativeJson(found.row_json);
+    found.row = JSON.parse(found.row_json);
     await nativeAuthority(ctx,found.row.channel_id,false,sql);await managedAuthority(ctx,found.row.channel_id,policy,body.staging===true,sql);
     if (Buffer.byteLength(JSON.stringify(found.row))>4_000_000) fail('row_too_large',413);
     return {version:1,generation:ps.find(p=>p.table_name===body.table)!.generation,channel_id:found.row.channel_id,row:found.row};

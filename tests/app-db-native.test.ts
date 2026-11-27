@@ -1,4 +1,3 @@
-import { parseNativeJson } from '../src/services/app-db-native-json';
 import { beforeAll, afterAll, test, expect, describe } from 'bun:test';
 import postgres from 'postgres';
 import { readFileSync } from 'fs';
@@ -176,13 +175,11 @@ test('native signed HTTP facade binds the actual actor and returns versioned err
  }
  const existingPolicy={version:1,columns:['title','extensions','on_date','at_time'],managed_content_type:mime};
  const policy=await request('policy',{table:'records',policy:existingPolicy});expect(policy.status).toBe(200);
- const hbatch=batch(f.channel,[{kind:'insert',table:'records',id:'http-row',data:{title:'HTTP signed',on_date:'2026-11-27',at_time:'2026-11-27T03:00:00Z',extensions:parseNativeJson('{"big":9007199254740993,"decimal":0.123456789012345678901}')} }],{staging:true});
+ const hbatch=batch(f.channel,[{kind:'insert',table:'records',id:'http-row',data:{title:'HTTP signed',on_date:'2026-11-27',at_time:'2026-11-27T03:00:00Z'} }],{staging:true});
  const wrote=await request('batch',hbatch);expect(wrote.status).toBe(200);const written=(await wrote.json()).results[0].row;expect(written.id).toBe('http-row');expect(written.on_date).toBe('2026-11-27');expect(written.at_time).toStartWith('2026-11-27T03:00:00');
  const identity=await request('read',{version:1,table:'records',id:'http-row',staging:true});expect(identity.status).toBe(200);expect((await identity.json()).channel_id).toBe(f.channel);
  const read=await request('query',{version:1,table:'records',channel_id:f.channel,limit:200,staging:true});expect(read.status).toBe(200);expect((await read.json()).rows.find((r:any)=>r.id==='http-row').on_date).toBe('2026-11-27');
- const replay=await request('batch',hbatch);expect(replay.status).toBe(200);const recovered=await replay.text();expect(recovered).toContain('9007199254740993');expect(recovered).toContain('0.123456789012345678901');
- const preciseQuery=await request('query',{version:1,table:'records',channel_id:f.channel,limit:200,staging:true});const precisePage=await preciseQuery.text();expect(precisePage).toContain('9007199254740993');expect(precisePage).toContain('0.123456789012345678901');
- const precise=await request('read',{version:1,table:'records',id:'http-row',staging:true});const preciseText=await precise.text();expect(preciseText).toContain('9007199254740993');expect(preciseText).toContain('0.123456789012345678901');
+ const replay=await request('batch',hbatch);expect(replay.status).toBe(200);
  const status=await request('status',{channel_id:f.channel,content_type:mime});expect(status.status).toBe(200);expect((await status.json()).version).toBe(1);
  const denied=await request('query',{version:1,table:'records',channel_id:f.channel,limit:10},f.label+'member');expect(denied.status).toBe(403);expect((await denied.json()).code).toBe('permission_denied');
  const deployment=await request('deployment',{});expect(deployment.status).toBe(200);expect((await deployment.json()).descriptor.schema_name).toBe(f.schema);
@@ -200,13 +197,13 @@ test.skipIf(!process.env.NATIVE_CONSUMER_MODULE)('app-owned consumer DDL and com
  expect(columns.length).toBeGreaterThan(30);
  const consumer=await import(process.env.NATIVE_CONSUMER_MODULE!);
  const {normalize,digest}=await import(new URL('./model.mjs','file://'+process.env.NATIVE_CONSUMER_MODULE).href);
- const bytes=Buffer.from(JSON.stringify({schema:'ambulando.goal',schema_version:1,name:'Dated fixture',description:'Round trip',status:'active',start_date:'2026-11-27',target_date:'2027-01-01',checkpoints:[{id:'checkpoint-string',title:'First',reached:false,date:'2026-12-01'}],links:[]}));
+ const bytes=Buffer.from(JSON.stringify({schema:'ambulando.goal',schema_version:1,name:'Dated fixture',description:'Round trip',status:'active',start_date:'2026-11-27',target_date:'2027-01-01',checkpoints:[{id:'checkpoint-string',title:'First',reached:false,date:'2026-12-01'}],links:[],future:'__precise__'}).replace('"__precise__"','9007199254740993'));
  const id=randomUUID(),version=randomUUID(),contentType='application/vnd.ambulando.goal+json';
  const normalized=normalize(bytes,{workspace_id:f.ctx.workspace,channel_id:f.channel,owner_npub:f.ctx.owner,file_id:id,version_id:version,file_revision:'1',sha256:digest(bytes),size_bytes:bytes.length});
  await nativeSetAuthority(f.ctx,{channel_id:f.channel,content_type:contentType,mode:'staging',expected_revision:0});
  const response=await signedRequest(f,'batch',consumer.importBatch(normalized,{timestamp:'2026-11-27T03:00:00Z',actor:f.ctx.actor}));
  const imported=await response.json();expect(response.status,JSON.stringify(imported)).toBe(200);
- const read=await signedRequest(f,'read',{version:1,table:'goals',id,staging:true});const resolved=await read.json();expect(read.status,JSON.stringify(resolved)).toBe(200);expect(resolved.row.start_date).toBe('2026-11-27');expect(resolved.row.target_date).toBe('2027-01-01');
+ const read=await signedRequest(f,'read',{version:1,table:'goals',id,staging:true});const resolved=await read.json();expect(read.status,JSON.stringify(resolved)).toBe(200);expect(resolved.row.start_date).toBe('2026-11-27');expect(resolved.row.target_date).toBe('2027-01-01');expect(resolved.row.extensions).toContain('9007199254740993');
 
 });
 
