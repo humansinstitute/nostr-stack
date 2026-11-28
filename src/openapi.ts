@@ -5057,7 +5057,7 @@ export function buildOpenApiDocument(origin: string) {
         { post: {
           tags: ['Billing'], summary: operation === 'preview' ? 'Preview reversible console archive or restore' : 'Apply reversible console visibility preference',
           description: 'Owner-address management authority required independently of typed workspace membership. No registration, enabled flag, data, grants or runtime authority is changed. Current active publishers are protected from archive. Unknown stores are retained; permanent deletion is unavailable. Preview writes nothing and expires after five minutes or process restart. Apply requires the exact signed preview and confirmation, revalidates measured metadata and live references under locks, and returns durable exact-request retry receipts. Receipt replay reports the original outcome, not necessarily current visibility after later operations.',
-          security: [{ NostrAuth: [] }],
+          security: [{ nip98: [] }],
           parameters: ['workspaceOwnerNpub', 'appNpub'].map(name => ({ name, in: 'path', required: true, schema: { type: 'string' } })),
           requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: operation === 'preview' ? ['action'] : ['action', 'preview_token', 'confirmation'], properties: { action: { type: 'string', enum: ['archive', 'restore'] }, preview_token: { type: 'string' }, confirmation: { type: 'string', description: 'Exact uppercase action plus last eight app-identity characters returned by preview' } } } } } },
           responses: { '200': { description: operation === 'preview' ? 'Exact target, entry metadata, retained impact, allowed/blocked_reason, confirmation, preview_token and expiry' : 'Original archive/restore outcome, archive_revision and replayed flag; all data retained' }, '400': { description: 'Invalid action, target, token or exact confirmation' }, '401': { description: 'Invalid authentication' }, '403': { description: 'Owner-address management required' }, '404': { description: 'Registration not found' }, '409': { description: 'Stale, invalid, expired or process-invalidated preview; active publisher protected; concurrent change/lock timeout. Request a new preview.' }, '503': { description: 'Collector unavailable; no emptiness assumption or partial visibility mutation' } },
@@ -10223,6 +10223,22 @@ export function buildOpenApiDocument(origin: string) {
           responses: {
             '200': { description: 'Upload stored' },
             '404': { description: 'Object not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+          },
+        },
+      },
+      '/api/v4/storage/{objectId}/upload-url': {
+        post: {
+          summary: 'Refresh an unfinished object upload URL without allocating another object',
+          description: 'NIP-98 original uploader plus current workspace/group and linked-resource ACL required. Registered app objects are refused. Completed objects return upload_url:null and size/checksum/completed_at for reuse. Unfinished objects retain billing gates. URL is short-lived and is never a durable recovery identity.',
+          tags: ['Storage'],
+          security: [{ nip98: [] }],
+          parameters: [{ name: 'objectId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+          responses: {
+            '200': { description: 'Same object_id, upload_url (null if completed), completed_at, size_bytes and sha256_hex; no-store' },
+            '401': { description: 'Authentication required' },
+            '402': { description: 'Storage writes blocked by billing' },
+            '404': { description: 'Missing object or uploader/current ACL denied' },
+            '409': { description: 'Lifecycle changed during refresh' },
           },
         },
       },

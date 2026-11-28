@@ -121,6 +121,10 @@ beforeAll(async () => {
     await sql.unsafe(stmt);
   }
 
+  const { hostingStoragePeakV1Sql } = await import('../src/schema/hosting-storage-peak-v1');
+  await sql.unsafe(hostingStoragePeakV1Sql);
+  await sql.unsafe(readFileSync(join(__dirname, '../src/schema/app-db-native-v1.sql'), 'utf8'));
+
   // Set up workspace, group, and membership for tests
   await sql`
     INSERT INTO v4_groups (id, owner_npub, name, group_npub, group_kind)
@@ -152,6 +156,102 @@ afterAll(async () => {
 });
 
 describe('Storage API', () => {
+  test('same-object refresh requires uploader and current ACL; completed objects have no upload handle', async () => {
+    const [object] = await sql`
+      INSERT INTO v4_storage_objects (owner_npub, created_by_npub, storage_path, content_type, access_group_ids, owner_group_id)
+      VALUES (${WORKSPACE_NPUB}, ${MEMBER}, 'refresh-same-object', 'text/plain', ${[GROUP_ID]}, ${GROUP_ID}) RETURNING *
+    `;
+    const path = `/api/v4/storage/${object.id}/upload-url`;
+    const refresh = (secret: Uint8Array) => app.request(path, { method: 'POST',
+      headers: { Authorization: authHeader(path, 'POST', secret, '{}'), 'content-type': 'application/json' }, body: '{}' });
+    expect((await app.request(path, { method: 'POST' })).status).toBe(401);
+    expect((await refresh(outsiderSecret)).status).toBe(404);
+    expect((await refresh(ownerSecret)).status).toBe(404); // readable is not upload authority
+    const first = await refresh(memberSecret);
+    expect(first.status).toBe(200);
+    expect(first.headers.get('cache-control')).toBe('no-store');
+    const descriptor = await first.json();
+    expect(descriptor.object_id).toBe(object.id);
+    expect(descriptor.upload_url).toBeTruthy();
+    const [unchanged] = await sql`SELECT * FROM v4_storage_objects WHERE id=${object.id}`;
+    expect(unchanged).toEqual(object);
+    await sql`DELETE FROM v4_group_members WHERE group_id=${GROUP_ID} AND member_npub=${MEMBER}`;
+    expect((await refresh(memberSecret)).status).toBe(404);
+    await sql`INSERT INTO v4_group_members(group_id,member_npub) VALUES (${GROUP_ID},${MEMBER})`;
+    await sql`UPDATE v4_storage_objects SET completed_at=NOW(), size_bytes=3, sha256_hex=${'a'.repeat(64)} WHERE id=${object.id}`;
+    const completed = await refresh(memberSecret);
+    expect(completed.status).toBe(200);
+    expect(completed.headers.get('cache-control')).toBe('no-store');
+    const reused = await completed.json();
+    expect(reused.object_id).toBe(object.id);
+    expect(reused.completed_at).toBeTruthy();
+    expect(reused.upload_url).toBeNull();
+    expect(reused.size_bytes).toBe('3');
+    await sql`UPDATE v4_storage_objects SET registered_app_npub=${MEMBER}, owner_group_id=NULL, access_group_ids='{}' WHERE id=${object.id}`;
+    expect((await refresh(memberSecret)).status).toBe(404);
+  });
+
+  test('refresh presigns the existing key with bounded expiry and never allocates', async () => {
+    const { config } = await import('../src/config');
+    const previous = config.storage.s3PublicEndpoint;
+    config.storage.s3PublicEndpoint = 'https://storage.fixture.invalid';
+    try {
+      const [object] = await sql`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,storage_path,content_type)
+        VALUES(${WORKSPACE_NPUB},${MEMBER},'private/existing-key','text/plain') RETURNING id`;
+      const [before] = await sql`SELECT count(*) AS count FROM v4_storage_objects`;
+      const path = `/api/v4/storage/${object.id}/upload-url`;
+      const result = await app.request(path, { method:'POST', headers:{ Authorization:authHeader(path,'POST',memberSecret,'{}'), 'content-type':'application/json' }, body:'{}' });
+      expect(result.status).toBe(200);
+      const descriptor = await result.json();
+      expect(descriptor.object_id).toBe(object.id);
+      const url = new URL(descriptor.upload_url);
+      expect(url.origin).toBe('https://storage.fixture.invalid');
+      expect(url.pathname.endsWith('/private/existing-key')).toBe(true);
+      expect(url.searchParams.has('X-Amz-Signature')).toBe(true);
+      expect(Number(url.searchParams.get('X-Amz-Expires'))).toBe(Math.max(60,config.storage.presignUploadTtlSeconds));
+      const [after] = await sql`SELECT count(*) AS count FROM v4_storage_objects`;
+      expect(after.count).toBe(before.count);
+    } finally { config.storage.s3PublicEndpoint = previous; }
+  });
+
+  test('workspace-bound refresh loses authority when uploader membership is revoked', async () => {
+    const [actor] = await sql`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${MEMBER},'human') RETURNING id`;
+    const [workspace] = await sql`INSERT INTO flightdeck_pg_workspaces(tower_service_npub,workspace_service_npub,workspace_owner_npub,app_npub,name,created_by_actor_id)
+      VALUES('refresh-tower','refresh-service',${MEMBER},'refresh-app','Refresh fixture',${actor.id}) RETURNING id`;
+    await sql`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspace.id},${actor.id},'owner') ON CONFLICT DO NOTHING`;
+    const [object] = await sql`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,storage_path,content_type,pg_workspace_id)
+      VALUES(${MEMBER},${MEMBER},'refresh-workspace-bound','text/plain',${workspace.id}) RETURNING id`;
+    const path = `/api/v4/storage/${object.id}/upload-url`;
+    const refresh = () => app.request(path, { method:'POST', headers:{ Authorization:authHeader(path,'POST',memberSecret,'{}'), 'content-type':'application/json' }, body:'{}' });
+    expect((await refresh()).status).toBe(200);
+    await sql`DELETE FROM flightdeck_pg_workspace_memberships WHERE workspace_id=${workspace.id} AND actor_id=${actor.id}`;
+    expect((await refresh()).status).toBe(404);
+  });
+
+  test('native content fence denies refresh of generic objects without registered_app_npub', async () => {
+    const [actor] = await sql`INSERT INTO flightdeck_pg_actors(npub,kind) VALUES(${OWNER},'human') RETURNING id`;
+    const [workspace] = await sql`INSERT INTO flightdeck_pg_workspaces(tower_service_npub,workspace_service_npub,workspace_owner_npub,app_npub,name,created_by_actor_id)
+      VALUES('fence-tower','fence-service',${OWNER},'fence-app','Fence fixture',${actor.id}) RETURNING id`;
+    await sql`INSERT INTO flightdeck_pg_workspace_memberships(workspace_id,actor_id,role) VALUES(${workspace.id},${actor.id},'owner') ON CONFLICT DO NOTHING`;
+    const [scope] = await sql`INSERT INTO flightdeck_pg_scopes(workspace_id,name,kind,created_by_actor_id) VALUES(${workspace.id},'Scope','project',${actor.id}) RETURNING id`;
+    const [channel] = await sql`INSERT INTO flightdeck_pg_channels(workspace_id,scope_id,name,kind,created_by_actor_id) VALUES(${workspace.id},${scope.id},'Channel','channel',${actor.id}) RETURNING id`;
+    const [object] = await sql`INSERT INTO v4_storage_objects(owner_npub,created_by_npub,storage_path,content_type,pg_workspace_id)
+      VALUES(${OWNER},${OWNER},'fenced-generic-object','application/x-fixture-record',${workspace.id}) RETURNING *`;
+    const path = `/api/v4/storage/${object.id}/upload-url`;
+    const refresh = () => app.request(path, { method:'POST', headers:{ Authorization:authHeader(path,'POST',ownerSecret,'{}'), 'content-type':'application/json' }, body:'{}' });
+    expect((await refresh()).status).toBe(200);
+    await sql`INSERT INTO flightdeck_pg_files(workspace_id,scope_id,channel_id,storage_object_id,created_by_actor_id,updated_by_actor_id)
+      VALUES(${workspace.id},${scope.id},${channel.id},${object.id},${actor.id},${actor.id})`;
+    await sql`INSERT INTO app_db_content_fences(workspace_id,channel_id,content_type) VALUES(${workspace.id},${channel.id},${object.content_type})`;
+    const { isStorageContentFenced } = await import('../src/services/storage');
+    expect(await isStorageContentFenced(object.id)).toBe(true);
+    const denied = await refresh();
+    expect(denied.status).toBe(404);
+    expect((await denied.json()).upload_url).toBeUndefined();
+    const [unchanged] = await sql`SELECT * FROM v4_storage_objects WHERE id=${object.id}`;
+    expect(unchanged).toEqual(object);
+  });
+
   test('private download handles stay on the authenticated Tower route', async () => {
     const [object] = await sql`
       INSERT INTO v4_storage_objects (owner_npub, created_by_npub, storage_path, content_type, is_public, completed_at)

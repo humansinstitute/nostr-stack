@@ -2390,6 +2390,15 @@ export interface PrepareStorageInput {
   file_name?: string | null;
 }
 
+/** Same-object upload recovery. Completed objects return integrity metadata and no write URL. */
+export interface StorageUploadDescriptor {
+  object_id: string;
+  upload_url: string | null;
+  completed_at: string | null;
+  size_bytes: number | string;
+  sha256_hex: string | null;
+}
+
 export interface CompleteStorageInput {
   sha256_hex?: string | null;
   size_bytes?: number | null;

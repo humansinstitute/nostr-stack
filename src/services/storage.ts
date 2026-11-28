@@ -194,6 +194,36 @@ export async function getStorageUploadUrl(objectId: string): Promise<string | nu
   });
 }
 
+/** Mirror app_db_check_fenced_object before issuing a new bearer write capability.
+ * The DB trigger alone cannot protect an S3 PUT that never updates the row.
+ */
+export async function isStorageContentFenced(objectId: string): Promise<boolean> {
+  const sql = getDb();
+  const [schema] = await sql`SELECT to_regclass('public.app_db_content_fences') IS NOT NULL AS present`;
+  if (!schema?.present) return false; // Legacy databases have no native-app fence contract.
+  const [fence] = await sql`SELECT EXISTS (
+    SELECT 1 FROM app_db_content_fences fence
+    JOIN flightdeck_pg_files f ON f.workspace_id=fence.workspace_id AND f.channel_id=fence.channel_id
+    JOIN v4_storage_objects o ON o.id=${objectId} AND o.content_type=fence.content_type
+    WHERE fence.active AND (f.storage_object_id=o.id OR EXISTS (
+      SELECT 1 FROM flightdeck_pg_file_versions v WHERE v.workspace_id=f.workspace_id AND v.file_id=f.id AND v.storage_object_id=o.id))
+  ) AS active`;
+  return fence?.active === true;
+}
+
+/** Refresh authority is uploader-only, in addition to current workspace/group access.
+ * Registered/managed app objects must continue through their own lifecycle API.
+ */
+export async function getStorageUploadOwner(objectId: string, authNpub: string): Promise<V4StorageObject | null> {
+  const row = await getStorageObject(objectId);
+  if (!row || row.registered_app_npub || !await hasBoundWorkspaceMembership(row, authNpub) || await isStorageContentFenced(objectId)) return null;
+  const creator = await resolveWsKeyNpub(row.created_by_npub) ?? row.created_by_npub;
+  if (creator !== authNpub) return null;
+  // Legacy group upload rights are revoked with membership, even for public bytes.
+  if (row.owner_group_id && !(await verifyUploadAuthorization(row.owner_npub, row.owner_group_id, authNpub)).authorized) return null;
+  return row;
+}
+
 export async function getStorageObject(objectId: string): Promise<V4StorageObject | null> {
   const sql = getDb();
   const [row] = await sql<V4StorageObject[]>`

@@ -1,7 +1,9 @@
 import { inlineContentDisposition } from '../content-disposition';
 import { Hono } from 'hono';
+import { config } from '../config';
 import { requireNip98AuthResolved } from '../auth';
 import { getInsufficientCreditsBlock } from '../services/billing';
+import { hostingWriteBlock } from '../services/hosting-billing';
 import {
   storageBlossomMetadata,
   completeStorageObject,
@@ -9,10 +11,12 @@ import {
   getStorageObject,
   getStorageObjectContent,
   getStorageUploadUrl,
+  getStorageUploadOwner,
+  isStorageContentFenced,
   prepareStorageObject,
   writeStorageObject,
 } from '../services/storage';
-import type { CompleteStorageInput, PrepareStorageInput } from '../types';
+import type { CompleteStorageInput, PrepareStorageInput, StorageUploadDescriptor } from '../types';
 import { resolveReadablePrivateStorageObject } from '../services/flightdeck-pg-storage-access';
 
 export const storageRouter = new Hono();
@@ -113,6 +117,40 @@ storageRouter.get('/:objectId', async (c) => {
     created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     completed_at: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
   });
+});
+
+// Additive recovery: never prepare a replacement object to renew an expired bearer URL.
+storageRouter.post('/:objectId/upload-url', async (c) => {
+  const auth = await requireNip98AuthResolved(c);
+  if (auth instanceof Response) return auth;
+  const objectId = c.req.param('objectId');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(objectId)) return c.json({ error: 'invalid objectId' }, 400);
+  const row = await getStorageUploadOwner(objectId, auth.userNpub);
+  if (!row || !await resolveReadablePrivateStorageObject(objectId, auth.userNpub)) {
+    return c.json({ error: 'storage object not found or not writable by this npub' }, 404);
+  }
+  const origin = new URL(c.req.url).origin;
+  let uploadUrl: string | null = null;
+  if (!row.completed_at) {
+    const block = row.pg_workspace_id ? await hostingWriteBlock(row.pg_workspace_id) : null;
+    if (block) return c.json(block, 402);
+    const creditBlock = await getInsufficientCreditsBlock(row.owner_npub);
+    if (creditBlock) return c.json(creditBlock, 402);
+    uploadUrl = await getStorageUploadUrl(objectId);
+    // A completion racing URL generation must not turn a null presign into an API PUT.
+    const current = await getStorageObject(objectId);
+    if (!current || current.registered_app_npub || await isStorageContentFenced(objectId)) return c.json({ error: 'storage lifecycle changed' }, 409);
+    if (current.completed_at) {
+      return c.json({ object_id: current.id, upload_url: null, completed_at: current.completed_at,
+        size_bytes: current.size_bytes, sha256_hex: current.sha256_hex }, 200, { 'Cache-Control': 'no-store' });
+    }
+    if (!uploadUrl && config.storage.s3PublicEndpoint) return c.json({ error: 'storage lifecycle changed' }, 409);
+    uploadUrl ||= `${origin}/api/v4/storage/${objectId}`;
+  }
+  const descriptor: StorageUploadDescriptor = { object_id: row.id, upload_url: uploadUrl,
+    completed_at: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
+    size_bytes: row.size_bytes, sha256_hex: row.sha256_hex };
+  return c.json(descriptor, 200, { 'Cache-Control': 'no-store' });
 });
 
 storageRouter.put('/:objectId', async (c) => {
