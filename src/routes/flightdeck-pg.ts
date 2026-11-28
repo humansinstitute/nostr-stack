@@ -77,6 +77,7 @@ import {
 } from '../services/app-db';
 import {
   authorizeFlightDeckPgOperation,
+  listFlightDeckPgActorsWithWorkspacePermission,
   createFlightDeckPgNestedGroupEdge,
   getFlightDeckPgWorkspaceMembership,
   resolveFlightDeckPgActorByNpub,
@@ -4334,10 +4335,19 @@ flightDeckPgRouter.get('/workspaces/:workspaceId/members', async (c) => {
   });
 
   const members = await listFlightDeckPgWorkspaceMembers(context.workspace.id);
+  // Current effective workspace.manage per listed actor, from the same grant engine; a boolean
+  // only, never roles, groups or grants. Not a historical write-time attestation.
+  const managerIds = await listFlightDeckPgActorsWithWorkspacePermission({
+    workspaceId: context.workspace.id,
+    appNpub: context.workspace.app_npub,
+    permission: 'workspace.manage',
+    actorIds: members.map((member) => member.actor.id),
+  });
   return c.json({
     identity,
     members: members.map((member) => ({
       actor: serializeFlightDeckPgActor(member.actor),
+      authority: { can_manage_workspace: managerIds.has(member.actor.id) },
       ...(manageDecision.allowed
         ? { membership: serializeFlightDeckPgWorkspaceMembership(member.membership) }
         : {}),

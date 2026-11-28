@@ -5181,6 +5181,28 @@ export function buildOpenApiDocument(origin: string) {
         },
       },
       '/api/v4/flightdeck-pg/workspaces/{workspaceId}/members': {
+        get: {
+          tags: ['Flight Deck PG'], security: [{ nip98: [] }],
+          summary: 'List the workspace member directory with current effective authority',
+          description: 'Requires workspace.read. Every entry returns actor identity and authority.can_manage_workspace, a server-computed boolean of the listed actor\'s CURRENT effective workspace.manage permission from the same grant engine used for authorization (direct actor grants and nested group grants, unrevoked, current membership only). It never uses role, display name or npub, discloses no roles, groups or grants, grants no capability and is not a historical write-time attestation. membership is returned only when the caller holds workspace.manage. Older servers omit authority; clients must then treat delegated-manager provenance as unverified (fail closed) and may still recognize the verified workspace owner identity. Example entry for an ordinary reader: {"actor":{"actor_id":"…","npub":"npub1…","kind":"agent","display_name":"Ops Agent"},"authority":{"can_manage_workspace":true}}.',
+          parameters: [
+            { name: 'workspaceId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+          ],
+          responses: {
+            '200': { description: 'Workspace member directory', content: { 'application/json': { schema: { type: 'object', required: ['identity', 'members', 'next_cursor'], properties: {
+              identity: { type: 'object' },
+              members: { type: 'array', items: { type: 'object', required: ['actor', 'authority'], properties: {
+                actor: { type: 'object', required: ['actor_id', 'npub', 'kind'], properties: { actor_id: { type: 'string', format: 'uuid' }, id: { type: 'string', format: 'uuid' }, npub: { type: 'string' }, kind: { type: 'string' }, display_name: { type: ['string', 'null'] } } },
+                authority: { type: 'object', required: ['can_manage_workspace'], additionalProperties: false, properties: { can_manage_workspace: { type: 'boolean', description: 'Current effective workspace.manage of the listed actor; not historical.' } } },
+                membership: { type: 'object', description: 'Only present when the caller holds workspace.manage.' },
+              } } },
+              next_cursor: { type: ['string', 'null'] },
+            } } } } },
+            '401': { description: 'Invalid NIP-98 auth', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+            '403': { description: 'Workspace membership or workspace.read required', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+            '404': { description: 'Workspace not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+          },
+        },
         post: {
           tags: ['Flight Deck PG'],
           summary: 'Add a typed Flight Deck PG workspace member',

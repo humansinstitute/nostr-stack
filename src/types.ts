@@ -626,6 +626,19 @@ export type FlightDeckPgGroupMemberEnrollmentRequest = {
 /** Members join Workspace; content visibility still requires explicit scope/channel grants to an actor or sharing group. */
 export type FlightDeckPgWorkspaceRole = 'owner' | 'admin' | 'member' | 'guest' | 'agent' | 'app';
 
+/** Server-computed CURRENT effective authority for a listed workspace member (not a historical
+ * write-time attestation). Absent on older servers: clients must fail closed. */
+export interface FlightDeckPgMemberAuthority {
+  can_manage_workspace: boolean;
+}
+
+/** GET /api/v4/flightdeck-pg/workspaces/:workspaceId/members entry; membership only for workspace.manage callers. */
+export interface FlightDeckPgWorkspaceDirectoryEntry {
+  actor: { actor_id: string; id: string; npub: string; kind: FlightDeckPgActorKind; display_name: string | null };
+  authority: FlightDeckPgMemberAuthority;
+  membership?: { workspace_id: string; actor_id: string; role: FlightDeckPgWorkspaceRole; joined_at: string; created_at: string };
+}
+
 export interface FlightDeckPgHostedSignupRequest {
   workspace_name: string;
   idempotency_key: string;

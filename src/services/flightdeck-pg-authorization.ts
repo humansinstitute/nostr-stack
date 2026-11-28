@@ -579,6 +579,65 @@ export async function authorizeFlightDeckPgOperation(
   };
 }
 
+/** Batched authorizeFlightDeckPgOperation for one workspace-anchored permission across listed
+ * actors (one query, no per-actor fanout). Same rules: known permission definition, matching
+ * workspace app, current membership, and an unrevoked workspace-level grant held directly or via
+ * an effective (nested) group. Roles, labels and npubs are never consulted. Returns allowed ids. */
+export async function listFlightDeckPgActorsWithWorkspacePermission(
+  input: { workspaceId: string; appNpub: string; permission: FlightDeckPgPermission; actorIds: string[] },
+  sql: DbClient = getDb(),
+): Promise<Set<string>> {
+  const actorIds = [...new Set(input.actorIds)];
+  if (actorIds.length === 0) return new Set();
+  if (!isFlightDeckPgPermission(input.permission) || expectedResourceType(input.permission) !== 'workspace') {
+    throw new Error('permission must be a workspace-anchored Flight Deck PG permission');
+  }
+  const definition = await getPermissionDefinition(input.permission, sql);
+  if (!definition || definition.resource_type !== 'workspace') return new Set();
+  const workspace = await resolveFlightDeckPgWorkspace(input.workspaceId, sql);
+  if (!workspace || workspace.app_npub !== input.appNpub) return new Set();
+
+  const rows = await sql<{ actor_id: string }[]>`
+    WITH RECURSIVE candidates AS (
+      SELECT actor_id
+      FROM flightdeck_pg_workspace_memberships
+      WHERE workspace_id = ${workspace.id}
+        AND actor_id IN ${sql(actorIds)}
+    ),
+    effective_groups(actor_id, group_id) AS (
+      SELECT gm.actor_id, gm.group_id
+      FROM flightdeck_pg_group_memberships gm
+      JOIN candidates c ON c.actor_id = gm.actor_id
+      WHERE gm.workspace_id = ${workspace.id}
+      UNION
+      SELECT eg.actor_id, ge.parent_group_id
+      FROM flightdeck_pg_group_edges ge
+      JOIN effective_groups eg
+        ON eg.group_id = ge.child_group_id
+      WHERE ge.workspace_id = ${workspace.id}
+    )
+    SELECT c.actor_id
+    FROM candidates c
+    WHERE EXISTS (
+      SELECT 1
+      FROM flightdeck_pg_permission_grants g
+      WHERE g.workspace_id = ${workspace.id}
+        AND g.resource_type = 'workspace'
+        AND g.resource_scope_id IS NULL
+        AND g.resource_channel_id IS NULL
+        AND g.permission = ${input.permission}
+        AND g.revoked_at IS NULL
+        AND (
+          (g.principal_type = 'actor' AND g.principal_actor_id = c.actor_id)
+          OR (g.principal_type = 'group' AND g.principal_group_id IN (
+            SELECT eg.group_id FROM effective_groups eg WHERE eg.actor_id = c.actor_id
+          ))
+        )
+    )
+  `;
+  return new Set(rows.map((row) => row.actor_id));
+}
+
 async function groupEdgeWouldCycle(
   workspaceId: string,
   parentGroupId: string,
