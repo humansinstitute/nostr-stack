@@ -30,3 +30,5 @@ Older servers omit `authority`. Clients must then treat delegated-manager proven
 ## Acceptance
 
 `tests/workspace-member-authority.test.ts` covers: a `workspace.read`-only viewer sees actors with correct booleans and no protected fields; direct and nested-group `workspace.manage` delegations to `agent` members report `true`; `member`, privileged-looking labels, `workspace.invite`-only and grantless `admin` report `false`; revoking a grant, removing a group edge or removing membership fail closed; outsiders, foreign members, members without `workspace.read`, unknown workspaces and mismatched apps cannot enumerate authority; manager callers keep the membership shape; query parameters cannot spoof the value; every boolean matches the per-actor authorization engine.
+
+The database-backed cases run only when `MEMBER_AUTHORITY_TEST_PORT` names a disposable loopback Postgres (user/password `postgres`, never port 5432). They create and drop a `tower_test_member_authority_*` database and otherwise skip; ambient `DB_*` settings are ignored.
